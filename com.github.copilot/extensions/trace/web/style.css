@@ -181,6 +181,12 @@ input { accent-color: var(--model); margin: 0; }
 .recovery button { max-width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
 .recovery pre { max-height: min(18rem, 40vh); overscroll-behavior: contain; }
 .recovery-attempt { margin-block: 10px; border-left: 2px solid var(--line); padding-left: 10px; }
+.claim-evidence { overflow-wrap: anywhere; }
+.claim-evidence button { max-width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.claim-evidence pre { max-height: min(18rem, 40vh); overscroll-behavior: contain; }
+.claim-result { margin-block: 10px; border-left: 2px solid var(--line); padding-left: 10px; }
+.claim-result > summary { cursor: pointer; padding-block: 6px; }
+.claim-result > button { margin-block: 10px; }
 .metadata { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 14px; font-size: 0.786rem; margin: 16px 0; }
 .metadata dt { color: var(--muted); }
 .metadata dd { margin: 0; overflow-wrap: anywhere; }

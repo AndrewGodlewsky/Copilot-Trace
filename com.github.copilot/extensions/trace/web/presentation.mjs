@@ -989,6 +989,107 @@ export function recoveryAttempts(entries, options = {}, observedStages = actionS
   });
 }
 
+const validationStatements = new Map(['Tests', 'Build', 'Checks'].flatMap(subject => ['passed', 'failed']
+  .map(reported => [`${subject} ${reported}.`, { kind: subject.toLowerCase(), reported }])));
+
+function validationCommand(data) {
+  if (data?.toolName !== 'powershell' || [...mcpFields, 'origin', 'overridesBuiltInTool'].some(field => Object.hasOwn(data, field))) return null;
+  const args = data.arguments;
+  const fields = { command: argumentText, description: value => argumentText(value) && value.length <= 100,
+    timeout_ms: value => Number.isSafeInteger(value) && value > 0, mode: value => value === 'sync',
+    shellId: value => identityText(value), detach: value => value === false,
+    initial_wait: value => typeof value === 'number' && value >= 30 && value <= 600 };
+  if (!args || typeof args !== 'object' || Array.isArray(args) || !argumentText(args.command) || !fields.description(args.description)
+    || !Object.entries(args).every(([key, value]) => Object.hasOwn(fields, key) && fields[key](value))) return null;
+  const kind = new Map([['npm test', 'tests'], ['npm run build', 'build'], ['npm run check', 'checks']]).get(args.command)
+    || (/^node --test(?: [A-Za-z0-9_.][A-Za-z0-9_./\\-]*)?$/.test(args.command) ? 'tests' : null);
+  return kind ? { kind, command: args.command } : null;
+}
+
+function validationExit(data) {
+  const contents = data?.result?.contents;
+  if (!Array.isArray(contents) || contents.length > 64 || contents.some(block => !block || typeof block !== 'object'
+    || Array.isArray(block) || !identityText(block.type))) return null;
+  const exits = contents.filter(block => block.type === 'shell_exit'), shell = exits[0];
+  if (exits.length !== 1 || !identityText(shell.shellId) || !Number.isSafeInteger(shell.exitCode)
+    || (shell.outputTruncated !== undefined && typeof shell.outputTruncated !== 'boolean')
+    || (shell.outputPreview !== undefined && typeof shell.outputPreview !== 'string')
+    || (shell.cwd !== undefined && typeof shell.cwd !== 'string')
+    || (data.shellExecution !== undefined && (!data.shellExecution || !Number.isSafeInteger(data.shellExecution.exitCode)
+      || data.shellExecution.exitCode !== shell.exitCode))) return null;
+  return shell;
+}
+
+// These literal requests describe scope only; neither a tool name nor exit zero verifies a suite.
+export function validationChecks(entries) {
+  const counts = new Map(), positions = new Map(entries.map((entry, index) => [entry, index]));
+  for (const entry of entries) counts.set(entry.id, (counts.get(entry.id) || 0) + 1);
+  const checks = [];
+  for (const { boundaries, start } of toolBuckets(entries)) {
+    const starts = boundaries.filter(entry => entry.type === 'tool.execution_start');
+    const ends = boundaries.filter(entry => entry.type === 'tool.execution_complete'), result = ends[0];
+    if (starts.length !== 1 || ends.length !== 1 || positions.get(start) >= positions.get(result)
+      || boundaries.some(entry => counts.get(entry.id) !== 1 || !identityText(entry.id) || !identityText(entry.toolCallId)
+        || typeof entry.truncated !== 'boolean' || !(entry.agentId === '' || identityText(entry.agentId)))) continue;
+    const data = explanationData(start), end = explanationData(result), request = validationCommand(data);
+    if (!request || data.toolCallId !== start.toolCallId || data.toolName !== start.toolName
+      || (!result.truncated && (!end || end.toolCallId !== result.toolCallId || typeof end.success !== 'boolean'
+        || end.success !== result.success || (end.toolName !== undefined && end.toolName !== data.toolName)))
+      || (end && [...mcpFields, 'origin', 'overridesBuiltInTool'].some(field => Object.hasOwn(end, field)))
+      || (result.toolName !== '' && result.toolName !== data.toolName)) continue;
+    const shell = validationExit(end), output = typeof end?.result?.content === 'string' ? end.result.content : null;
+    checks.push({ id: result.id, source: start.agentId, ...request, start, result, output,
+      exitCode: shell?.exitCode ?? null, toolSuccess: typeof end?.success === 'boolean' ? end.success : null,
+      notes: ['Literal command scope only; package scripts, selected suites, assertion counts and suite coverage are not inspected. Provider / implementation origin remains unknown.',
+        'Tool success describes the tool protocol. A typed process exit describes this command only; exit zero does not prove tests or the whole task correct. Output text is not authoritative assertion counts.',
+        'Only result.content is displayed literally. Complete capture of process output is unknown, even when no shortening flag is present.',
+        ...(shell?.outputTruncated === true || retainedHostOutput(result) ? ['Host-shortened output: the recorded shell preview is incomplete.'] : []),
+        ...(result.truncated ? ['Trace clipped the raw result; literal output and process status are unavailable.'] : []),
+        ...(!shell ? ['Process exit unknown: a unique valid typed shell_exit is absent, malformed or conflicts with another recorded status.'] : [])] });
+  }
+  return checks;
+}
+
+export function validationClaims(entries, { history = 'ready', omitted = 0 } = {}) {
+  const checks = validationChecks(entries), counts = new Map();
+  for (const entry of entries) counts.set(entry.id, (counts.get(entry.id) || 0) + 1);
+  return entries.flatMap(entry => {
+    if (entry.type !== 'assistant.message' || counts.get(entry.id) !== 1 || !identityText(entry.id)
+      || !(entry.agentId === '' || identityText(entry.agentId))) return [];
+    const data = explanationData(entry), statement = data?.content, rule = validationStatements.get(statement);
+    if (!rule || Object.hasOwn(data, 'chunkCount') || Object.hasOwn(data, 'chunkIndex')) return [];
+    const candidates = checks.filter(check => check.source === entry.agentId && check.kind === rule.kind);
+    return [{ id: entry.id, entry, statement, source: entry.agentId, ...rule, candidates: candidates.slice(0, 3),
+      omittedCandidates: Math.max(0, candidates.length - 3),
+      notes: ['Recognition rule: the entire assistant message exactly equals Tests, Build or Checks followed by passed. or failed. Case, spacing and punctuation are literal.',
+        'Candidate results are not supporting links. Same recorded source and command category only; first three in recorded order. No proximity, name, citation or chronological parent establishes support.',
+        'Link a result only if you recognize it as the intended evidence. A user-linked result is not verification of the statement.',
+        'A result missing from retained history is not proof that no check ran.',
+        ...(history !== 'ready' ? ['Earlier history is unavailable or still loading.'] : []), ...(omitted ? ['Older events were omitted.'] : [])] }];
+  });
+}
+
+function sameValidationEntry(entries, expected) {
+  if (!expected) return false;
+  const matches = entries.filter(entry => entry.id === expected.id);
+  return matches.length === 1 && JSON.stringify(matches[0]) === JSON.stringify(expected);
+}
+
+export function retainedValidationLink(entries, link) {
+  if (!link || ![link.claim, link.start, link.result].every(entry => sameValidationEntry(entries, entry))) return false;
+  const claim = validationClaims([link.claim])[0];
+  const boundaries = entries.filter(entry => entry.agentId === link.start.agentId && entry.toolCallId === link.start.toolCallId);
+  return Boolean(claim && validationChecks(boundaries).some(check => check.start.id === link.start.id && check.id === link.result.id
+    && check.source === claim.source && check.kind === claim.kind));
+}
+
+export function linkValidationClaim(entries, claim, check) {
+  const freeze = entry => Object.freeze({ ...entry, ...(entry.hostOutput ? { hostOutput: Object.freeze({ ...entry.hostOutput }) } : {}) });
+  if (!claim?.entry || !check?.start || !check?.result) return null;
+  const link = { claim: claim.entry, start: check.start, result: check.result };
+  return retainedValidationLink(entries, link) ? Object.freeze(Object.fromEntries(Object.entries(link).map(([key, entry]) => [key, freeze(entry)]))) : null;
+}
+
 const retrievalNames = new Set(['view', 'grep', 'glob', 'web_fetch']);
 
 function requestedExtent(data) {

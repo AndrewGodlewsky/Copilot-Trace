@@ -131,8 +131,11 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   document.querySelector = selector => selectors.get(selector);
   document.getElementById = id => selectors.get(`#${id}`);
   document.querySelectorAll = selector => document.body.querySelectorAll(selector);
-  const context = vm.createContext({ ...presentation, document, window: { addEventListener() {} },
-    ResizeObserver: class { observe() {} }, createDiagnostics: () => ({ record() {} }),
+  const windowEvents = new Map();
+  const context = vm.createContext({ ...presentation, document, window: { addEventListener(name, listener) {
+    if (!windowEvents.has(name)) windowEvents.set(name, []); windowEvents.get(name).push(listener);
+  } },
+    ResizeObserver: class { observe() {} disconnect() {} }, createDiagnostics: () => ({ record() {} }),
     createFollow,
     initCapabilities: options => capabilities.initCapabilities({ ...options, document, load: inventoryLoad }),
     initInstructionSources: options => instructions.initInstructionSources({ ...options, document, load: instructionLoad }),
@@ -142,6 +145,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   });
   vm.runInContext(source.replace(/^import .*;\r?\n/gm, ''), context);
   return { document, get: selector => selectors.get(selector),
+    closePage() { for (const listener of windowEvents.get('pagehide') || []) listener(); },
     refreshFeed() { return vm.runInContext('poller.refresh();', context); },
     refreshCapabilities() { return vm.runInContext('capabilityView.refresh();', context); },
     closeCapabilities() { vm.runInContext('capabilityView.close();', context); },
@@ -1017,6 +1021,93 @@ async function recoveryFixture(count = 1, result = 'Exact later <script>日🧪<
   const trace = createTrace({ on() { return () => {}; }, getEvents: async () => raw });
   await trace.ready; const entries = trace.snapshot().entries; trace.close(); return entries;
 }
+
+async function claimFixture({ count = 1, output = 'PASS <script>日🧪</script>\n', statement = 'Tests passed.', exitCode = 1 } = {}) {
+  const raw = Array.from({ length: count }, (_, index) => [
+    { id: `validation-${index}-start`, type: 'tool.execution_start', data: { toolCallId: `validation-${index}`, toolName: 'powershell',
+      arguments: { command: `node --test suite-${index}.test.mjs`, description: 'Run validation' } } },
+    { id: `validation-${index}-end`, type: 'tool.execution_complete', data: { toolCallId: `validation-${index}`, success: true,
+      result: { content: output, contents: [{ type: 'shell_exit', shellId: '0', exitCode }] } } },
+  ]).flat();
+  raw.push({ id: 'validation-claim', type: 'assistant.message', data: { content: statement, messageId: 'message' } });
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => raw.map(entry => ({ timestamp: '2026-11-20T12:00:00Z', ...entry })) });
+  await trace.ready; const entries = trace.snapshot().entries; trace.close(); return entries;
+}
+
+test('claim disclosure keeps candidates literal and separate until the user links a result, with neutral conflicting exit', async () => {
+  const entries = await claimFixture({ count: 6 }), ui = fixture(appSource); ui.render(entries);
+  const section = byClass(ui.get('#timeline'), 'claim-evidence'); assert.ok(section); assert.equal(section.open, false);
+  assert.equal(byClass(section, 'claim-statement').textContent, 'Tests passed.');
+  assert.match(byClass(section, 'claim-status').textContent, /Candidate evidence.*No supporting result linked/);
+  assert.equal(section.querySelectorAll('.claim-result').length, 3); assert.match(section.textContent, /3 additional.*not shown/);
+  const candidate = section.querySelectorAll('.claim-result')[1];
+  assert.match(candidate.textContent, /node --test suite-1.test.mjs/);
+  assert.equal(byClass(candidate, 'claim-output').textContent, 'PASS <script>日🧪</script>\n');
+  assert.match(candidate.textContent, /Tool protocol.*success.*Process exit.*1/s);
+  const select = candidate.querySelectorAll('button').find(button => button.textContent === 'Link this result');
+  reveal(select); select.focus(); ui.document.scrollingElement.scrollTop = 230; select.dispatch('click');
+  assert.match(byClass(section, 'claim-status').textContent, /User-linked.*not verified/i);
+  assert.match(candidate.querySelector('summary').textContent, /User-linked/);
+  assert.match(candidate.textContent, /reports passed.*nonzero exit.*No automatic verdict/i);
+  assert.equal(ui.document.activeElement, select); assert.equal(ui.document.scrollingElement.scrollTop, 230); assert.equal(ui.get('#follow').checked, false);
+  assert.equal(walk(section).some(node => ['script', 'img', 'a'].includes(node.tagName)), false);
+  assert.deepEqual(visibleEvidence(ui), entries.map(entry => entry.evidence));
+  select.dispatch('click'); assert.match(byClass(section, 'claim-status').textContent, /No supporting result linked/);
+});
+
+test('linked claim survives live refresh, views and filters with focus and scroll, but expires on exact evidence replacement or eviction', async () => {
+  const entries = await claimFixture({ output: '日'.repeat(4000), exitCode: 0 }), ui = fixture(appSource); ui.render(entries);
+  const section = byClass(ui.get('#timeline'), 'claim-evidence'), candidate = section.querySelector('.claim-result');
+  const select = candidate.querySelectorAll('button').find(button => button.textContent === 'Link this result');
+  reveal(select); section.open = true; section.dispatch('toggle'); candidate.open = true; select.dispatch('click');
+  const body = byClass(candidate, 'claim-output'); body.focus(); body.scrollTop = 71; ui.document.scrollingElement.scrollTop = 247;
+  for (const mode of ['chronological', 'chapters', 'lanes', 'grouped']) {
+    ui.render([...entries, { ...boundary(`extra-${mode}`, 'start'), evidence: '{}' }]);
+    ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change');
+    assert.equal(byClass(ui.get('#timeline'), 'claim-evidence'), section); assert.equal(section.open, true); assert.equal(candidate.open, true);
+    assert.equal(ui.document.activeElement, body); assert.equal(body.scrollTop, 71); assert.equal(ui.document.scrollingElement.scrollTop, 247);
+    assert.match(byClass(section, 'claim-status').textContent, /User-linked/); assert.equal(ui.get('#follow').checked, false);
+  }
+  const original = candidate.querySelectorAll('button').find(button => button.textContent.startsWith('Original result'));
+  filterMode(ui, 'automation'); original.dispatch('click');
+  assert.equal(ui.get('#activity-filter').value, 'everything'); assert.equal(ui.get('#event-order').value, 'chronological');
+  ui.render(await claimFixture({ output: 'Changed same-ID result', exitCode: 0 }));
+  assert.match(byClass(section, 'claim-status').textContent, /link expired.*changed|link expired.*retained/i);
+  ui.document.scrollingElement.scrollTop = 333; ui.get('#follow').checked = true; select.dispatch('click'); original.dispatch('click');
+  assert.match(ui.get('#navigation-status').textContent, /no longer retained/);
+  assert.equal(ui.document.scrollingElement.scrollTop, 333); assert.equal(ui.get('#follow').checked, true);
+  ui.render(entries.slice(2), { omitted: 2, history: 'unavailable' });
+  assert.match(section.textContent, /Supporting result not found in this view/); assert.match(section.textContent, /not proof that no check ran/);
+  assert.equal(section.querySelectorAll('.claim-result').length, 0);
+  ui.render([], { omitted: 3 }); assert.equal(section.isConnected, false); assert.equal(ui.document.activeElement.isConnected, true);
+});
+
+test('claim replacement, ambiguous identities and panel close release links and candidate controls', async () => {
+  const entries = await claimFixture(), ui = fixture(appSource); ui.render(entries);
+  let section = byClass(ui.get('#timeline'), 'claim-evidence');
+  const select = section.querySelectorAll('button').find(button => button.textContent === 'Link this result');
+  select.dispatch('click');
+  ui.render(await claimFixture({ statement: 'Tests failed.' }));
+  assert.equal(section.isConnected, false); section = byClass(ui.get('#timeline'), 'claim-evidence');
+  assert.match(byClass(section, 'claim-status').textContent, /No supporting result linked/);
+  ui.render([...entries, entries[2]]); assert.equal(section.isConnected, false);
+  ui.render(entries); section = byClass(ui.get('#timeline'), 'claim-evidence');
+  ui.closePage(); assert.equal(section.isConnected, false);
+  select.dispatch('click'); assert.equal(byClass(ui.get('#timeline'), 'claim-evidence'), undefined);
+});
+
+test('an explicitly linked result stays visible when earlier history expands beyond the candidate limit', async () => {
+  const entries = await claimFixture({ count: 4, exitCode: 0 }), ui = fixture(appSource); ui.render(entries.slice(6));
+  const section = byClass(ui.get('#timeline'), 'claim-evidence');
+  section.querySelectorAll('button').find(button => button.textContent === 'Link this result').dispatch('click');
+  ui.render(entries);
+  assert.equal(section.querySelectorAll('.claim-result').length, 4);
+  assert.match(byClass(section, 'claim-status').textContent, /User-linked/);
+  const selected = section.querySelectorAll('.claim-result').find(row => row.querySelector('summary').textContent.startsWith('User-linked'));
+  assert.match(selected.querySelector('summary').textContent, /suite-3.test.mjs/);
+  selected.querySelectorAll('button').find(button => button.textContent === 'Remove user link').dispatch('click');
+  assert.equal(section.querySelectorAll('.claim-result').length, 3);
+});
 
 test('failure disclosure preserves literal arguments and results in a bounded optional suggestion sequence', async () => {
   const entries = await recoveryFixture(8); const ui = fixture(appSource); ui.get('#event-order').value = 'chronological'; ui.render(entries);

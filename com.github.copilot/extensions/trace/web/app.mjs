@@ -6,6 +6,7 @@ import { createFollow } from './follow.mjs';
 import { initCapabilities } from './capabilities.mjs';
 import { initInstructionSources } from './instructions.mjs';
 import { vocabulary, conceptForEntry, glossaryExample, retainedExample } from './glossary.mjs';
+import { validationClaims, validationChecks, linkValidationClaim, retainedValidationLink } from './presentation.mjs';
 
 const diagnostics = createDiagnostics();
 diagnostics.record('panel_started');
@@ -41,6 +42,8 @@ for (const [key, label] of [['turns', 'Model turns'], ['hooks', 'Hook pipelines'
 const nodes = new Map();
 const delegationViews = new Map();
 const recoveryViews = new Map();
+const claimViews = new Map();
+let claimsClosed = false;
 let groups = [];
 let chapters = [];
 let lanes = [];
@@ -664,6 +667,87 @@ function renderRecovery(node, recovery) {
   for (const [id, row] of view.attempts) if (!ids.has(id)) { row.details.remove(); view.attempts.delete(id); }
 }
 
+function renderClaim(node, claim, checks) {
+  let view = claimViews.get(claim.id);
+  if (view && JSON.stringify(view.entry) !== JSON.stringify(claim.entry)) {
+    view.details.remove(); claimViews.delete(claim.id); view = null;
+  }
+  if (!view) {
+    const details = element('details', undefined, 'claim-evidence'), statement = element('pre', claim.statement, 'claim-statement');
+    statement.tabIndex = 0; statement.setAttribute('aria-label', 'Exact assistant statement');
+    const status = element('p', '', 'claim-status'); status.setAttribute('role', 'status');
+    const rules = element('details'), notes = element('p'), count = element('p'), list = element('div');
+    rules.append(element('summary', 'Recognition, candidate rules and limits'), notes);
+    const original = element('button', 'Original assistant statement'); original.type = 'button';
+    const entry = Object.freeze({ ...claim.entry });
+    original.addEventListener('click', () => {
+      if (!claimsClosed) showBoundary(entry.id, 'Showing the exact assistant statement. Follow live is paused.', entry);
+    });
+    details.append(element('summary', 'Assistant claim and recorded results'),
+      element('p', `${describeActor(claim.entry).source} · ${claim.entry.timestamp || 'Time unavailable'}`), statement, original, status, rules, count, list);
+    for (const disclosure of [details, rules]) disclosure.addEventListener('toggle', () => { if (disclosure.open) follow.checked = false; });
+    view = { entry, details, status, notes, count, list, results: new Map(), link: null, expired: false }; claimViews.set(claim.id, view);
+  }
+  if (view.link && !retainedValidationLink(lastSnapshot.entries, view.link)) { view.link = null; view.expired = true; }
+  if (view.details.parentElement !== node.body) node.body.insertBefore(view.details, node.recordedEvidence);
+  const selected = view.link && checks.find(check => check.id === view.link.result.id);
+  const candidates = [...claim.candidates];
+  if (selected && !candidates.some(check => check.id === selected.id)) candidates.push(selected);
+  const status = (view.expired ? 'Previous user link expired because evidence changed or is no longer retained. ' : '')
+    + (selected ? 'User-linked result, not verified. Your association does not prove the statement true.'
+      : candidates.length ? 'Candidate evidence only. No supporting result linked.' : 'Supporting result not found in this view.');
+  for (const [target, text] of [[view.status, status], [view.notes, claim.notes.join(' ')],
+    [view.count, claim.omittedCandidates ? `${claim.omittedCandidates} additional candidate results are not shown (limit: 3, plus any user-linked result). Inspect their original timeline rows.` : '']]) {
+    if (target.textContent !== text) target.textContent = text;
+  }
+  const ids = new Set(); let previous;
+  for (const check of candidates) {
+    ids.add(check.id); let row = view.results.get(check.id);
+    if (row && !retainedValidationLink(lastSnapshot.entries, row.expected)) { row.details.remove(); view.results.delete(check.id); row = null; }
+    if (!row) {
+      const expected = linkValidationClaim(lastSnapshot.entries, claim, check);
+      if (!expected) continue;
+      const details = element('details', undefined, 'claim-result'), summary = element('summary'), status = element('p'), notes = element('p');
+      const output = element('pre', check.output ?? 'Literal result.content unavailable.', 'claim-output');
+      output.tabIndex = 0; output.setAttribute('aria-label', 'Exact retained validation result content');
+      const select = element('button', 'Link this result'); select.type = 'button';
+      const guard = () => {
+        if (claimsClosed || !retainedValidationLink(lastSnapshot.entries, expected)) {
+          navigationStatus.textContent = 'That exact statement or result is no longer retained. Reading position unchanged.'; return false;
+        }
+        return true;
+      };
+      select.addEventListener('click', () => {
+        if (!guard()) return;
+        view.link = view.link?.result.id === check.id ? null : expected; view.expired = false;
+        follow.checked = false; render(lastSnapshot);
+      });
+      const links = element('div', undefined, 'boundary-links'); links.setAttribute('role', 'group');
+      links.setAttribute('aria-label', 'Original validation evidence');
+      for (const [entry, label] of [[expected.start, 'Original command'], [expected.result, 'Original result']]) {
+        const button = element('button', `${label} · ${entry.timestamp || 'Time unavailable'}`); button.type = 'button';
+        button.addEventListener('click', () => { if (guard()) showBoundary(entry.id, 'Showing original validation evidence. Follow live is paused.', entry); });
+        links.append(button);
+      }
+      details.append(summary, element('p', `${describeActor(check.start).source} · ${check.result.timestamp || 'Time unavailable'}`), status, notes,
+        element('h4', 'Literal result.content'), output, select, links);
+      details.addEventListener('toggle', () => { if (details.open) follow.checked = false; });
+      row = { details, summary, status, notes, select, expected }; view.results.set(check.id, row);
+    }
+    const linked = selected?.id === check.id;
+    const disagreement = linked && ((claim.reported === 'passed' && check.exitCode !== null && check.exitCode !== 0)
+      || (claim.reported === 'failed' && check.exitCode === 0))
+      ? ` The assistant reports ${claim.reported}; this user-linked command reports ${check.exitCode === 0 ? 'exit zero' : 'a nonzero exit'}. No automatic verdict is made.` : '';
+    for (const [target, text] of [[row.summary, `${linked ? 'User-linked' : 'Candidate'} result · ${check.command}`],
+      [row.status, `Tool protocol: ${check.toolSuccess === null ? 'unknown' : check.toolSuccess ? 'reported success' : 'reported failure'}. Process exit: ${check.exitCode ?? 'unknown'}.${disagreement}`],
+      [row.notes, check.notes.join(' ')], [row.select, linked ? 'Remove user link' : 'Link this result']]) {
+      if (target.textContent !== text) target.textContent = text;
+    }
+    previous = place(view.list, row.details, previous);
+  }
+  for (const [id, row] of view.results) if (!ids.has(id)) { row.details.remove(); view.results.delete(id); }
+}
+
 function renderHookInvocation(owner, call) {
   if (!owner.hook) {
     owner.hook = element('details', undefined, 'hook-invocation');
@@ -1037,6 +1121,9 @@ function render(snapshot) {
   const provenance = toolProvenance(snapshot.entries);
   const operations = toolOperations(snapshot.entries);
   const extents = toolExtents(snapshot.entries, snapshot);
+  const claims = claimsClosed ? [] : validationClaims(snapshot.entries, snapshot), checks = claims.length ? validationChecks(snapshot.entries) : [];
+  const claimByEvent = new Map(claims.map(claim => [claim.id, claim]));
+  for (const [id, view] of claimViews) if (!claimByEvent.has(id)) { view.details.remove(); claimViews.delete(id); }
   const compactions = compactionAttempts(snapshot.entries);
   const compactionByEvent = new Map(compactions.flatMap(attempt => attempt.entries.map(entry => [entry.id, attempt])));
   const delegations = delegationHandoffs(snapshot.entries, snapshot);
@@ -1062,6 +1149,7 @@ function render(snapshot) {
     renderExtent(node, extents.get(entry.id));
     renderCompaction(node, compactionByEvent.get(entry.id));
     if (recoveryByEvent.has(entry.id)) renderRecovery(node, recoveryByEvent.get(entry.id));
+    if (claimByEvent.has(entry.id)) renderClaim(node, claimByEvent.get(entry.id), checks);
     if (delegationByEvent.has(entry.id)) renderDelegation(node, delegationByEvent.get(entry.id));
     if (node.glossary) {
       const concept = conceptForEntry(entry);
@@ -1281,6 +1369,11 @@ const poller = createPoller({
   },
 });
 const footerPanels = initFooter({ diagnostics, refresh: poller.refresh, onInspect: () => { follow.checked = false; } });
-window.addEventListener('pagehide', () => { poller.stop(); capabilityView.close(); instructionView.close(); pageSize.disconnect(); });
+window.addEventListener('pagehide', () => {
+  poller.stop(); capabilityView.close(); instructionView.close(); pageSize.disconnect();
+  claimsClosed = true;
+  for (const view of claimViews.values()) { view.link = null; view.results.clear(); view.details.remove(); }
+  claimViews.clear();
+});
 renderObserverScope();
 void poller.refresh();

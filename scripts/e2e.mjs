@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
-import { actionStages, agentLanes, compactionAttempts, delegationHandoffs, hookInvocations, retrievalLedger, skillInstructions, toolExtents, toolProvenance, summarize } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
+import { actionStages, agentLanes, compactionAttempts, delegationHandoffs, hookInvocations, linkValidationClaim, retainedValidationLink, retrievalLedger, skillInstructions, toolExtents, toolProvenance, summarize, validationChecks, validationClaims } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
 import { compareCapabilities } from '../com.github.copilot/extensions/trace/web/capabilities.mjs';
 import { instructionSources } from '../com.github.copilot/extensions/trace/web/instructions.mjs';
 
@@ -24,6 +24,7 @@ let permissionFixture;
 let provenanceFixture;
 let retrievalFixture;
 let nestedFixture;
+let validationFixture;
 const compactionSummary = 'Fixed local compaction summary. Literal café 🧪 <script>text</script>.';
 const nestedPrompt = 'Fixed nested handoff café 🧪 <script>text</script>.';
 const nestedLeafResult = 'Fixed leaf result café 🧪 <script>leaf</script>.';
@@ -68,7 +69,7 @@ const fixture = createServer(async (req, res) => {
     return;
   }
   const number = ++requests;
-  if (!allowSyntheticResponses || number > (nestedFixture ? 20 : retrievalFixture ? 14 + (retrievalFixture.allowCompaction ? 1 : 0) : provenanceFixture ? 12 : permissionFixture ? 10 : allowAgentResponses ? 7 : 3)) {
+  if (!allowSyntheticResponses || number > (validationFixture ? 22 : nestedFixture ? 20 : retrievalFixture ? 14 + (retrievalFixture.allowCompaction ? 1 : 0) : provenanceFixture ? 12 : permissionFixture ? 10 : allowAgentResponses ? 7 : 3)) {
     req.resume(); res.writeHead(500); res.end('Unexpected fixture inference request.'); return;
   }
   try {
@@ -126,6 +127,16 @@ const fixture = createServer(async (req, res) => {
         reason = 'tool_calls';
       } else message = { role: 'assistant', content: step === 3 ? nestedLeafResult
         : step === 4 ? nestedMiddleResult : 'Fixed parent response.' };
+    }
+    if (validationFixture) {
+      assert.ok(validationFixture.allowCalls && ++validationFixture.responses <= 2);
+      assert.deepEqual((body.tools ?? []).map(tool => tool.function?.name), ['powershell']);
+      if (validationFixture.responses === 1) {
+        message = { role: 'assistant', content: null, tool_calls: [{ id: validationFixture.callId, type: 'function',
+          function: { name: 'powershell', arguments: JSON.stringify({ command: validationFixture.command,
+            description: 'Run the owned failing fixture', timeout_ms: 5000 }) } }] };
+        reason = 'tool_calls';
+      } else message = { role: 'assistant', content: 'Tests passed.' };
     }
     if (number === 4) {
       assert.ok(body.tools.some(tool => tool.function?.name === 'task'));
@@ -986,8 +997,81 @@ try {
   await until(() => fetch(nestedPanel.url).then(() => false, () => true), Boolean, 'nested fixture server shutdown');
   await session.disconnect();
   assert.equal(requests, 20, 'Only the twenty expected local synthetic responses are permitted.');
+
+  // An eighth owned session separates an assistant claim, tool outcome and actual process exit.
+  nestedFixture = undefined;
+  validationFixture = { responses: 0, allowCalls: false, permissions: 0,
+    command: 'node --test validation.test.mjs', callId: 'fixture-validation-call' };
+  await writeFile(join(project, 'validation.test.mjs'), "import {test} from 'node:test'; import assert from 'node:assert/strict'; test('owned deliberately failing fixture',()=>assert.equal(1,2));\n");
+  session = await client.createSession({ workingDirectory: project, configDirectory: home,
+    availableTools: ['builtin:powershell'], requestExtensions: true, requestCanvasRenderer: true,
+    extensionSdkPath: sdkDirectory, pluginDirectories: [root], enableConfigDiscovery: false, skipCustomInstructions: true,
+    onPermissionRequest: request => {
+      assert.equal(request.kind, 'shell');
+      assert.equal(request.toolCallId, validationFixture.callId);
+      assert.equal(request.fullCommandText, validationFixture.command);
+      assert.equal(++validationFixture.permissions, 1);
+      return { kind: 'approve-once' };
+    },
+    model: 'fixture', provider: { type: 'openai', baseUrl: `http://127.0.0.1:${fixture.address().port}/v1`, apiKey: 'fixture', wireApi: 'completions' } });
+  const validationEvents = [];
+  session.on(event => validationEvents.push(event));
+  await session.rpc.tools.initializeAndValidate();
+  assert.deepEqual((await session.rpc.tools.getCurrentMetadata()).tools.map(tool => tool.name), ['powershell']);
+  await until(() => session.rpc.canvas.list(), value => value.canvases?.some(canvas => canvas.canvasId === 'trace'), 'validation canvas registration');
+  const validationPanel = await session.rpc.canvas.open({ canvasId: 'trace', instanceId: 'trace-validation-fixture', input: {} });
+  assert.equal(requests, 20, 'Opening claim inspection does not run a check or ask a model to act.');
+  validationFixture.allowCalls = true;
+  await session.sendAndWait({ prompt: 'Only the fixed local validation fixture.' }, 25000);
+  if (fixtureError) throw fixtureError;
+  assert.equal(validationFixture.responses, 2);
+  assert.equal(validationFixture.permissions, 1);
+  const validationCall = validationEvents.find(event => event.type === 'tool.execution_start' && event.data.toolCallId === validationFixture.callId);
+  const validationResult = validationEvents.find(event => event.type === 'tool.execution_complete' && event.data.toolCallId === validationFixture.callId);
+  const validationClaim = validationEvents.find(event => event.type === 'assistant.message' && event.data.content === 'Tests passed.');
+  assert.ok(validationCall && validationResult && validationClaim);
+  assert.equal(validationCall.data.arguments.command, validationFixture.command);
+  assert.equal(validationResult.data.success, true, 'Tool protocol success does not establish process or test success.');
+  const validationExit = validationResult.data.result.contents.find(item => item.type === 'shell_exit');
+  assert.equal(validationExit.exitCode, 1, 'The owned test deliberately fails despite the fixed assistant claim.');
+  const validationBoundaries = [validationCall, validationResult, validationClaim];
+  const validationSnapshot = await until(() => fetch(validationPanel.url + 'events').then(response => response.json()),
+    value => validationBoundaries.every(event => value.entries.some(entry => entry.id === event.id)), 'validation claim projection');
+  for (const raw of validationBoundaries) {
+    const projected = validationSnapshot.entries.find(entry => entry.id === raw.id);
+    assert.equal(projected.agentId, raw.agentId ?? '');
+    assert.equal(projected.timestamp, raw.timestamp);
+    assert.equal(projected.truncated, false);
+    assert.deepEqual(JSON.parse(projected.evidence).data, raw.data);
+  }
+  const observedChecks = validationChecks(validationSnapshot.entries);
+  const observedClaims = validationClaims(validationSnapshot.entries, validationSnapshot);
+  assert.equal(observedChecks.length, 1);
+  assert.equal(observedClaims.length, 1);
+  const [observedCheck] = observedChecks, [observedClaim] = observedClaims;
+  assert.equal(observedCheck.command, validationFixture.command);
+  assert.equal(observedCheck.kind, 'tests');
+  assert.equal(observedCheck.source, '');
+  assert.equal(observedCheck.start.id, validationCall.id);
+  assert.equal(observedCheck.result.id, validationResult.id);
+  assert.equal(observedCheck.output, validationResult.data.result.content);
+  assert.equal(observedCheck.exitCode, 1);
+  assert.equal(observedCheck.toolSuccess, true);
+  assert.equal(observedClaim.id, validationClaim.id);
+  assert.equal(observedClaim.statement, 'Tests passed.');
+  assert.equal(observedClaim.reported, 'passed');
+  assert.deepEqual(observedClaim.candidates.map(check => check.id), [validationResult.id]);
+  assert.equal(observedClaim.linked, undefined, 'Chronology and matching category do not automatically create a supporting link.');
+  assert.equal(observedClaim.verified, undefined, 'The fixed assistant claim does not establish verification.');
+  const explicitFixtureLink = linkValidationClaim(validationSnapshot.entries, observedClaim, observedCheck);
+  assert.equal(retainedValidationLink(validationSnapshot.entries, explicitFixtureLink), true);
+  assert.equal(retainedValidationLink(validationSnapshot.entries.filter(entry => entry.id !== validationResult.id), explicitFixtureLink), false);
+  await session.rpc.canvas.close({ instanceId: 'trace-validation-fixture' });
+  await until(() => fetch(validationPanel.url).then(() => false, () => true), Boolean, 'validation fixture server shutdown');
+  await session.disconnect();
+  assert.equal(requests, 22, 'Only the twenty-two expected local synthetic responses are permitted.');
   assert.equal(expired, false);
-  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping/nested agent handoffs and returns, approved/denied action boundaries, distinct MCP provenance, hook pipelines, historical skill instructions, read-only capability comparison, retrieval ledger, host-shortened preview, current instruction sources versus recorded loads and compaction summaries verified with twenty fixed local responses across seven disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
+  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping/nested agent handoffs and returns, approved/denied action boundaries, distinct MCP provenance, hook pipelines, historical skill instructions, read-only capability comparison, retrieval ledger, host-shortened preview, current instruction sources versus recorded loads, compaction summaries and validation claims versus process exit verified with twenty-two fixed local responses across eight disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
 } finally {
   clearTimeout(timer);
   releaseFirst();
