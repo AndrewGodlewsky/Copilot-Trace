@@ -413,6 +413,50 @@ export function describeToolGroup(entries) {
     subtitle: `${source} · ${status} · ${timing}`, tone: !conflicting && end?.success === false ? 'error' : 'tool' };
 }
 
+// Invocation evidence is historical; a current inventory cannot establish a past tool's origin.
+export function toolProvenance(entries) {
+  const text = (value, limit = 256) => typeof value === 'string' && value.trim().length > 0 && value.length <= limit;
+  const result = new Map();
+  for (const section of groupSteps(entries).filter(section => section.kind === 'tool')) {
+    const boundaries = section.entries;
+    const starts = boundaries.filter(entry => entry.type === 'tool.execution_start');
+    const ends = boundaries.filter(entry => entry.type === 'tool.execution_complete');
+    const start = starts[0], key = toolIdentity(boundaries[0]);
+    const data = start && explanationData(start);
+    const matched = key !== null && starts.length === 1 && ends.length <= 1 && boundaries.every(entry => {
+      const record = entry === start ? data : explanationData(entry);
+      return toolIdentity(entry) === key && record?.toolCallId === entry.toolCallId
+        && (entry === start || entry.toolName === '' || entry.toolName === start.toolName);
+    }) && text(data?.toolName, 180) && data.toolName === start.toolName;
+    let description = {
+      origin: 'Unknown', label: 'Origin: Unknown', provider: null, serverKey: null, serverName: null,
+      toolName: null, modelToolName: null, configSource: null, transport: null, basisId: null,
+      basis: matched ? 'This invocation has no supported, complete MCP origin metadata.'
+        : 'A unique invocation with complete, matching source and call evidence is unavailable.',
+      uncertainty: 'Native built-in and plugin origins are unknown without a verified host discriminator. Names, titles and absent MCP fields do not establish origin.',
+    };
+    const strings = ['mcpConfigServerName', 'mcpServerName', 'mcpToolName', 'mcpServerDisplayName'];
+    const valid = matched && text(data.mcpToolName) && (text(data.mcpConfigServerName) || text(data.mcpServerName))
+      && strings.every(field => data[field] === undefined || text(data[field], field === 'mcpServerDisplayName' ? 180 : 256))
+      && (data.mcpConfigSource === undefined || ['user', 'workspace', 'plugin', 'builtin', 'managed', 'account'].includes(data.mcpConfigSource))
+      && (data.mcpTransport === undefined || ['stdio', 'http', 'sse', 'memory'].includes(data.mcpTransport));
+    if (valid) {
+      const provider = data.mcpServerDisplayName ?? null;
+      const serverKey = data.mcpConfigServerName ?? null;
+      description = {
+        origin: 'MCP', label: `Origin: MCP${provider ? ` · ${provider}` : ''}`, provider, serverKey,
+        serverName: data.mcpServerName ?? null, toolName: data.mcpToolName, modelToolName: data.toolName,
+        configSource: data.mcpConfigSource ?? null, transport: data.mcpTransport ?? null, basisId: start.id,
+        basis: 'Recorded tool.execution_start fields mcpConfigServerName or mcpServerName, plus mcpToolName, matched to this retained source and tool-call ID. A paired result uses this invocation’s metadata.',
+        uncertainty: 'MCP origin does not prove a network request, safety, authorization or successful effects. Configuration source describes the MCP configuration, not native built-in or plugin tool origin.'
+          + (serverKey ? '' : ' Legacy mcpServerName may be a display name; an exact configured server key is unknown.'),
+      };
+    }
+    for (const entry of boundaries) result.set(entry.id, description);
+  }
+  return result;
+}
+
 const permissionApprovals = new Set(['approved', 'approved-read-only-for-session', 'approved-for-session', 'approved-for-location']);
 const permissionDenials = new Set(['denied-by-rules', 'denied-no-approval-rule-and-could-not-request-from-user',
   'denied-interactively-by-user', 'denied-by-content-exclusion-policy', 'denied-by-permission-request-hook']);

@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.21",
+    "summary": "Tool cards now show recorded MCP provenance and provider details. Missing or unverified origins stay unknown."
+  },
+  {
     "version": "0.1.20",
     "summary": "Tool cards now show linked recorded requests, permission decisions, invocation starts and results. Missing or ambiguous stages remain unknown."
   },

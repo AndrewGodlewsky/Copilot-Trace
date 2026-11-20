@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
-import { actionStages, agentLanes } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
+import { actionStages, agentLanes, toolProvenance } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
 
 const sdkDirectory = process.env.COPILOT_SDK_DIR;
 const cli = process.env.COPILOT_CLI_PATH;
@@ -19,14 +19,48 @@ let requests = 0;
 let allowSyntheticResponses = false;
 let allowAgentResponses = false;
 let permissionFixture;
+let provenanceFixture;
+let mcpRequests = 0;
+const mcpMethods = [];
 let fixtureError;
 let releaseFirst;
 const firstResponse = new Promise(resolve => { releaseFirst = resolve; });
 let releaseAgents;
 const agentResponses = new Promise(resolve => { releaseAgents = resolve; });
+async function serveMcpFixture(req, res) {
+  mcpRequests++;
+  assert.ok(provenanceFixture && ['/mcp/first', '/mcp/second'].includes(req.url));
+  if (req.method !== 'POST') { res.writeHead(405); res.end(); return; }
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const body = JSON.parse(Buffer.concat(chunks).toString());
+  mcpMethods.push({ path: req.url, method: body.method });
+  if (body.id === undefined) { res.writeHead(202); res.end(); return; }
+  let result;
+  if (body.method === 'initialize') result = { protocolVersion: body.params.protocolVersion, capabilities: { tools: {} },
+    serverInfo: { name: 'same-fixture-server', version: '1.0.0', title: 'Same fixture provider' } };
+  else if (body.method === 'tools/list') result = { tools: [{ name: 'echo', title: 'Same fixture tool',
+    description: 'Fixed local text only.', inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true } }] };
+  else if (body.method === 'tools/call') {
+    assert.equal(provenanceFixture.allowCalls, true);
+    assert.equal(body.params.name, 'echo');
+    assert.deepEqual(body.params.arguments, {});
+    assert.equal(mcpMethods.filter(item => item.path === req.url && item.method === 'tools/call').length, 1);
+    result = { content: [{ type: 'text', text: 'Fixed local fixture output.' }] };
+  } else if (body.method === 'ping') result = {};
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({ jsonrpc: '2.0', id: body.id, ...(result ? { result }
+    : { error: { code: -32601, message: 'Method not found in fixture' } }) }));
+}
 const fixture = createServer(async (req, res) => {
+  if (req.url?.startsWith('/mcp/')) {
+    try { await serveMcpFixture(req, res); }
+    catch (error) { fixtureError = error; if (!res.headersSent) res.writeHead(500); res.end('Synthetic MCP fixture failure.'); }
+    return;
+  }
   const number = ++requests;
-  if (!allowSyntheticResponses || number > (permissionFixture ? 10 : allowAgentResponses ? 7 : 3)) {
+  if (!allowSyntheticResponses || number > (provenanceFixture ? 12 : permissionFixture ? 10 : allowAgentResponses ? 7 : 3)) {
     req.resume(); res.writeHead(500); res.end('Unexpected fixture inference request.'); return;
   }
   try {
@@ -42,6 +76,16 @@ const fixture = createServer(async (req, res) => {
         message = { role: 'assistant', content: null, tool_calls: [{ id: permissionFixture.callId, type: 'function',
           function: { name: 'powershell', arguments: JSON.stringify({ command: permissionFixture.command,
             description: 'Write one disposable fixture file', timeout_ms: 5000 }) } }] };
+        reason = 'tool_calls';
+      }
+    }
+    if (provenanceFixture) {
+      assert.ok(provenanceFixture.allowCalls && ++provenanceFixture.responses <= 2);
+      assert.deepEqual(body.tools.map(tool => tool.function?.name).sort(), provenanceFixture.tools.map(tool => tool.name).sort());
+      if (provenanceFixture.responses === 1) {
+        message = { role: 'assistant', content: null, tool_calls: provenanceFixture.tools.map(tool => ({
+          id: `fixture-mcp-${tool.mcpServerName}`, type: 'function',
+          function: { name: tool.name, arguments: '{}' } })) };
         reason = 'tool_calls';
       }
     }
@@ -317,6 +361,8 @@ try {
       assert.deepEqual(evidence.data, raw.data);
     }
     const stages = actionStages(actionSnapshot.entries, actionSnapshot).get(started.id);
+    assert.equal(toolProvenance(actionSnapshot.entries).get(started.id).origin, 'Unknown',
+      'A familiar native tool name without origin metadata must not be attributed by name.');
     assert.deepEqual(stages.stages.map(stage => stage.id), [proposed.id, started.id, decided.id, completed.id]);
     assert.equal(stages.permission, `Recorded permission: ${approved ? 'approved' : 'denied'}`);
     assert.equal(stages.stages.find(stage => stage.id === decided.id).decisionSource, null, 'A result kind mentioning user does not establish who decided.');
@@ -338,9 +384,80 @@ try {
     await until(() => fetch(historyPanel.url).then(() => false, () => true), Boolean, 'permission history server shutdown');
     await session.disconnect();
   }
-  assert.equal(requests, 10, 'Only the ten expected local synthetic responses are permitted.');
+  // Session creation explicitly starts these owned local MCP fixtures; observing Trace must not.
+  permissionFixture = undefined;
+  provenanceFixture = { tools: [], responses: 0, allowCalls: false };
+  const mcpEvents = [];
+  const fixtureBase = `http://127.0.0.1:${fixture.address().port}`;
+  session = await client.createSession({
+    workingDirectory: project, configDirectory: home, availableTools: ['mcp:*'],
+    requestExtensions: true, requestCanvasRenderer: true,
+    extensionSdkPath: sdkDirectory, pluginDirectories: [root], enableConfigDiscovery: false,
+    mcpServers: Object.fromEntries(['first', 'second'].map(name => [name, { type: 'http', url: `${fixtureBase}/mcp/${name}`, tools: ['*'] }])),
+    onPermissionRequest: request => { assert.equal(request.kind, 'mcp'); return { kind: 'approve-once' }; },
+    model: 'fixture', provider: { type: 'openai', baseUrl: fixtureBase + '/v1', apiKey: 'fixture', wireApi: 'completions' },
+  });
+  await until(() => session.rpc.canvas.list(), value => value.canvases?.some(canvas => canvas.canvasId === 'trace'), 'provenance canvas registration');
+  const beforeMetadata = mcpRequests;
+  const mcpMetadata = await session.rpc.tools.getCurrentMetadata();
+  assert.deepEqual(await session.rpc.tools.getCurrentMetadata(), mcpMetadata);
+  assert.equal(mcpRequests, beforeMetadata, 'Reading initialized metadata makes no additional MCP requests.');
+  assert.equal(mcpMethods.filter(item => item.method === 'initialize').length, 2);
+  assert.equal(mcpMethods.filter(item => item.method === 'tools/call').length, 0);
+  assert.equal(mcpMetadata.tools.length, 2);
+  assert.deepEqual(mcpMetadata.tools.map(tool => tool.mcpServerName).sort(), ['first', 'second']);
+  assert.ok(mcpMetadata.tools.every(tool => tool.mcpToolName === 'echo'));
+  assert.equal(new Set(mcpMetadata.tools.map(tool => tool.name)).size, 2);
+  const stopMcpEvents = session.on(event => mcpEvents.push(event));
+  const mcpPanel = await session.rpc.canvas.open(input);
+  await until(() => fetch(mcpPanel.url + 'events').then(response => response.json()), value => value.history === 'ready', 'provenance observation');
+  assert.equal(mcpRequests, beforeMetadata, 'Opening and observing Trace makes no additional MCP requests.');
+  assert.equal(requests, 10, 'Metadata reads and Trace observation make no inference requests.');
+  provenanceFixture.tools = mcpMetadata.tools;
+  provenanceFixture.allowCalls = true;
+  await session.sendAndWait({ prompt: 'Synthetic local provenance fixture only.' }, 25000);
+  if (fixtureError) throw fixtureError;
+  const mcpSnapshot = await until(() => fetch(mcpPanel.url + 'events').then(response => response.json()),
+    value => value.entries.filter(entry => entry.type === 'tool.execution_complete').length === 2, 'provenance projection');
+  stopMcpEvents();
+  assert.equal(provenanceFixture.responses, 2);
+  assert.equal(mcpMethods.filter(item => item.method === 'tools/call').length, 2);
+  assert.equal(mcpEvents.some(event => event.type === 'session.error'), false);
+  const origins = toolProvenance(mcpSnapshot.entries);
+  for (const tool of mcpMetadata.tools) {
+    const start = mcpEvents.find(event => event.type === 'tool.execution_start' && event.data.toolCallId === `fixture-mcp-${tool.mcpServerName}`);
+    const complete = mcpEvents.find(event => event.type === 'tool.execution_complete' && event.data.toolCallId === start.data.toolCallId);
+    assert.equal(start.data.toolName, tool.name);
+    assert.equal(start.data.mcpServerName, tool.mcpServerName);
+    assert.equal(start.data.mcpConfigServerName, tool.mcpServerName);
+    assert.equal(start.data.mcpToolName, 'echo');
+    assert.equal(start.data.toolTitle, 'Same fixture tool');
+    assert.equal(start.data.mcpConfigSource, 'user');
+    assert.equal(start.data.mcpTransport, 'http');
+    assert.equal(complete.data.success, true);
+    for (const raw of [start, complete]) {
+      const projected = mcpSnapshot.entries.find(entry => entry.id === raw.id);
+      assert.ok(projected, 'Attached Trace retains each actual MCP boundary.');
+      assert.equal(projected.agentId, raw.agentId ?? '');
+      assert.equal(projected.toolCallId, raw.data.toolCallId);
+      assert.equal(projected.timestamp, raw.timestamp);
+      assert.deepEqual(JSON.parse(projected.evidence).data, raw.data);
+      const origin = origins.get(raw.id);
+      assert.equal(origin.origin, 'MCP');
+      assert.equal(origin.serverKey, tool.mcpServerName);
+      assert.equal(origin.toolName, 'echo');
+      assert.equal(origin.modelToolName, tool.name);
+      assert.equal(origin.configSource, 'user');
+      assert.equal(origin.transport, 'http');
+      assert.equal(origin.basisId, start.id, 'Both boundaries cite their exact retained invocation, not another same-title tool.');
+    }
+  }
+  await session.rpc.canvas.close({ instanceId: input.instanceId });
+  await until(() => fetch(mcpPanel.url).then(() => false, () => true), Boolean, 'provenance fixture server shutdown');
+  await session.disconnect();
+  assert.equal(requests, 12, 'Only the twelve expected local synthetic responses are permitted.');
   assert.equal(expired, false);
-  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping agents and approved/denied action boundaries verified with ten fixed local responses across four disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
+  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping agents, approved/denied action boundaries and distinct MCP provenance verified with twelve fixed local responses across five disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
 } finally {
   clearTimeout(timer);
   releaseFirst();

@@ -1,4 +1,4 @@
-import { describeActor, explainStep, describeHookGroup, describeToolGroup, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
+import { describeActor, explainStep, describeHookGroup, describeToolGroup, toolProvenance, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -128,6 +128,8 @@ function nodeShell(display, actor) {
   context.hidden = true;
   const copy = element('span', undefined, 'node-copy');
   copy.append(element('span', actor.role, 'node-kind'), title, subtitle, context);
+  const provenanceBadge = actor.role === 'Tool' ? element('span', 'Origin: Unknown', 'provenance-badge') : null;
+  if (provenanceBadge) copy.append(provenanceBadge);
   const chevron = element('span', undefined, 'chevron');
   chevron.setAttribute('aria-hidden', 'true');
   summary.append(icon(display.kind), copy, chevron);
@@ -137,7 +139,7 @@ function nodeShell(display, actor) {
     if (details.open) follow.checked = false;
   });
   item.append(details);
-  return { item, details, summary, title, subtitle, context };
+  return { item, details, summary, title, subtitle, context, provenanceBadge };
 }
 
 function applyContext(node, context, entry) {
@@ -220,6 +222,39 @@ function metadataValues(entry) {
   const actor = describeActor(entry);
   const time = typeof entry.timestamp === 'string' && entry.timestamp ? entry.timestamp : 'Not recorded';
   return [['Recorded time', time], ['Actor', actor.role], ['Source', actor.source], ['Event', entry.type]];
+}
+
+function renderToolProvenance(group, description) {
+  if (!group.provenance) {
+    group.provenance = element('details', undefined, 'tool-provenance');
+    group.provenance.append(element('summary', 'Tool origin and provider'));
+    group.provenance.addEventListener('toggle', () => { if (group.provenance.open) follow.checked = false; });
+    group.provenanceBasis = element('p');
+    group.provenanceMetadata = element('dl', undefined, 'metadata provenance-metadata');
+    group.provenanceFields = new Map();
+    for (const [key, label] of [['origin', 'Origin'], ['provider', 'Provider display name'], ['serverKey', 'Configured server key'],
+      ['serverName', 'Recorded server name'], ['toolName', 'Original MCP tool'], ['modelToolName', 'Model-facing tool'],
+      ['configSource', 'MCP configuration source'], ['transport', 'Recorded transport']]) {
+      const value = element('dd');
+      group.provenanceFields.set(key, value);
+      group.provenanceMetadata.append(element('dt', label), value);
+    }
+    group.provenanceUncertainty = element('p');
+    group.provenanceLink = element('button', 'View invocation metadata evidence');
+    group.provenanceLink.type = 'button';
+    group.provenanceLink.addEventListener('click', () => { if (group.provenanceId) showBoundary(group.provenanceId); });
+    group.provenance.append(group.provenanceBasis, group.provenanceMetadata, group.provenanceUncertainty, group.provenanceLink);
+  }
+  if (group.provenanceBadge.textContent !== description.label) group.provenanceBadge.textContent = description.label;
+  if (group.provenanceBasis.textContent !== description.basis) group.provenanceBasis.textContent = description.basis;
+  if (group.provenanceUncertainty.textContent !== description.uncertainty) group.provenanceUncertainty.textContent = description.uncertainty;
+  for (const [key, value] of group.provenanceFields) {
+    const text = description[key] ?? 'Unknown';
+    if (value.textContent !== text) value.textContent = text;
+  }
+  group.provenanceMetadata.hidden = description.origin === 'Unknown';
+  group.provenanceId = description.basisId;
+  group.provenanceLink.hidden = !description.basisId;
 }
 
 function renderActionStages(group, description) {
@@ -446,6 +481,7 @@ function render(snapshot) {
   const chronological = eventOrder.value !== 'grouped';
   const contexts = turnContext(snapshot.entries, snapshot);
   const stages = actionStages(snapshot.entries, snapshot);
+  const provenance = toolProvenance(snapshot.entries);
   renderStatistics(snapshot);
   const oldGroups = groups.map(group => ({ group, ids: group.ids, open: group.details.open }));
   const retained = new Set(snapshot.entries.map(entry => entry.id));
@@ -459,6 +495,9 @@ function render(snapshot) {
     const display = describeTurn(entry, context);
     if (node.title.textContent !== display.title) node.title.textContent = display.title;
     if (node.subtitle.textContent !== display.subtitle) node.subtitle.textContent = display.subtitle;
+    if (node.provenanceBadge && node.provenanceBadge.textContent !== provenance.get(entry.id).label) {
+      node.provenanceBadge.textContent = provenance.get(entry.id).label;
+    }
     node.item.dataset.tone = display.tone;
     node.item.dataset.activity = display.activityId ? 'reported' : '';
     if (node.activityBox) {
@@ -510,9 +549,15 @@ function render(snapshot) {
     group.ids = new Set(section.entries.map(entry => entry.id));
     if (tool) {
       renderActionStages(group, stages.get(section.entries[0].id));
+      renderToolProvenance(group, provenance.get(section.entries[0].id));
       if (oldGroups.some(old => old.group.actions?.open && section.entries.some(entry => old.ids.has(entry.id)))) group.actions.open = true;
+      if (oldGroups.some(old => old.group.provenance?.open && section.entries.some(entry => old.ids.has(entry.id)))) group.provenance.open = true;
       const visibleBoundary = section.entries.find(entry => matchesFilter(entry, activityFilter.value)) || section.entries[0];
       const target = chronological ? nodes.get(visibleBoundary.id).body : group.details;
+      if (group.provenance.parentElement !== target) {
+        if (chronological) target.append(group.provenance);
+        else target.insertBefore(group.provenance, group.children);
+      }
       if (group.actions.parentElement !== target) {
         if (chronological) target.append(group.actions);
         else target.insertBefore(group.actions, group.children);
@@ -555,6 +600,7 @@ function render(snapshot) {
   for (const group of groups) {
     if (chronological || !nextGroups.includes(group)) group.item.remove();
     if (!nextGroups.includes(group)) group.actions?.remove();
+    if (!nextGroups.includes(group)) group.provenance?.remove();
   }
   for (const chapter of chapters) if (!chapterView || !nextChapters.includes(chapter)) chapter.item.remove();
   for (const lane of lanes) if (!laneView || !nextLanes.includes(lane)) lane.item.remove();

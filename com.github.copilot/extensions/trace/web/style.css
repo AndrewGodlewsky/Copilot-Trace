@@ -120,6 +120,14 @@ input { accent-color: var(--model); margin: 0; }
 .stage-time { display: block; margin-top: 4px; color: var(--muted); font-size: .786rem; font-variant-numeric: tabular-nums; }
 .action-stage-list p { margin: 4px 0 0; }
 .action-stage-notes { color: var(--muted); }
+.provenance-badge { display: inline-block; max-width: 100%; margin-top: 6px; padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; font-size: .714rem; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool-provenance { padding: 0 14px 12px; font-size: .857rem; overflow-wrap: anywhere; }
+.tool-provenance > summary { cursor: pointer; padding: 8px 0; }
+.tool-provenance p { color: var(--muted); }
+.evidence > .tool-provenance { padding-inline: 0; }
+.tool-provenance button { max-width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.tool-provenance .provenance-metadata { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); }
+.provenance-metadata dd { white-space: pre-wrap; }
 .node { border: 1px solid var(--node-color); border-left-width: 3px; border-radius: 9px; background: var(--surface); }
 .node > summary { display: flex; align-items: center; gap: 12px; padding: 12px 14px; cursor: pointer; list-style: none; border-radius: 8px; }
 .node > summary::-webkit-details-marker { display: none; }

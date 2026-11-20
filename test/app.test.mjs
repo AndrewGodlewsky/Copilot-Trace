@@ -120,6 +120,117 @@ async function actionFixture() {
   return entries;
 }
 
+async function provenanceFixture() {
+  const raw = [
+    { id: 'first', type: 'tool.execution_start', data: { toolCallId: 'first-call', toolName: 'first-alias',
+      mcpServerName: 'first', mcpConfigServerName: 'first', mcpToolName: 'echo', mcpServerDisplayName: 'Shared <img> 日本語😀', mcpConfigSource: 'plugin' } },
+    { id: 'second', type: 'tool.execution_start', data: { toolCallId: 'second-call', toolName: 'second-alias',
+      mcpServerName: 'second', mcpConfigServerName: 'second', mcpToolName: 'echo', mcpServerDisplayName: 'Shared <img> 日本語😀' } },
+    { id: 'first-result', type: 'tool.execution_complete', data: { toolCallId: 'first-call', success: false } },
+    { id: 'second-result', type: 'tool.execution_complete', data: { toolCallId: 'second-call', success: true } },
+  ].map(entry => ({ ...entry, timestamp: '2026-11-20T12:00:00Z' }));
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => raw });
+  await trace.ready;
+  const entries = trace.snapshot().entries;
+  trace.close();
+  return entries;
+}
+
+test('tool origins remain literal and distinguish identical provider names with exact evidence navigation in every view', async () => {
+  const entries = await provenanceFixture();
+  for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    const ui = fixture(appSource);
+    ui.get('#event-order').value = mode;
+    ui.render(entries);
+    const counts = ui.get('#stat-counts').textContent;
+    const disclosures = walk(ui.get('#timeline')).filter(node => node.className === 'tool-provenance');
+    assert.equal(disclosures.length, 2, 'One provenance disclosure per call is reachable in each view.');
+    assert.match(disclosures[0].textContent, /Shared <img> 日本語😀/);
+    assert.match(disclosures[0].textContent, /Configured server keyfirst/);
+    assert.match(disclosures[1].textContent, /Configured server keysecond/);
+    assert.match(disclosures[0].textContent, /MCP configuration sourceplugin/);
+    assert.match(disclosures[0].textContent, /does not prove a network request/);
+    assert.ok(walk(ui.get('#timeline')).every(node => node.tagName !== 'img' && node.tagName !== 'a'));
+    const badges = walk(ui.get('#timeline')).filter(node => node.className === 'provenance-badge');
+    assert.ok(badges.length >= 4);
+    assert.ok(badges.every(badge => badge.textContent === 'Origin: MCP · Shared <img> 日本語😀'));
+    disclosures[1].open = true;
+    filterMode(ui, 'tools');
+    const link = walk(disclosures[1]).find(node => node.tagName === 'button');
+    link.focus();
+    link.dispatch('click');
+    assert.equal(ui.get('#event-order').value, 'chronological');
+    assert.equal(ui.get('#activity-filter').value, 'everything');
+    assert.deepEqual(visibleEvidence(ui), entries.map(entry => entry.evidence));
+    const sourceRow = ui.get('#timeline').children[1];
+    assert.equal(ui.document.activeElement, sourceRow.firstElementChild.firstElementChild);
+    assert.equal(byClass(sourceRow, 'recorded-evidence').open, true);
+    assert.equal(ui.get('#follow').checked, false);
+    assert.equal(ui.get('#stat-counts').textContent, counts);
+    assert.equal(byClass(sourceRow, 'tool-provenance'), disclosures[1]);
+    assert.equal(disclosures[1].open, true);
+  }
+});
+
+test('provenance stays reachable for a filtered failed result and keeps its focus during live updates and retention', async () => {
+  const entries = await provenanceFixture();
+  for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    const ui = fixture(appSource);
+    ui.get('#event-order').value = mode;
+    ui.render([entries[0]]);
+    const disclosure = byClass(ui.get('#timeline'), 'tool-provenance');
+    assert.ok(disclosure);
+    disclosure.open = true;
+    const link = walk(disclosure).find(node => node.tagName === 'button');
+    link.focus();
+    ui.document.scrollingElement.scrollTop = 333;
+    ui.render(entries);
+    assert.equal(ui.document.activeElement, link);
+    assert.equal(ui.document.scrollingElement.scrollTop, 333);
+    assert.equal(disclosure.open, true);
+    filterMode(ui, 'problems');
+    assert.ok(visibleWalk(ui.get('#timeline')).includes(disclosure), mode);
+    link.dispatch('click');
+    assert.equal(ui.get('#activity-filter').value, 'everything');
+    assert.equal(byClass(ui.get('#timeline').children[0], 'recorded-evidence').open, true);
+    link.focus();
+    ui.render(entries.slice(1), { omitted: 1 });
+    assert.ok(ui.document.activeElement.isConnected);
+    assert.notEqual(ui.document.activeElement, link, 'A hidden source link must not keep focus after its start is evicted.');
+    const resultRow = ui.get('#timeline').children[1];
+    assert.equal(byClass(resultRow, 'provenance-badge').textContent, 'Origin: Unknown');
+    assert.equal(byClass(resultRow, 'tool-provenance'), disclosure);
+    assert.equal(disclosure.open, true);
+    assert.equal(link.hidden, true);
+  }
+});
+
+test('changed metadata updates retained provenance controls and canonical merges remove obsolete disclosures', async () => {
+  const entries = await provenanceFixture(), ui = fixture(appSource);
+  ui.get('#event-order').value = 'chronological';
+  ui.render(entries);
+  const disclosure = byClass(ui.get('#timeline'), 'tool-provenance');
+  disclosure.open = true;
+  const link = walk(disclosure).find(node => node.tagName === 'button');
+  link.focus();
+  const raw = JSON.parse(entries[0].evidence);
+  const changed = { ...entries[0], evidence: JSON.stringify({ ...raw, data: { ...raw.data, mcpServerDisplayName: 'Updated provider' } }) };
+  ui.render([changed, ...entries.slice(1)]);
+  assert.equal(ui.document.activeElement, link);
+  assert.match(disclosure.textContent, /Updated provider/);
+  assert.doesNotMatch(disclosure.textContent, /Shared <img>/);
+  const result = entries[2], resultRaw = JSON.parse(result.evidence);
+  ui.render([entries[0], { ...result, toolCallId: 'other-call', evidence: JSON.stringify({ ...resultRaw, data: { ...resultRaw.data, toolCallId: 'other-call' } }) }]);
+  const separate = walk(ui.get('#timeline')).filter(node => node.className === 'tool-provenance');
+  assert.equal(separate.length, 2);
+  separate[1].open = true;
+  ui.render([entries[0], result]);
+  const merged = walk(ui.get('#timeline')).filter(node => node.className === 'tool-provenance');
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].open, true);
+  assert.deepEqual(visibleEvidence(ui), [entries[0].evidence, result.evidence]);
+});
+
 test('observed action stages navigate to exact unchanged original evidence from every view and filter', async () => {
   const entries = await actionFixture();
   for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {
