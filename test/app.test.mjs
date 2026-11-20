@@ -54,7 +54,7 @@ function fixture(source) {
   const selectors = new Map();
   for (const selector of ['main', '#timeline', '#connection', '#notice', '#empty', '#follow', '#actor-legend', '#stat-counts',
     '#stat-scope', '#stat-unlinked', '#stat-hooks', '#stat-skills', '#statistics-peek', '#footer-dock', '#event-order',
-    '#activity-filter', '#reset-filter', '#filter-status', '#filter-empty']) {
+    '#activity-filter', '#reset-filter', '#filter-status', '#filter-empty', '#lane-help']) {
     const element = new Element(['#event-order', '#activity-filter'].includes(selector) ? 'select' : 'div');
     selectors.set(selector, element); document.body.append(element);
   }
@@ -134,7 +134,7 @@ test('reported headings and their persistent source control update without reset
 
 test('activity evidence navigation works from every view and a withdrawn heading moves button focus safely', () => {
   const recorded = activityIntent('intent', 'Inspect the source');
-  for (const mode of ['grouped', 'chapters', 'chronological']) {
+  for (const mode of ['grouped', 'chapters', 'chronological', 'lanes']) {
     const ui = fixture(appSource);
     ui.render([activityStart, recorded]);
     ui.get('#event-order').value = mode;
@@ -291,7 +291,7 @@ test('filters preserve full-snapshot contexts, boundaries and retained Statistic
   const other = { id: 'other', type: 'assistant.turn_start', category: 'turn', agentId: 'child', turnId: '0', evidence: '{"id":"other"}' };
   const afterInput = boundary('after-input', 'start', { toolCallId: 'after-input' });
   const entries = [request('input'), activityStart, start, other, end, request('new-input'), afterInput, hook];
-  for (const mode of ['grouped', 'chronological', 'chapters']) {
+  for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {
     const ui = fixture(appSource);
     ui.render(entries);
     ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change');
@@ -408,7 +408,7 @@ test('filtered view changes preserve disclosures and do not join hooks across hi
   hookRow.firstElementChild.open = true;
   const evidence = walk(hookRow).find(node => node.tagName === 'pre');
   evidence.focus();
-  for (const mode of ['chapters', 'chronological', 'grouped']) {
+  for (const mode of ['chapters', 'chronological', 'lanes', 'grouped']) {
     ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change');
     assert.equal(ui.get('#activity-filter').value, 'automation');
     assert.equal(ui.document.activeElement, evidence);
@@ -566,4 +566,121 @@ test('merging chapters preserves expanded retained evidence without relying on k
   ui.render([before, after, requestTurn('later', 'queued')], { omitted: 2 });
   assert.equal(ui.get('#timeline').firstElementChild, merged);
   assert.equal(merged.firstElementChild.open, false, 'A subsequent one-to-one update preserves an explicit collapse.');
+});
+
+function agentBoundary(id, type, agentId, second, extra = {}) {
+  const timestamp = `2026-11-20T12:00:0${second}Z`;
+  const data = { toolCallId: `spawn-${agentId}`, agentDisplayName: 'Same name 日本語', ...extra };
+  return { id, type, category: 'agent', agentId, timestamp, toolCallId: data.toolCallId,
+    evidence: JSON.stringify({ id, type, agentId, timestamp, data }) };
+}
+const agentStart = agentBoundary('agent-start', 'subagent.started', 'a', 1);
+const agentEnd = agentBoundary('agent-end', 'subagent.completed', 'a', 4);
+function laneMode(ui) { ui.get('#event-order').value = 'lanes'; ui.get('#event-order').dispatch('change'); }
+const laneRows = lane => byClass(lane, 'lane-events').children;
+
+test('agent lane summaries visibly align overlapping intervals on one scale and keep original evidence', () => {
+  const ui = fixture(appSource);
+  const bStart = agentBoundary('b-start', 'subagent.started', 'b', 2);
+  const bEnd = agentBoundary('b-end', 'subagent.completed', 'b', 5);
+  ui.render([agentStart, bStart, agentEnd, bEnd]);
+  laneMode(ui);
+  const [a, b] = ui.get('#timeline').children;
+  assert.ok(a.className.includes('agent-lane'));
+  const aBar = walk(a).find(node => node.tagName === 'rect'), bBar = walk(b).find(node => node.tagName === 'rect');
+  assert.equal(Number(aBar.attributes.x), 0);
+  assert.equal(Number(aBar.attributes.width), 750);
+  assert.equal(Number(bBar.attributes.x), 250);
+  assert.equal(Number(bBar.attributes.width), 750);
+  assert.match(a.textContent, /0–3 s.*3 s elapsed/);
+  assert.match(b.textContent, /1–4 s.*3 s elapsed/);
+  assert.match(ui.get('#lane-help').textContent, /1 pairs of lanes.*2026-11-20T12:00:01.000Z/);
+  assert.deepEqual(laneRows(a).map(row => walk(row).find(node => node.tagName === 'pre').textContent), [agentStart.evidence, agentEnd.evidence]);
+  const laterStart = agentBoundary('b-start', 'subagent.started', 'b', 4);
+  ui.render([agentStart, agentEnd, laterStart, bEnd]);
+  assert.equal(Number(walk(b).find(node => node.tagName === 'rect').attributes.x), 750);
+  assert.match(ui.get('#lane-help').textContent, /0 pairs of lanes/);
+});
+
+test('lane source and recorded parent controls reset filters and open exact original evidence', () => {
+  const ui = fixture(appSource);
+  const spawn = { ...boundary('parent "<>日本語', 'start'), toolCallId: 'spawn-a' };
+  spawn.evidence = JSON.stringify({ id: spawn.id, type: spawn.type, timestamp: spawn.timestamp, data: { toolCallId: spawn.toolCallId } });
+  ui.render([spawn, agentStart, agentEnd]);
+  laneMode(ui);
+  const child = ui.get('#timeline').children[1];
+  const parentButton = walk(child).find(node => node.tagName === 'button' && node.textContent.includes('Parent delegation'));
+  assert.ok(parentButton);
+  parentButton.focus(); parentButton.dispatch('click');
+  assert.equal(ui.get('#event-order').value, 'chronological');
+  assert.equal(ui.document.activeElement, ui.get('#timeline').firstElementChild.firstElementChild.firstElementChild);
+  assert.equal(walk(ui.get('#timeline').firstElementChild).find(node => node.tagName === 'pre').textContent, spawn.evidence);
+  laneMode(ui);
+  const originalButton = walk(child).find(node => node.tagName === 'button' && node.textContent.includes('outcome evidence'));
+  filterMode(ui, 'problems');
+  assert.equal(child.hidden, true);
+  filterMode(ui, 'everything');
+  originalButton.dispatch('click');
+  assert.equal(ui.get('#timeline').children[2].firstElementChild.open, true);
+  assert.equal(ui.document.activeElement, ui.get('#timeline').children[2].firstElementChild.firstElementChild);
+  laneMode(ui);
+  parentButton.focus();
+  ui.render([agentStart, agentEnd], { omitted: 1 });
+  assert.equal(parentButton.isConnected, false);
+  assert.equal(ui.document.activeElement, child.firstElementChild.firstElementChild);
+  assert.match(child.textContent, /Parent delegation unavailable/);
+});
+
+test('lanes retain disclosure, focused rows, counts and filters through every view and retention', () => {
+  const ui = fixture(appSource);
+  const childTool = boundary('child-tool', 'start', { agentId: 'a' });
+  const childResult = boundary('child-result', 'complete', { agentId: 'a', success: false });
+  ui.render([agentStart, childTool, childResult]);
+  const grouped = ui.get('#timeline').children[1];
+  grouped.firstElementChild.open = true;
+  const resultRow = evidenceRows(grouped)[1], evidence = walk(resultRow).find(node => node.tagName === 'pre');
+  resultRow.firstElementChild.open = true;
+  evidence.focus();
+  const counts = ui.get('#stat-counts').textContent;
+  for (const mode of ['lanes', 'chapters', 'chronological', 'grouped', 'lanes']) {
+    ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change');
+    assert.equal(ui.document.activeElement, evidence);
+    assert.equal(evidence.isConnected, true);
+    assert.equal(resultRow.firstElementChild.open, true);
+    assert.equal(ui.get('#stat-counts').textContent, counts);
+  }
+  const lane = ui.get('#timeline').firstElementChild;
+  assert.equal(lane.firstElementChild.open, true);
+  filterMode(ui, 'tools');
+  assert.equal(ui.document.activeElement, evidence);
+  assert.deepEqual(visibleEvidence(ui), [childTool.evidence, childResult.evidence]);
+  assert.match(lane.textContent, /lane context.*2 matching.*1 hidden/);
+  ui.render([childResult, agentEnd], { omitted: 2 });
+  assert.equal(ui.get('#timeline').firstElementChild, lane);
+  assert.equal(ui.document.activeElement, evidence);
+  assert.match(lane.textContent, /Start unavailable/);
+  filterMode(ui, 'automation');
+  assert.equal(ui.document.activeElement, ui.get('#activity-filter'));
+  filterMode(ui, 'everything');
+  lane.firstElementChild.firstElementChild.focus();
+  ui.render([]);
+  assert.equal(ui.document.activeElement, ui.get('#event-order'));
+  assert.equal(ui.get('#follow').checked, false);
+});
+
+test('many collapsed lanes remain stacked and preserve a collapsed focused header on live completion', () => {
+  const ui = fixture(appSource);
+  const entries = Array.from({ length: 40 }, (_, i) => agentBoundary(`start-${i}`, 'subagent.started', `agent-${i}`, 1));
+  ui.render(entries);
+  laneMode(ui);
+  assert.equal(ui.get('#timeline').children.length, 40);
+  assert.ok(ui.get('#timeline').children.every(lane => !lane.firstElementChild.open));
+  const lane = ui.get('#timeline').children[20], summary = lane.firstElementChild.firstElementChild;
+  summary.focus();
+  ui.render([...entries, agentBoundary('end-20', 'subagent.completed', 'agent-20', 4)]);
+  assert.equal(ui.get('#timeline').children[20], lane);
+  assert.equal(lane.firstElementChild.open, false);
+  assert.equal(ui.document.activeElement, summary);
+  assert.equal(laneRows(lane).length, 2);
+  assert.match(lane.textContent, /Completed/);
 });

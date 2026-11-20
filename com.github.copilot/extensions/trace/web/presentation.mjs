@@ -151,6 +151,107 @@ function timestampMilliseconds(value) {
   return Date.parse(value);
 }
 
+// Lane membership is source identity; bars describe recorded intervals, not continuous execution.
+export function agentLanes(entries, { history = 'ready', omitted = 0 } = {}) {
+  const usableId = value => typeof value === 'string' && value.length > 0 && value.length <= 256;
+  const source = entry => typeof entry.agentId === 'string' && entry.agentId.length <= 256 ? entry.agentId : null;
+  const bySource = new Map();
+  for (const entry of entries) {
+    const agent = source(entry);
+    if (!bySource.has(agent)) bySource.set(agent, { id: `lane:${JSON.stringify(agent)}`, agentId: agent, entries: [],
+      title: agent === null ? 'Source unavailable' : agent === '' ? 'Main chat' : `Agent ${agent}`,
+      intervals: [], parentId: null, links: [] });
+    bySource.get(agent).entries.push(entry);
+  }
+  const lanes = [...bySource.values()].sort((a, b) => (a.agentId === '' ? -1 : a.agentId === null ? 1 : 0)
+    - (b.agentId === '' ? -1 : b.agentId === null ? 1 : 0));
+  function interval(start, end, records) {
+    const from = timestampMilliseconds(start.timestamp), to = timestampMilliseconds(end.timestamp);
+    const times = records.map(entry => timestampMilliseconds(entry.timestamp));
+    if (!(to > from) || records.indexOf(start) >= records.indexOf(end)
+      || times.some((time, i) => !Number.isFinite(time) || time < from || time > to || (i > 0 && time < times[i - 1]))) return null;
+    return { start: from, end: to, startId: start.id, endId: end.id };
+  }
+  for (const lane of lanes) {
+    if (lane.agentId === null) {
+      lane.status = 'Unknown identity; these records are not assigned to one agent';
+    } else if (lane.agentId === '') {
+      lane.status = 'Recorded model-turn intervals; whole-run boundaries unavailable';
+      let active = null;
+      for (const entry of entries) {
+        if (entry.type === 'abort' && (source(entry) === '' || source(entry) === null)) active = null;
+        if (source(entry) !== '') continue;
+        if (entry.type === 'user.message' && !['steering', 'queued'].includes(entry.delivery)) active = null;
+        if (entry.type === 'assistant.turn_start') active = usableId(entry.turnId) ? [entry] : null;
+        else if (active) {
+          active.push(entry);
+          if (entry.type === 'assistant.turn_end') {
+            const observed = entry.turnId === active[0].turnId ? interval(active[0], entry, active) : null;
+            if (observed) lane.intervals.push(observed);
+            active = null;
+          }
+        }
+      }
+      for (const observed of lane.intervals) lane.links.push(
+        { id: observed.startId, label: 'Turn start evidence' }, { id: observed.endId, label: 'Turn end evidence' });
+    } else {
+      const starts = lane.entries.filter(entry => entry.type === 'subagent.started');
+      const ends = lane.entries.filter(entry => ['subagent.completed', 'subagent.failed'].includes(entry.type));
+      const boundaries = [...starts, ...ends];
+      const records = boundaries.map(recordedLaneData);
+      const callIds = records.map(data => data?.toolCallId);
+      const linked = boundaries.length > 0 && records.every(Boolean) && callIds.every(usableId)
+        && callIds.every(id => id === callIds[0]);
+      const conflicting = starts.length > 1 || ends.length > 1 || !linked;
+      const end = ends[0], data = end && recordedLaneData(end);
+      lane.status = conflicting ? 'Conflicting or unavailable boundaries · Outcome unknown'
+        : !end ? 'Completion not observed'
+          : end.type === 'subagent.failed' ? 'Failed'
+            : data.cancelled === true ? 'Cancelled'
+              : data.cancelled === undefined || data.cancelled === false ? 'Completed · Task success not established' : 'Outcome unknown';
+      if (!starts.length) lane.status += ' · Start unavailable';
+      const names = [...new Set(records.map(data => data?.agentDisplayName).filter(name => typeof name === 'string' && name.length))];
+      if (names.length === 1) lane.title = `${shortTitle(names[0])} · Agent ${lane.agentId}`;
+      if (!conflicting && starts.length === 1 && ends.length === 1) {
+        const observed = interval(starts[0], end, lane.entries);
+        if (observed) lane.intervals.push(observed);
+      }
+      for (const entry of boundaries) lane.links.push({ id: entry.id,
+        label: entry.type === 'subagent.started' ? 'Agent start evidence' : 'Agent outcome evidence' });
+      if (!conflicting) {
+        const calls = entries.filter(entry => ['tool.execution_start', 'tool.execution_complete'].includes(entry.type)
+          && entry.toolCallId === callIds[0]);
+        const toolStarts = calls.filter(entry => entry.type === 'tool.execution_start');
+        const parent = toolStarts[0];
+        if (toolStarts.length === 1 && source(parent) !== null && source(parent) !== lane.agentId
+          && calls.every(entry => source(entry) === source(parent))
+          && recordedLaneData(parent)?.toolCallId === callIds[0]) lane.parentId = parent.id;
+      }
+    }
+    lane.timing = lane.intervals.length ? `${lane.intervals.length} observed ${lane.agentId === '' ? 'turn' : 'agent'} interval${lane.intervals.length === 1 ? '' : 's'}`
+      : 'Timing unknown · Missing, conflicting or unreliable boundaries';
+  }
+  const intervals = lanes.flatMap(lane => lane.intervals);
+  const scale = intervals.length ? { start: Math.min(...intervals.map(item => item.start)), end: Math.max(...intervals.map(item => item.end)) } : null;
+  let overlaps = 0;
+  for (let i = 0; i < lanes.length; i++) for (let j = i + 1; j < lanes.length; j++) {
+    if (lanes[i].intervals.some(a => lanes[j].intervals.some(b => Math.min(a.end, b.end) > Math.max(a.start, b.start)))) overlaps++;
+  }
+  return { lanes, scale, overlaps, note: `${overlaps} pairs of lanes have positive recorded overlap. Bars share one timestamp scale; they do not establish continuous execution. Wall time covers the observed span; the sum of overlapping intervals can be larger. Missing, equal or reversed boundaries have unknown timing. Only retained events are shown; absence of a bar does not establish inactivity.${history !== 'ready' ? ' History is incomplete or unavailable.' : ''}${omitted ? ' Older events were omitted.' : ''}` };
+}
+
+function recordedLaneData(entry) {
+  if (entry.truncated || typeof entry.id !== 'string' || !entry.id || entry.id.length > 256
+    || typeof entry.evidence !== 'string' || entry.evidence.length > 12000) return null;
+  let event;
+  try { event = JSON.parse(entry.evidence); } catch { return null; }
+  const agent = event?.agentId === undefined ? ''
+    : typeof event.agentId === 'string' && event.agentId.length > 0 && event.agentId.length <= 256 ? event.agentId : null;
+  const data = event?.data;
+  return event?.id === entry.id && event.type === entry.type && event.timestamp === entry.timestamp && agent === entry.agentId
+    && data && typeof data === 'object' && !Array.isArray(data) && data.toolCallId === entry.toolCallId ? data : null;
+}
+
 export function describeToolGroup(entries) {
   const starts = entries.filter(entry => entry.type === 'tool.execution_start');
   const ends = entries.filter(entry => entry.type === 'tool.execution_complete');

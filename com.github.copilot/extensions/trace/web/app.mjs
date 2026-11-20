@@ -1,4 +1,4 @@
-import { describeActor, describeHookGroup, describeToolGroup, describeStep, describeTurn, groupSteps, requestChapters, turnContext, summarize, filterLabels, matchesFilter } from './presentation.mjs';
+import { describeActor, describeHookGroup, describeToolGroup, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -18,6 +18,7 @@ const eventOrder = document.querySelector('#event-order');
 const activityFilter = document.querySelector('#activity-filter');
 const filterStatus = document.querySelector('#filter-status');
 const filterEmpty = document.querySelector('#filter-empty');
+const laneHelp = document.querySelector('#lane-help');
 const actorLegend = document.querySelector('#actor-legend');
 actorLegend.addEventListener('toggle', () => { if (actorLegend.open) follow.checked = false; });
 const statValues = new Map();
@@ -32,6 +33,7 @@ for (const [key, label] of [['turns', 'Model turns'], ['hooks', 'Hook calls'], [
 const nodes = new Map();
 let groups = [];
 let chapters = [];
+let lanes = [];
 let etag;
 let lastSnapshot;
 eventOrder.addEventListener('change', () => {
@@ -207,7 +209,7 @@ function applyFilter(snapshot) {
   activityFilter.value = filter;
   const matching = new Set(snapshot.entries.filter(entry => matchesFilter(entry, filter)).map(entry => entry.id));
   for (const [id, node] of nodes) node.item.hidden = !matching.has(id);
-  for (const group of [...groups, ...chapters]) {
+  for (const group of [...groups, ...chapters, ...lanes]) {
     const count = [...group.ids].filter(id => matching.has(id)).length;
     group.item.hidden = count === 0;
     if (!group.filterNote) {
@@ -215,12 +217,12 @@ function applyFilter(snapshot) {
       group.subtitle.parentElement.append(group.filterNote);
     }
     group.filterNote.hidden = !active;
-    const note = `Retained ${group.kind === 'tool' ? 'call' : group.kind === 'hooks' ? 'hook group' : 'chapter'} context · ${count} matching · ${group.ids.size - count} hidden events`;
+    const note = `Retained ${group.kind === 'tool' ? 'call' : group.kind === 'hooks' ? 'hook group' : group.kind === 'lane' ? 'lane' : 'chapter'} context · ${count} matching · ${group.ids.size - count} hidden events`;
     if (group.filterNote.textContent !== note) group.filterNote.textContent = note;
   }
   timeline.dataset.filtered = String(active);
   const status = `${filterLabels[filter]} · ${matching.size} matching · ${snapshot.entries.length - matching.size} hidden · ${snapshot.entries.length} retained events. Statistics always covers retained events.`
-    + (active ? ' Hidden events may leave gaps; order connectors are off. Group and chapter headers show retained context. Evidence links reset filters.' : '');
+    + (active ? ' Hidden events may leave gaps; order connectors are off. Group, chapter and lane headers show retained context. Evidence links reset filters.' : '');
   if (filterStatus.textContent !== status) filterStatus.textContent = status;
   filterEmpty.hidden = !snapshot.entries.length || matching.size > 0;
   const message = `No retained events match ${filterLabels[filter]}. Choose another filter or Reset filters to see all retained activity.`;
@@ -262,12 +264,100 @@ function reconcileChapters(snapshot, visible) {
   return next;
 }
 
+function reconcileLanes(snapshot, visible) {
+  const result = agentLanes(snapshot.entries, snapshot), next = [];
+  const { scale } = result;
+  laneHelp.hidden = !visible;
+  const explanation = result.note + (scale
+    ? ` Shared scale: ${new Date(scale.start).toISOString()} to ${new Date(scale.end).toISOString()} (${(scale.end - scale.start) / 1000} s wall time).`
+    : ' Shared scale unavailable until positive reliable intervals are retained.');
+  if (laneHelp.textContent !== explanation) laneHelp.textContent = explanation;
+  for (const section of result.lanes) {
+    const subtitle = `${section.entries.length} retained events · ${section.status}`;
+    let lane = lanes.find(previous => previous.id === section.id);
+    if (!lane) {
+      lane = nodeShell({ kind: 'Subagent', title: section.title, subtitle, tone: 'agent' },
+        { role: section.agentId === '' ? 'Main chat lane' : section.agentId === null ? 'Unassigned records' : 'Subagent lane' });
+      lane.kind = 'lane'; lane.id = section.id;
+      lane.item.classList.add('agent-lane');
+      lane.context.className = 'lane-timing';
+      lane.graph = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      lane.graph.setAttribute('viewBox', '0 0 1000 24');
+      lane.graph.setAttribute('preserveAspectRatio', 'none');
+      lane.graph.setAttribute('aria-hidden', 'true');
+      lane.graph.setAttribute('focusable', 'false');
+      lane.graph.setAttribute('class', 'lane-graph');
+      lane.context.parentElement.append(lane.graph);
+      lane.parentNote = element('p', '', 'group-note');
+      lane.links = element('div', undefined, 'boundary-links');
+      lane.links.setAttribute('role', 'group');
+      lane.links.setAttribute('aria-label', 'Original lane boundaries and recorded delegation');
+      lane.buttons = new Map();
+      lane.children = element('ol', undefined, 'lane-events');
+      lane.children.setAttribute('aria-label', 'Original events for this source in recorded order');
+      lane.details.append(lane.parentNote, lane.links, lane.children);
+    }
+    lane.ids = new Set(section.entries.map(entry => entry.id));
+    if (lane.title.textContent !== section.title) lane.title.textContent = section.title;
+    if (lane.subtitle.textContent !== subtitle) lane.subtitle.textContent = subtitle;
+    const intervals = section.intervals.map(interval => `${(interval.start - scale.start) / 1000}–${(interval.end - scale.start) / 1000} s on shared scale · ${(interval.end - interval.start) / 1000} s elapsed`);
+    const timing = intervals.length ? `${section.timing}: ${intervals.join('; ')}` : section.timing;
+    if (lane.context.textContent !== timing) lane.context.textContent = timing;
+    lane.context.hidden = false;
+    const graphKey = JSON.stringify([scale, section.intervals]);
+    if (lane.graphKey !== graphKey) {
+      lane.graphKey = graphKey;
+      const marks = [];
+      if (scale && section.intervals.length) {
+        for (const x of [0, 250, 500, 750, 1000]) {
+          const tick = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+          for (const [key, value] of Object.entries({ x1: x, x2: x, y1: 0, y2: 24 })) tick.setAttribute(key, String(value));
+          marks.push(tick);
+        }
+        for (const interval of section.intervals) {
+          const bar = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+          const span = scale.end - scale.start;
+          for (const [key, value] of Object.entries({ x: (interval.start - scale.start) / span * 1000,
+            width: (interval.end - interval.start) / span * 1000, y: 6, height: 12 })) bar.setAttribute(key, String(value));
+          marks.push(bar);
+        }
+      }
+      lane.graph.replaceChildren(...marks);
+    }
+    lane.graph.setAttribute('data-empty', String(!section.intervals.length));
+    const parentNote = section.agentId === '' ? 'Main-chat bars are paired model turns, not whole-request or CPU time.'
+      : section.parentId ? 'Parent delegation is linked by its recorded spawning-tool ID; completion does not establish task success.'
+        : 'Parent delegation unavailable or ambiguous in retained evidence; no relationship is inferred.';
+    if (lane.parentNote.textContent !== parentNote) lane.parentNote.textContent = parentNote;
+    const links = [...section.links.map(link => ({ ...link, key: `source:${link.id}` })),
+      ...(section.parentId ? [{ id: section.parentId, key: `parent:${section.parentId}`, label: 'Parent delegation evidence' }] : [])];
+    let previousButton;
+    for (const link of links) {
+      let button = lane.buttons.get(link.key);
+      if (!button) {
+        button = element('button', link.label); button.type = 'button';
+        button.addEventListener('click', () => showBoundary(link.id));
+        lane.buttons.set(link.key, button);
+      }
+      previousButton = place(lane.links, button, previousButton);
+    }
+    const keys = new Set(links.map(link => link.key));
+    for (const [key, button] of lane.buttons) if (!keys.has(key)) { button.remove(); lane.buttons.delete(key); }
+    let previous;
+    for (const entry of visible ? section.entries : []) previous = place(lane.children, nodes.get(entry.id).item, previous);
+    next.push(lane);
+  }
+  return next;
+}
+
 function render(snapshot) {
   const focused = document.activeElement;
   const focusedId = [...nodes].find(([, node]) => node.item.contains(focused))?.[0];
   const focusedGroup = groups.find(group => group.item.contains(focused) || group.ids.has(focusedId));
   const focusedChapter = chapters.find(chapter => chapter.item.contains(focused) || chapter.ids.has(focusedId));
+  const focusedLane = lanes.find(lane => lane.item.contains(focused) || lane.ids.has(focusedId));
   const chapterView = eventOrder.value === 'chapters';
+  const laneView = eventOrder.value === 'lanes';
   const chronological = eventOrder.value !== 'grouped';
   const contexts = turnContext(snapshot.entries, snapshot);
   renderStatistics(snapshot);
@@ -354,8 +444,12 @@ function render(snapshot) {
     nextGroups.push(group);
   }
   const nextChapters = reconcileChapters(snapshot, chapterView);
+  const nextLanes = reconcileLanes(snapshot, laneView);
+  timeline.dataset.lanes = String(laneView);
   let previous;
-  if (chapterView) {
+  if (laneView) {
+    for (const lane of nextLanes) previous = place(timeline, lane.item, previous);
+  } else if (chapterView) {
     for (const chapter of nextChapters) previous = place(timeline, chapter.item, previous);
   } else {
     for (const section of chronological ? groupSteps(snapshot.entries, true) : sections) {
@@ -364,12 +458,14 @@ function render(snapshot) {
   }
   for (const group of groups) if (chronological || !nextGroups.includes(group)) group.item.remove();
   for (const chapter of chapters) if (!chapterView || !nextChapters.includes(chapter)) chapter.item.remove();
+  for (const lane of lanes) if (!laneView || !nextLanes.includes(lane)) lane.item.remove();
   for (const group of nextGroups) {
     const wanted = new Set([...group.ids].map(id => nodes.get(id).item));
     for (const item of [...group.children.children]) if (!wanted.has(item)) item.remove();
   }
   groups = nextGroups;
   chapters = nextChapters;
+  lanes = nextLanes;
   applyFilter(snapshot);
   // Moving an existing disclosure into a group must not strand keyboard focus.
   const focusedNode = nodes.get(focusedId);
@@ -377,7 +473,7 @@ function render(snapshot) {
     ? focusedNode.summary : unhidden(focused) ? focused : null;
   if (focusTarget && !unhidden(focusTarget)) focusTarget = null;
   const filtered = activityFilter.value !== 'everything';
-  if (!focusTarget && filtered && (focusedId || focusedGroup || focusedChapter)) focusTarget = activityFilter;
+  if (!focusTarget && filtered && (focusedId || focusedGroup || focusedChapter || focusedLane)) focusTarget = activityFilter;
   if (!focusTarget && focusedGroup) {
     const group = groups.find(group => group === focusedGroup);
     focusTarget = chronological ? nodes.get(group?.ids.values().next().value)?.summary : group?.summary;
@@ -387,7 +483,11 @@ function render(snapshot) {
       || chapters.find(chapter => [...chapter.ids].some(id => focusedChapter.ids.has(id)));
     focusTarget = chapterView ? chapter?.summary : nodes.get(chapter?.ids.values().next().value)?.summary;
   }
-  if (!focusTarget && (focusedId || focusedGroup || focusedChapter)) focusTarget = eventOrder;
+  if (!focusTarget && focusedLane) {
+    const lane = lanes.find(lane => lane === focusedLane);
+    focusTarget = laneView ? lane?.summary : nodes.get(lane?.ids.values().next().value)?.summary;
+  }
+  if (!focusTarget && (focusedId || focusedGroup || focusedChapter || focusedLane)) focusTarget = eventOrder;
   if (focusTarget && document.activeElement !== focusTarget) {
     follow.checked = false;
     let ancestor = focusTarget.tagName.toLowerCase() === 'summary'
@@ -404,6 +504,7 @@ function render(snapshot) {
   };
   notice.textContent = messages[snapshot.history] ?? 'History status unavailable.';
   if (chapterView) notice.textContent += ' Request chapters are chronological intervals, not causal groups or completion reports.';
+  if (laneView) notice.textContent += ' Lanes keep exact recorded sources separate. Open a lane for its chronological events; lane order does not establish event order or parentage.';
   if (snapshot.omitted) notice.textContent += ' Older events were omitted; showing the most recent supported events.';
   setConnection(snapshot.history === 'unsupported' ? 'Events unavailable' : `Connected · ${snapshot.entries.length} events`,
     snapshot.history === 'unsupported' ? 'error' : 'connected');

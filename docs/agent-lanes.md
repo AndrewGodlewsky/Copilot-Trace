@@ -1,0 +1,29 @@
+# Recorded agent lanes
+
+Choose **Agent lanes** in the View control. Each recorded source has a stacked, collapsible lane, with original event disclosures inside. The same event nodes and evidence remain available in Chronological events, grouped calls and request chapters. Lane ordering is main chat first, then other agents in their first retained appearance, then unassigned records. It is not global event order or a delegation tree.
+
+## Identity and delegation
+
+Lane membership uses the projected exact source-agent ID, at most 256 characters. The empty source is the main chat. Missing or invalid projected sources stay together in an explicitly unassigned pool; this does not identify them as one agent. Display names are labels only: two agents with the same name keep distinct lanes. The existing collector's 300-event retention bound also bounds the number of lanes and controls.
+
+The installed SDK exposes a subagent instance in the event envelope's `agentId`. Its `subagent.started`, `subagent.completed` and `subagent.failed` data include the spawning invocation's `toolCallId`; a completed event can record `cancelled`. These fields were checked against the installed declarations and disposable two-agent runtime fixture described in [Copilot integration](copilot-integration.md). The outer `parentId` is chronological linkage and is never used as a parent agent. A nested task-registry `data.parentId` is not assumed to map to a source ID.
+
+Lifecycle details are read only from complete bounded evidence whose event ID, type, source, timestamp and tool-call ID match the projected entry. Malformed, shortened or contradictory evidence remains unknown. One start and at most one outcome must agree on one exact spawning-tool ID. A parent evidence button additionally requires one retained tool start for that ID, in a different known source, with matching complete evidence; duplicate starts or records for other/unknown sources make the relationship ambiguous. No parent is inferred by name, timing, tool name or proximity. Parent and boundary buttons reset filters, select Chronological events, and open/focus the exact original record. An evicted parent removes its button rather than keeping a stale target.
+
+## Timing and states
+
+Each lane's bars share one timestamp scale. Main-chat bars are consecutive matched model-turn start/end pairs for the exact turn ID; reused loop IDs can form later separate pairs. Idle/unknown-delivery input, interruptions, mismatched ends and new starts stop an unfinished pair. Steering and queued input do not themselves close a turn. Main bars can include waiting and delegated work; they are not whole requests or CPU time.
+
+A subagent bar requires one start and one completion/failure with the same recorded source and spawning-tool ID. Timestamps must be valid timezone-bearing calendar values and strictly increase between boundaries. Retained events within the lane must stay inside those boundaries in nondecreasing recorded-time order. Missing or conflicting boundaries, malformed evidence, invalid times, zero-length or reversed intervals produce **Timing unknown**, not a zero-length bar or a running claim. Unknown-source records have no timing bar.
+
+Each bar has a textual equivalent: offsets from the shared origin and observed elapsed seconds. Exact timestamps remain in original event evidence, and the shared origin/end are displayed above the lanes. Two different lanes with a positive intersection count as recorded overlap; touching endpoints do not. Simultaneous starts with later valid ends can overlap. Main-turn and subagent intervals may overlap, so sums can exceed elapsed wall time. These are recorded intervals, not proof of continuous execution, causality, success, model thinking time or billing.
+
+Completion, cancellation, failure, completion not observed and unknown outcomes stay distinct. A completed event alone can describe an outcome with a missing start; it cannot create a full duration. Invalid cancellation metadata leaves outcome unknown. Partial history or omissions are explicitly reported, and a missing bar never establishes inactivity. Observed complete pairs can remain useful within a partial retained window, but cannot describe the full task.
+
+## Interaction and checks
+
+Lanes always stack vertically, including narrow panes; they never add horizontal columns for additional agents. Collapse hides event details while preserving the common-scale bar and text. Existing activity filters hide nonmatching rows and empty lanes. Lane headers/bars retain full retained context and report hidden counts; filtering does not recompute the scale, overlap or Statistics. Evidence links restore Everything. Focus and disclosures survive live completion, earlier history, mode changes and retention. If a removed control has no surviving target, focus returns to the surviving lane header or view/filter control. Inspecting/changing views or filters pauses Follow live.
+
+Pure fixture tests cover overlap versus sequential work, simultaneous times, clock anomalies, missing/conflicting boundaries, cancellation/failure, reused names, invalid IDs, parent ambiguity, many agents and retention. Renderer tests exercise shared numeric bar positions, literal exact evidence navigation, all views, filters, focus, collapsed updates and retained Statistics using the existing DOM boundary double. The installed-runtime fixture verifies actual distinct same-name agent identities, root spawning-tool linkage, Trace projections and positive observed intervals with fixed local responses and no paid inference or existing user chat.
+
+Native geometry, narrow/short panes, enlarged text, keyboard/screen-reader traversal and live reading position remain owner-deferred for tonight's run. DOM tests and the runtime fixture do not claim those checks passed.

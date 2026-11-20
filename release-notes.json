@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.17",
+    "summary": "Compare recorded main-chat and subagent activity in lanes, with honest timing limits and links to supported source evidence."
+  },
+  {
     "version": "0.1.16",
     "summary": "Focus the timeline on tools, automation or problems while keeping retained totals and hidden activity clear. Reset the filter to restore the full view."
   },

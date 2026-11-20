@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
+import { agentLanes } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
 
 const sdkDirectory = process.env.COPILOT_SDK_DIR;
 const cli = process.env.COPILOT_CLI_PATH;
@@ -16,29 +17,53 @@ const home = join(temporary, 'home');
 await mkdir(project);
 let requests = 0;
 let allowSyntheticResponses = false;
+let allowAgentResponses = false;
+let fixtureError;
 let releaseFirst;
 const firstResponse = new Promise(resolve => { releaseFirst = resolve; });
+let releaseAgents;
+const agentResponses = new Promise(resolve => { releaseAgents = resolve; });
 const fixture = createServer(async (req, res) => {
-  requests++;
-  if (!allowSyntheticResponses || requests > 3) {
+  const number = ++requests;
+  if (!allowSyntheticResponses || number > (allowAgentResponses ? 7 : 3)) {
     req.resume(); res.writeHead(500); res.end('Unexpected fixture inference request.'); return;
   }
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-  const body = JSON.parse(Buffer.concat(chunks).toString());
-  if (requests === 1) await firstResponse;
-  const content = 'Synthetic local fixture response.';
-  if (body.stream) {
-    res.writeHead(200, { 'content-type': 'text/event-stream' });
-    for (const [delta, finish_reason] of [[{ role: 'assistant', content }, null], [{}, 'stop']]) {
-      res.write('data: ' + JSON.stringify({ id: `fixture-${requests}`, object: 'chat.completion.chunk',
-        created: 1, model: 'fixture', choices: [{ index: 0, delta, finish_reason }] }) + '\n\n');
+  try {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    if (number === 1) await firstResponse;
+    let message = { role: 'assistant', content: 'Synthetic local fixture response.' }, reason = 'stop';
+    if (number === 4) {
+      assert.ok(body.tools.some(tool => tool.function?.name === 'task'));
+      message = { role: 'assistant', content: null, tool_calls: ['one', 'two'].map(name => ({
+        id: `fixture-task-${name}`, type: 'function', function: { name: 'task', arguments: JSON.stringify({
+          name, description: 'Synthetic local fixture', prompt: 'Return the fixed fixture response.',
+          agent_type: 'trace-fixture-agent', mode: 'sync' }) } })) };
+      reason = 'tool_calls';
     }
-    res.end('data: [DONE]\n\n');
-  } else {
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ id: `fixture-${requests}`, object: 'chat.completion', model: 'fixture',
-      choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }] }));
+    if (number === 5 || number === 6) {
+      assert.equal(body.tools?.length ?? 0, 0, 'Synthetic child agents must have no actual model-facing tools.');
+      if (number === 6) setTimeout(releaseAgents, 20);
+      await agentResponses;
+    }
+    if (body.stream) {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const first = message.tool_calls ? { ...message, tool_calls: message.tool_calls.map((tool, index) => ({ index, ...tool })) } : message;
+      for (const [delta, finish_reason] of [[first, null], [{}, reason]]) {
+        res.write('data: ' + JSON.stringify({ id: `fixture-${number}`, object: 'chat.completion.chunk',
+          created: 1, model: 'fixture', choices: [{ index: 0, delta, finish_reason }] }) + '\n\n');
+      }
+      res.end('data: [DONE]\n\n');
+    } else {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ id: `fixture-${number}`, object: 'chat.completion', model: 'fixture',
+        choices: [{ index: 0, message, finish_reason: reason }] }));
+    }
+  } catch (error) {
+    fixtureError = error;
+    if (!res.headersSent) res.writeHead(500);
+    res.end('Synthetic fixture failure.');
   }
 });
 await new Promise(resolve => fixture.listen(0, '127.0.0.1', resolve));
@@ -138,11 +163,79 @@ try {
   }
   await session.rpc.canvas.close({ instanceId: input.instanceId });
   await until(() => fetch(chapterPanel.url).then(() => false, () => true), Boolean, 'chapter fixture server shutdown');
+  await session.disconnect();
+
+  // A second disposable session verifies actual delegation identities, using only the task tool.
+  session = await client.createSession({
+    workingDirectory: project, configDirectory: home, availableTools: ['builtin:task'],
+    requestExtensions: true, requestCanvasRenderer: true,
+    extensionSdkPath: sdkDirectory, pluginDirectories: [root], enableConfigDiscovery: false,
+    customAgents: [{ name: 'trace-fixture-agent', displayName: 'Same fixture display name',
+      description: 'Synthetic local fixture only.', prompt: 'Return the fixed fixture response.',
+      tools: [], model: 'fixture', modelPolicy: 'required', skills: [], mcpServers: {} }],
+    onPermissionRequest: () => ({ kind: 'denied-by-rules', rules: [] }),
+    model: 'fixture', provider: { type: 'openai', baseUrl: `http://127.0.0.1:${fixture.address().port}/v1`, apiKey: 'fixture', wireApi: 'completions' },
+  });
+  await session.rpc.tools.initializeAndValidate();
+  assert.deepEqual((await session.rpc.tools.getCurrentMetadata()).tools.map(tool => tool.name), ['task']);
+  await until(() => session.rpc.canvas.list(), value => value.canvases?.some(canvas => canvas.canvasId === 'trace'), 'agent canvas registration');
+  const agentEvents = [];
+  const stopAgentEvents = session.on(event => agentEvents.push(event));
+  const agentPanel = await session.rpc.canvas.open(input);
+  assert.equal(requests, 3, 'Opening the agent fixture canvas must not trigger inference.');
+  allowAgentResponses = true;
+  await session.sendAndWait({ prompt: 'Synthetic delegation fixture only.' }, 30000);
+  if (fixtureError) throw fixtureError;
+  const agentSnapshot = await until(() => fetch(agentPanel.url + 'events').then(r => r.json()),
+    value => value.history === 'ready' && value.entries.filter(entry => entry.type === 'subagent.completed').length === 2, 'agent lifecycle projection');
+  stopAgentEvents();
+  assert.equal(requests, 7, 'Only three input and four delegation fixture responses are permitted.');
+  assert.equal(agentEvents.some(event => event.type === 'session.error'), false);
+  const starts = agentEvents.filter(event => event.type === 'subagent.started');
+  const ends = agentEvents.filter(event => event.type === 'subagent.completed');
+  assert.equal(starts.length, 2);
+  assert.equal(ends.length, 2);
+  assert.equal(new Set(starts.map(event => event.agentId)).size, 2, 'Identical display names must still have distinct agent identities.');
+  assert.deepEqual([...new Set(starts.map(event => event.data.agentDisplayName))], ['Same fixture display name']);
+  for (const start of starts) {
+    assert.ok(typeof start.agentId === 'string' && start.agentId.length > 0 && start.agentId.length <= 256);
+    const end = ends.find(event => event.agentId === start.agentId);
+    assert.equal(end.data.toolCallId, start.data.toolCallId);
+    assert.ok(agentEvents.some(event => event.type === 'tool.execution_start' && event.agentId === undefined && event.data.toolCallId === start.data.toolCallId));
+    assert.ok(agentEvents.some(event => event.type === 'assistant.turn_start' && event.agentId === start.agentId && event.data.parentToolCallId === start.data.toolCallId));
+  }
+  assert.ok(Math.max(...starts.map(event => Date.parse(event.timestamp))) < Math.min(...ends.map(event => Date.parse(event.timestamp))), 'Held synthetic responses produce observed overlapping lifecycles.');
+  for (const raw of agentEvents.filter(event => ['subagent.started', 'subagent.completed', 'assistant.turn_start', 'tool.execution_start', 'tool.execution_complete'].includes(event.type))) {
+    const projected = agentSnapshot.entries.find(entry => entry.id === raw.id);
+    assert.ok(projected, 'Attached Trace retains actual agent and delegation records.');
+    assert.equal(projected.agentId, raw.agentId ?? '');
+    assert.equal(projected.toolCallId, raw.data.toolCallId ?? '');
+    assert.equal(projected.timestamp, raw.timestamp);
+    const evidence = JSON.parse(projected.evidence);
+    assert.equal(evidence.agentId, raw.agentId);
+    assert.equal(evidence.data.toolCallId, raw.data.toolCallId);
+    assert.equal(evidence.data.parentToolCallId, raw.data.parentToolCallId);
+  }
+  const laneView = agentLanes(agentSnapshot.entries, agentSnapshot);
+  assert.ok(laneView.scale && laneView.scale.end > laneView.scale.start);
+  assert.ok(laneView.overlaps >= 1, 'Actual retained child lifecycles produce recorded lane overlap.');
+  for (const start of starts) {
+    const lane = laneView.lanes.find(value => value.agentId === start.agentId);
+    const end = ends.find(event => event.agentId === start.agentId);
+    const spawning = agentEvents.find(event => event.type === 'tool.execution_start' && event.agentId === undefined && event.data.toolCallId === start.data.toolCallId);
+    assert.ok(lane, 'The lane identity comes from the actual child source, not its reused display name.');
+    assert.equal(lane.parentId, spawning.id);
+    assert.deepEqual(lane.intervals, [{ start: Date.parse(start.timestamp), end: Date.parse(end.timestamp), startId: start.id, endId: end.id }]);
+    assert.ok(lane.links.some(link => link.id === start.id) && lane.links.some(link => link.id === end.id));
+  }
+  await session.rpc.canvas.close({ instanceId: input.instanceId });
+  await until(() => fetch(agentPanel.url).then(() => false, () => true), Boolean, 'agent fixture server shutdown');
   assert.equal(expired, false);
-  console.log('PASS: installed SDK discovery, plugin ownership, real history/live events, open/reopen/close, assets and zero automatic inference; actual input delivery/interaction projection verified with three explicit synthetic local responses and no paid inference. Native rendering and /trace discovery remain manual checks.');
+  console.log('PASS: installed SDK discovery, plugin ownership, history/live events, open/reopen/close, assets and zero automatic inference; actual input delivery/interaction and overlapping agent/delegation projection verified with seven fixed local responses across two disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
 } finally {
   clearTimeout(timer);
   releaseFirst();
+  releaseAgents();
   await session?.disconnect().catch(() => {});
   try { await client.forceStop(); }
   finally { fixture.closeAllConnections(); await new Promise(resolve => fixture.close(resolve)); }

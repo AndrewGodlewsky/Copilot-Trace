@@ -97,6 +97,17 @@ input { accent-color: var(--model); margin: 0; }
 .chapter-events { display: flex; flex-direction: column; align-items: center; list-style: none; margin: 0; padding: 18px 12px; }
 .chapter-events > .step { max-width: 100%; }
 .chapter-events > .step[data-turn='inside'] { width: calc(100% - 12px); margin-left: 12px; }
+.step.agent-lane { max-width: 100%; }
+#timeline[data-lanes='true'] > .step::before, #timeline[data-lanes='true'] > .step::after { display: none; }
+#timeline[data-lanes='true'] > .step + .step { margin-top: 12px; }
+.agent-lane > .node > summary .node-subtitle { display: block; overflow: visible; }
+.lane-timing { display: block; margin-top: 6px; color: var(--muted); font-size: .786rem; font-variant-numeric: tabular-nums; }
+.lane-graph { display: block; width: 100%; height: 24px; margin-top: 8px; overflow: hidden; }
+.lane-graph[data-empty='true'] { display: none; }
+.lane-graph line { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.lane-graph rect { fill: var(--agent); }
+.lane-events { display: flex; flex-direction: column; align-items: center; list-style: none; margin: 0; padding: 18px 12px; }
+.lane-events > .step { max-width: 100%; }
 .boundary-links { display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 14px 12px; }
 .boundary-links button { font-size: .857rem; }
 .node { border: 1px solid var(--node-color); border-left-width: 3px; border-radius: 9px; background: var(--surface); }
@@ -172,6 +183,8 @@ body:has(.footer-panel[open]) { overflow: hidden; }
 }
 @media (prefers-reduced-motion: reduce) { .chevron { transition: none; } }
 @media (forced-colors: active) {
+  .lane-graph line { stroke: CanvasText; }
+  .lane-graph rect { fill: Highlight; }
   .node { border-color: CanvasText; }
   .step + .step::before { background: CanvasText; }
   .step + .step::after, .chevron { border-color: CanvasText; }
