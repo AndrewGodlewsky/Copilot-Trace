@@ -1,4 +1,4 @@
-import { describeActor, explainStep, describeHookGroup, describeToolGroup, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
+import { describeActor, explainStep, describeHookGroup, describeToolGroup, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -173,6 +173,7 @@ function row(entry) {
   const actor = describeActor(entry);
   const node = nodeShell(describeStep(entry), actor);
   const body = element('div', undefined, 'evidence');
+  node.body = body;
   if (entry.type === 'assistant.turn_start') {
     node.activityBox = element('div', undefined, 'activity-source');
     node.activityBox.hidden = true;
@@ -219,6 +220,43 @@ function metadataValues(entry) {
   const actor = describeActor(entry);
   const time = typeof entry.timestamp === 'string' && entry.timestamp ? entry.timestamp : 'Not recorded';
   return [['Recorded time', time], ['Actor', actor.role], ['Source', actor.source], ['Event', entry.type]];
+}
+
+function renderActionStages(group, description) {
+  if (!group.actions) {
+    group.actions = element('details', undefined, 'action-stages');
+    group.actions.append(element('summary', 'Observed action stages'));
+    group.actions.addEventListener('toggle', () => { if (group.actions.open) follow.checked = false; });
+    group.permission = element('p', '', 'action-permission');
+    group.stages = element('ol', undefined, 'action-stage-list');
+    group.stages.setAttribute('aria-label', 'Observed stages in recorded event order');
+    group.stageNotes = element('p', '', 'action-stage-notes');
+    group.stageRows = new Map();
+    group.actions.append(group.permission, group.stages, group.stageNotes);
+  }
+  if (group.permission.textContent !== description.permission) group.permission.textContent = description.permission;
+  const notes = description.notes.join(' ');
+  if (group.stageNotes.textContent !== notes) group.stageNotes.textContent = notes;
+  const retained = new Set(description.stages.map(stage => stage.id));
+  for (const [id, row] of group.stageRows) if (!retained.has(id)) { row.item.remove(); group.stageRows.delete(id); }
+  let previous;
+  for (const stage of description.stages) {
+    let row = group.stageRows.get(stage.id);
+    if (!row) {
+      row = { item: element('li'), button: element('button'), time: element('span', '', 'stage-time'), detail: element('p') };
+      row.button.type = 'button';
+      row.button.addEventListener('click', () => showBoundary(stage.id));
+      row.item.append(row.button, row.time, row.detail);
+      group.stageRows.set(stage.id, row);
+    }
+    const label = `${stage.label} — view evidence`;
+    if (row.button.textContent !== label) row.button.textContent = label;
+    const time = stage.timestamp || 'Recorded time unavailable';
+    if (row.time.textContent !== time) row.time.textContent = time;
+    if (row.detail.textContent !== stage.detail) row.detail.textContent = stage.detail;
+    row.detail.hidden = !stage.detail;
+    previous = place(group.stages, row.item, previous);
+  }
 }
 
 function place(parent, item, previous) {
@@ -407,6 +445,7 @@ function render(snapshot) {
   const laneView = eventOrder.value === 'lanes';
   const chronological = eventOrder.value !== 'grouped';
   const contexts = turnContext(snapshot.entries, snapshot);
+  const stages = actionStages(snapshot.entries, snapshot);
   renderStatistics(snapshot);
   const oldGroups = groups.map(group => ({ group, ids: group.ids, open: group.details.open }));
   const retained = new Set(snapshot.entries.map(entry => entry.id));
@@ -470,6 +509,14 @@ function render(snapshot) {
     applyContext(group, tool ? null : contexts.get(section.entries[0].id));
     group.ids = new Set(section.entries.map(entry => entry.id));
     if (tool) {
+      renderActionStages(group, stages.get(section.entries[0].id));
+      if (oldGroups.some(old => old.group.actions?.open && section.entries.some(entry => old.ids.has(entry.id)))) group.actions.open = true;
+      const visibleBoundary = section.entries.find(entry => matchesFilter(entry, activityFilter.value)) || section.entries[0];
+      const target = chronological ? nodes.get(visibleBoundary.id).body : group.details;
+      if (group.actions.parentElement !== target) {
+        if (chronological) target.append(group.actions);
+        else target.insertBefore(group.actions, group.children);
+      }
       let previousButton;
       for (const entry of section.entries) {
         let button = group.buttons.get(entry.id);
@@ -505,7 +552,10 @@ function render(snapshot) {
       previous = place(timeline, section.group?.item || nodes.get(section.entries[0].id).item, previous);
     }
   }
-  for (const group of groups) if (chronological || !nextGroups.includes(group)) group.item.remove();
+  for (const group of groups) {
+    if (chronological || !nextGroups.includes(group)) group.item.remove();
+    if (!nextGroups.includes(group)) group.actions?.remove();
+  }
   for (const chapter of chapters) if (!chapterView || !nextChapters.includes(chapter)) chapter.item.remove();
   for (const lane of lanes) if (!laneView || !nextLanes.includes(lane)) lane.item.remove();
   for (const group of nextGroups) {

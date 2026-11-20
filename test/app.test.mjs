@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import * as presentation from '../com.github.copilot/extensions/trace/web/presentation.mjs';
 import { createFollow } from '../com.github.copilot/extensions/trace/web/follow.mjs';
+import { createTrace } from '../com.github.copilot/extensions/trace/trace.mjs';
 
 // A small DOM boundary double exercises reconciliation, not browser layout or native focus behavior.
 function fixture(source) {
@@ -103,6 +104,107 @@ function filterMode(ui, value) {
 }
 const byClass = (element, name) => walk(element).find(node => node.className.split(' ').includes(name));
 const evidenceRows = group => byClass(group, 'tool-events').children;
+
+async function actionFixture() {
+  const raw = [
+    { id: 'proposal', type: 'assistant.message', data: { toolRequests: [{ toolCallId: 'call', name: 'powershell', arguments: {} }] } },
+    { id: 'invocation', type: 'tool.execution_start', data: { toolCallId: 'call', toolName: 'powershell' } },
+    { id: 'permission', type: 'permission.requested', data: { requestId: 'request', permissionRequest: { toolCallId: 'call' } } },
+    { id: 'decision', type: 'permission.completed', data: { requestId: 'request', toolCallId: 'call', result: { kind: 'denied-interactively-by-user' } } },
+    { id: 'result', type: 'tool.execution_complete', data: { toolCallId: 'call', success: false } },
+  ].map(entry => ({ ...entry, timestamp: '2026-11-20T12:00:00Z' }));
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => raw });
+  await trace.ready;
+  const entries = trace.snapshot().entries;
+  trace.close();
+  return entries;
+}
+
+test('observed action stages navigate to exact unchanged original evidence from every view and filter', async () => {
+  const entries = await actionFixture();
+  for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    const ui = fixture(appSource);
+    ui.get('#event-order').value = mode;
+    ui.render(entries);
+    const counts = ui.get('#stat-counts').textContent;
+    assert.equal(walk(ui.get('#timeline')).filter(node => node.className === 'action-stages').length, 1);
+    const disclosure = byClass(ui.get('#timeline'), 'action-stages');
+    assert.ok(disclosure, 'The current tool card exposes observed stages in each view.');
+    disclosure.open = true;
+    const stageButtons = walk(disclosure).filter(node => node.tagName === 'button');
+    assert.equal(stageButtons.length, 5);
+    assert.match(disclosure.textContent, /invocation entered/i);
+    assert.match(disclosure.textContent, /Permission denied/);
+    assert.match(disclosure.textContent, /source unknown/i);
+    const requestButton = stageButtons[2];
+    filterMode(ui, 'tools');
+    requestButton.focus();
+    requestButton.dispatch('click');
+    assert.equal(ui.get('#event-order').value, 'chronological');
+    assert.equal(ui.get('#activity-filter').value, 'everything');
+    assert.equal(ui.get('#follow').checked, false);
+    assert.deepEqual(visibleEvidence(ui), entries.map(entry => entry.evidence));
+    const row = ui.get('#timeline').children[2];
+    assert.equal(ui.document.activeElement, row.firstElementChild.firstElementChild);
+    assert.equal(byClass(row, 'recorded-evidence').open, true);
+    assert.equal(ui.get('#stat-counts').textContent, counts);
+    assert.equal(byClass(ui.get('#timeline'), 'action-stages'), disclosure, 'One disclosure moves with the existing card; no original rows are cloned.');
+    assert.equal(disclosure.open, true);
+  }
+});
+
+test('stage reconciliation preserves focused controls and falls back safely when evidence is evicted', async () => {
+  const entries = await actionFixture(), ui = fixture(appSource);
+  ui.render(entries.slice(0, 3));
+  const disclosure = byClass(ui.get('#timeline'), 'action-stages');
+  assert.ok(disclosure);
+  disclosure.open = true;
+  const requestButton = walk(disclosure).filter(node => node.tagName === 'button')[2];
+  requestButton.focus();
+  ui.document.scrollingElement.scrollTop = 333;
+  ui.render(entries);
+  assert.equal(ui.document.activeElement, requestButton);
+  assert.equal(ui.document.scrollingElement.scrollTop, 333);
+  assert.equal(disclosure.open, true);
+  ui.render(entries.filter(entry => entry.id !== 'permission'), { omitted: 1 });
+  assert.equal(requestButton.isConnected, false);
+  assert.equal(ui.document.activeElement.isConnected, true);
+  assert.equal(ui.document.scrollingElement.scrollTop, 333);
+  assert.ok(walk(disclosure).every(node => node !== requestButton));
+});
+
+test('the stage disclosure stays reachable with a retained failed result under Problems in each view', async () => {
+  const entries = await actionFixture();
+  for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    const ui = fixture(appSource);
+    ui.get('#event-order').value = mode;
+    ui.render(entries);
+    const disclosure = byClass(ui.get('#timeline'), 'action-stages');
+    filterMode(ui, 'problems');
+    assert.ok(visibleWalk(ui.get('#timeline')).includes(disclosure), `Observed stages remain reachable in ${mode}.`);
+    const decision = walk(disclosure).filter(node => node.tagName === 'button')[3];
+    decision.dispatch('click');
+    assert.equal(ui.get('#activity-filter').value, 'everything');
+    assert.equal(ui.document.activeElement, ui.get('#timeline').children[3].firstElementChild.firstElementChild);
+  }
+});
+
+test('canonical history merging tool identities removes an obsolete stage disclosure from original rows', async () => {
+  const entries = await actionFixture(), ui = fixture(appSource);
+  ui.get('#event-order').value = 'chronological';
+  const result = entries.at(-1);
+  const raw = JSON.parse(result.evidence);
+  raw.data.toolCallId = 'other';
+  ui.render([...entries.slice(0, -1), { ...result, toolCallId: 'other', evidence: JSON.stringify(raw) }]);
+  const disclosures = walk(ui.get('#timeline')).filter(node => node.className === 'action-stages');
+  assert.equal(disclosures.length, 2);
+  disclosures[1].open = true;
+  ui.render(entries);
+  const retained = walk(ui.get('#timeline')).filter(node => node.className === 'action-stages');
+  assert.equal(retained.length, 1, 'Merging existing call identities must not leave a second stage panel on the result row.');
+  assert.equal(retained[0].open, true, 'The observed-stage disclosure stays open across a history merge.');
+  assert.deepEqual(visibleEvidence(ui), entries.map(entry => entry.evidence));
+});
 
 test('structured explanations and optional literal evidence update without replacing focused disclosures in every view', () => {
   for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {

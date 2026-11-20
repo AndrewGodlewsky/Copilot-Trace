@@ -111,6 +111,15 @@ input { accent-color: var(--model); margin: 0; }
 .lane-events > .step { max-width: 100%; }
 .boundary-links { display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 14px 12px; }
 .boundary-links button { font-size: .857rem; }
+.action-stages { padding: 0 14px 12px; font-size: .857rem; overflow-wrap: anywhere; }
+.action-stages > summary { cursor: pointer; padding: 8px 0; }
+.evidence > .action-stages { padding-inline: 0; }
+.action-stage-list { padding-left: 22px; margin: 12px 0; }
+.action-stage-list li + li { margin-top: 14px; }
+.action-stage-list button { max-width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.stage-time { display: block; margin-top: 4px; color: var(--muted); font-size: .786rem; font-variant-numeric: tabular-nums; }
+.action-stage-list p { margin: 4px 0 0; }
+.action-stage-notes { color: var(--muted); }
 .node { border: 1px solid var(--node-color); border-left-width: 3px; border-radius: 9px; background: var(--surface); }
 .node > summary { display: flex; align-items: center; gap: 12px; padding: 12px 14px; cursor: pointer; list-style: none; border-radius: 8px; }
 .node > summary::-webkit-details-marker { display: none; }

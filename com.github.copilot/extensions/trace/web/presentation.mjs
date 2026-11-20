@@ -170,13 +170,12 @@ export function explainStep(entry = {}) {
   }
   if (entry.type === 'permission.completed') {
     const kind = data?.result && typeof data.result === 'object' && !Array.isArray(data.result) ? data.result.kind : null;
-    if (['approved', 'approved-read-only-for-session', 'approved-for-session', 'approved-for-location'].includes(kind)) {
+    if (permissionApprovals.has(kind)) {
       means = `The recorded decision kind is ${kind}. Approval permits an operation; it does not prove it executed.`;
-    } else if (['denied-by-rules', 'denied-no-approval-rule-and-could-not-request-from-user', 'denied-interactively-by-user',
-      'denied-by-content-exclusion-policy', 'denied-by-permission-request-hook', 'cancelled'].includes(kind)) {
+    } else if (permissionDenials.has(kind) || kind === 'cancelled') {
       means = `The recorded decision kind is ${kind}. This records a refusal or cancellation, not a successful operation.`;
     }
-    if (['assisted_approval', 'human_response', 'host_policy', 'unattended_fallback', 'authorization_carry_forward'].includes(data?.decisionSource)) {
+    if (decisionSources.has(data?.decisionSource)) {
       unknown = `Recorded decision source: ${data.decisionSource}. This attribution does not independently prove that a person interacted or that the operation executed.`;
     }
   }
@@ -412,6 +411,119 @@ export function describeToolGroup(entries) {
   const timing = Number.isFinite(elapsed) && elapsed >= 0 ? `${elapsed / 1000} s elapsed` : 'Elapsed unknown';
   return { kind: 'Tool', title: conflicting ? 'Tool call with conflicting boundaries' : describeStep(start || end).title,
     subtitle: `${source} · ${status} · ${timing}`, tone: !conflicting && end?.success === false ? 'error' : 'tool' };
+}
+
+const permissionApprovals = new Set(['approved', 'approved-read-only-for-session', 'approved-for-session', 'approved-for-location']);
+const permissionDenials = new Set(['denied-by-rules', 'denied-no-approval-rule-and-could-not-request-from-user',
+  'denied-interactively-by-user', 'denied-by-content-exclusion-policy', 'denied-by-permission-request-hook']);
+const decisionSources = new Set(['assisted_approval', 'human_response', 'host_policy', 'unattended_fallback', 'authorization_carry_forward']);
+
+// One bounded parse per retained event; neither chronology nor recovery ownership is a correlation key.
+export function actionStages(entries, { history = 'ready', omitted = 0 } = {}) {
+  const usableId = value => typeof value === 'string' && value.length > 0 && value.length <= 256;
+  const object = value => value && typeof value === 'object' && !Array.isArray(value);
+  const identity = (entry, call) => toolIdentity({ agentId: entry.agentId, toolCallId: call });
+  const records = new Map(entries.map(entry => [entry.id, explanationData(entry)]));
+  const proposals = new Map(), permissions = new Map();
+  const add = (map, key, value) => {
+    if (key === null) return;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(value);
+  };
+  for (const entry of entries) {
+    const data = records.get(entry.id);
+    if (!data) continue;
+    if (entry.type === 'assistant.message' && Array.isArray(data.toolRequests)) {
+      const valid = data.toolRequests.length <= 300 && data.toolRequests.every(request => object(request)
+        && usableId(request.toolCallId) && typeof request.name === 'string' && request.name.length > 0 && request.name.length <= 180);
+      for (const request of data.toolRequests) {
+        if (object(request)) add(proposals, identity(entry, request.toolCallId), { entry, name: request.name, valid });
+      }
+    }
+    if (['permission.requested', 'permission.completed'].includes(entry.type) && usableId(data.requestId)) {
+      add(permissions, identity(entry, data.requestId), { entry, data });
+    }
+  }
+  const permissionCalls = new Map();
+  for (const bucket of permissions.values()) {
+    const requests = bucket.filter(record => record.entry.type === 'permission.requested');
+    const decisions = bucket.filter(record => record.entry.type === 'permission.completed');
+    const request = requests[0]?.data, decision = decisions[0]?.data;
+    const requestCall = request?.permissionRequest?.toolCallId, decisionCall = decision?.toolCallId;
+    const calls = [...new Set(bucket.map(({ entry, data }) => entry.type === 'permission.requested'
+      ? data.permissionRequest?.toolCallId : data.toolCallId).filter(usableId))];
+    const valid = requests.length <= 1 && decisions.length <= 1 && calls.length === 1
+      && (!request || (object(request.permissionRequest) && (requestCall === undefined || usableId(requestCall))
+        && request.ownerAgentId === undefined && request.ownerSessionId === undefined))
+      && (!decision || decisionCall === undefined || usableId(decisionCall));
+    for (const call of calls) add(permissionCalls, identity(bucket[0].entry, call), { bucket, valid });
+  }
+  const result = new Map();
+  for (const section of groupSteps(entries).filter(section => section.kind === 'tool')) {
+    const boundaries = section.entries, key = toolIdentity(boundaries[0]);
+    const starts = boundaries.filter(entry => entry.type === 'tool.execution_start');
+    const ends = boundaries.filter(entry => entry.type === 'tool.execution_complete');
+    const linked = key !== null && starts.length <= 1 && ends.length <= 1 && boundaries.every(entry => {
+      const data = records.get(entry.id);
+      return toolIdentity(entry) === key && data?.toolCallId === entry.toolCallId;
+    });
+    const selected = new Map();
+    const notes = ['Recorded order only; these stages are not a required sequence.',
+      'Invocation entry and approval do not prove the operation executed. A tool result reports an outcome, not overall task success.',
+      'Only complete matching retained evidence is linked. Missing, ambiguous or unsupported ownership links remain separate.'];
+    const stage = (entry, label, detail = '', extra = {}) => selected.set(entry.id,
+      { id: entry.id, type: entry.type, timestamp: entry.timestamp, label, detail, ...extra });
+    for (const entry of boundaries) {
+      const data = records.get(entry.id);
+      if (!data || data.toolCallId !== entry.toolCallId) continue;
+      if (entry.type === 'tool.execution_start') stage(entry, 'Tool invocation entered');
+      else stage(entry, data.success === true && entry.success === true ? 'Tool result: reported success'
+        : data.success === false && entry.success === false ? 'Tool result: reported failure' : 'Tool result: outcome unknown');
+    }
+    if (!linked) notes.push('Call boundaries are conflicting or unavailable; other stages are not linked to this card.');
+    if (linked) {
+      const candidates = proposals.get(key) || [], proposal = candidates[0];
+      const startData = starts[0] && records.get(starts[0].id);
+      if (candidates.length === 1 && proposal.valid && (!startData || proposal.name === startData.toolName)) {
+        stage(proposal.entry, 'Assistant requested a tool');
+      } else if (candidates.length) notes.push('Assistant tool requests are duplicated, conflicting or unusable; their original rows remain separate.');
+      for (const { bucket, valid } of permissionCalls.get(key) || []) {
+        if (!valid) {
+          notes.push('Permission IDs or recovery ownership are ambiguous or unsupported; these records remain separate.');
+          continue;
+        }
+        for (const { entry, data } of bucket) {
+          if (entry.type === 'permission.requested') stage(entry, 'Permission requested', 'A request is not a decision.');
+          else {
+            const kind = object(data.result) ? data.result.kind : null;
+            const outcome = permissionApprovals.has(kind) ? 'approved' : permissionDenials.has(kind) ? 'denied'
+              : kind === 'cancelled' ? 'cancelled' : 'unknown';
+            const decisionSource = decisionSources.has(data.decisionSource) ? data.decisionSource : null;
+            const detail = `Recorded kind: ${usableId(kind) ? kind : 'unknown'}. `
+              + (decisionSource ? `Recorded decision source: ${decisionSource}.` : 'Decision source unknown; the kind does not identify a person.');
+            stage(entry, `Permission ${outcome}`, detail, { outcome, decisionSource });
+          }
+        }
+      }
+    }
+    const stages = entries.filter(entry => selected.has(entry.id)).map(entry => selected.get(entry.id));
+    const decisions = stages.filter(stage => stage.type === 'permission.completed');
+    const requests = stages.filter(stage => stage.type === 'permission.requested');
+    const settled = new Set(decisions.map(stage => records.get(stage.id).requestId));
+    let permission = decisions.length === 1 ? `Recorded permission: ${decisions[0].outcome}`
+      : decisions.length ? 'Multiple permission decisions; no overall authorization inferred' : 'Permission unknown';
+    if (requests.some(stage => !settled.has(records.get(stage.id).requestId))
+      || (permissionCalls.get(key) || []).some(record => !record.valid)) permission = 'Permission unknown';
+    if (!stages.some(stage => stage.type === 'assistant.message')) notes.push('Assistant tool request not linked in retained evidence.');
+    if (!requests.length) notes.push('Permission request unknown; no request is linked in retained evidence.');
+    if (!starts.length) notes.push('Invocation entry unknown; no start boundary is retained.');
+    if (!ends.length) notes.push('Tool outcome unknown; no result boundary is retained.');
+    if (permission === 'Permission unknown') notes.push('Missing permission evidence does not establish approval or preauthorization.');
+    if (history !== 'ready' || omitted) notes.push('History is incomplete or older events were omitted; only retained evidence is shown.');
+    const description = { stages, notes: [...new Set(notes)], permission };
+    for (const entry of boundaries) result.set(entry.id, description);
+  }
+  return result;
 }
 
 // Temporal membership only: keep interleaved agents in their original event order.

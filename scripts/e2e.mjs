@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
-import { agentLanes } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
+import { actionStages, agentLanes } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
 
 const sdkDirectory = process.env.COPILOT_SDK_DIR;
 const cli = process.env.COPILOT_CLI_PATH;
@@ -18,6 +18,7 @@ await mkdir(project);
 let requests = 0;
 let allowSyntheticResponses = false;
 let allowAgentResponses = false;
+let permissionFixture;
 let fixtureError;
 let releaseFirst;
 const firstResponse = new Promise(resolve => { releaseFirst = resolve; });
@@ -25,7 +26,7 @@ let releaseAgents;
 const agentResponses = new Promise(resolve => { releaseAgents = resolve; });
 const fixture = createServer(async (req, res) => {
   const number = ++requests;
-  if (!allowSyntheticResponses || number > (allowAgentResponses ? 7 : 3)) {
+  if (!allowSyntheticResponses || number > (permissionFixture ? 10 : allowAgentResponses ? 7 : 3)) {
     req.resume(); res.writeHead(500); res.end('Unexpected fixture inference request.'); return;
   }
   try {
@@ -34,6 +35,16 @@ const fixture = createServer(async (req, res) => {
     const body = JSON.parse(Buffer.concat(chunks).toString());
     if (number === 1) await firstResponse;
     let message = { role: 'assistant', content: 'Synthetic local fixture response.' }, reason = 'stop';
+    if (permissionFixture) {
+      assert.ok(++permissionFixture.responses <= (permissionFixture.approved ? 2 : 1));
+      assert.deepEqual(body.tools.map(tool => tool.function?.name), ['powershell']);
+      if (permissionFixture.responses === 1) {
+        message = { role: 'assistant', content: null, tool_calls: [{ id: permissionFixture.callId, type: 'function',
+          function: { name: 'powershell', arguments: JSON.stringify({ command: permissionFixture.command,
+            description: 'Write one disposable fixture file', timeout_ms: 5000 }) } }] };
+        reason = 'tool_calls';
+      }
+    }
     if (number === 4) {
       assert.ok(body.tools.some(tool => tool.function?.name === 'task'));
       message = { role: 'assistant', content: null, tool_calls: ['one', 'two'].map(name => ({
@@ -90,7 +101,7 @@ try {
     workingDirectory: project, configDirectory: home, availableTools: [],
     requestExtensions: true, requestCanvasRenderer: true,
     extensionSdkPath: sdkDirectory, pluginDirectories: [root], enableConfigDiscovery: false,
-    onPermissionRequest: () => ({ kind: 'denied-by-rules', rules: [] }),
+    onPermissionRequest: () => ({ kind: 'reject' }),
     model: 'fixture', provider: { type: 'openai', baseUrl: `http://127.0.0.1:${fixture.address().port}/v1`, apiKey: 'fixture', wireApi: 'completions' },
   });
   const catalog = await until(() => session.rpc.canvas.list(), value => value.canvases?.some(canvas => canvas.canvasId === 'trace'), 'canvas registration');
@@ -173,7 +184,7 @@ try {
     customAgents: [{ name: 'trace-fixture-agent', displayName: 'Same fixture display name',
       description: 'Synthetic local fixture only.', prompt: 'Return the fixed fixture response.',
       tools: [], model: 'fixture', modelPolicy: 'required', skills: [], mcpServers: {} }],
-    onPermissionRequest: () => ({ kind: 'denied-by-rules', rules: [] }),
+    onPermissionRequest: () => ({ kind: 'reject' }),
     model: 'fixture', provider: { type: 'openai', baseUrl: `http://127.0.0.1:${fixture.address().port}/v1`, apiKey: 'fixture', wireApi: 'completions' },
   });
   await session.rpc.tools.initializeAndValidate();
@@ -230,8 +241,106 @@ try {
   }
   await session.rpc.canvas.close({ instanceId: input.instanceId });
   await until(() => fetch(agentPanel.url).then(() => false, () => true), Boolean, 'agent fixture server shutdown');
+  await session.disconnect();
+
+  // Native invocation starts precede permission evaluation, including when the operation is denied.
+  for (const approved of [false, true]) {
+    const phase = approved ? 'approved' : 'denied';
+    const output = join(project, `permission-${phase}.txt`);
+    const callId = `fixture-permission-${phase}`;
+    const command = `Set-Content -LiteralPath '${output.replaceAll("'", "''")}' -Value 'Trace fixture'`;
+    let permissionCalls = 0;
+    const actionEvents = [];
+    session = await client.createSession({
+      workingDirectory: project, configDirectory: home, availableTools: ['builtin:powershell'],
+      requestExtensions: true, requestCanvasRenderer: true,
+      extensionSdkPath: sdkDirectory, pluginDirectories: [root], enableConfigDiscovery: false,
+      onPermissionRequest: async request => {
+        assert.equal(request.kind, 'shell');
+        assert.equal(request.toolCallId, callId);
+        assert.equal(request.fullCommandText, command);
+        permissionCalls++;
+        const pendingSnapshot = await until(() => fetch(actionPanel.url + 'events').then(response => response.json()),
+          value => value.entries.some(entry => entry.type === 'tool.execution_start' && entry.toolCallId === callId), 'pending invocation projection');
+        const pendingStages = actionStages(pendingSnapshot.entries, pendingSnapshot)
+          .get(pendingSnapshot.entries.find(entry => entry.type === 'tool.execution_start' && entry.toolCallId === callId).id);
+        assert.equal(pendingStages.permission, 'Permission unknown', 'An invocation before a decision must not imply authorization.');
+        assert.equal(pendingStages.stages.some(stage => stage.type === 'permission.completed' || stage.type === 'tool.execution_complete'), false);
+        return { kind: approved ? 'approve-once' : 'reject' };
+      },
+      model: 'fixture', provider: { type: 'openai', baseUrl: `http://127.0.0.1:${fixture.address().port}/v1`, apiKey: 'fixture', wireApi: 'completions' },
+    });
+    await session.rpc.tools.initializeAndValidate();
+    assert.deepEqual((await session.rpc.tools.getCurrentMetadata()).tools.map(tool => tool.name), ['powershell']);
+    await until(() => session.rpc.canvas.list(), value => value.canvases?.some(canvas => canvas.canvasId === 'trace'), 'permission canvas registration');
+    const stopActionEvents = session.on(event => actionEvents.push(event));
+    const requestsBeforeOpen = requests;
+    const actionPanel = await session.rpc.canvas.open(input);
+    assert.equal(requests, requestsBeforeOpen, 'Opening the permission fixture canvas must not trigger inference.');
+    permissionFixture = { approved, callId, command, responses: 0 };
+    await session.sendAndWait({ prompt: 'Synthetic disposable-file permission fixture only.' }, 25000);
+    if (fixtureError) throw fixtureError;
+    const actionSnapshot = await until(() => fetch(actionPanel.url + 'events').then(r => r.json()),
+      value => value.history === 'ready' && value.entries.some(entry => entry.type === 'tool.execution_complete' && entry.toolCallId === callId), 'permission lifecycle projection');
+    stopActionEvents();
+    assert.equal(permissionCalls, 1);
+    assert.equal(permissionFixture.responses, approved ? 2 : 1);
+    assert.equal(actionEvents.some(event => event.type === 'session.error'), false);
+    const proposed = actionEvents.find(event => event.type === 'assistant.message' && event.data.toolRequests?.length);
+    const started = actionEvents.find(event => event.type === 'tool.execution_start');
+    const requested = actionEvents.find(event => event.type === 'permission.requested');
+    const decided = actionEvents.find(event => event.type === 'permission.completed');
+    const completed = actionEvents.find(event => event.type === 'tool.execution_complete');
+    assert.equal(proposed.data.toolRequests[0].toolCallId, callId);
+    assert.equal(started.data.toolCallId, callId);
+    assert.equal(requested.data.permissionRequest.toolCallId, callId);
+    assert.equal(decided.data.requestId, requested.data.requestId);
+    assert.equal(decided.data.toolCallId, callId);
+    assert.equal(decided.data.result.kind, approved ? 'approved' : 'denied-interactively-by-user');
+    assert.equal(completed.data.toolCallId, callId);
+    assert.equal(completed.data.success, approved);
+    assert.ok(actionEvents.indexOf(started) < actionEvents.indexOf(requested), 'Invocation start is not proof that the underlying operation executed.');
+    const outputText = await readFile(output, 'utf8').catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+    assert.equal(outputText !== null, approved, 'The denied operation creates no file; the approved operation creates only its disposable fixture file.');
+    if (approved) assert.equal(outputText.trim(), 'Trace fixture');
+    // This attached runtime delivers the request to its owner, but not to Trace's joined observer.
+    assert.equal(actionSnapshot.entries.some(entry => entry.id === requested.id), false);
+    assert.ok((await session.getEvents()).some(event => event.id === requested.id), 'The owning client retains the request in history despite its absence from Trace live delivery.');
+    for (const raw of [proposed, started, decided, completed]) {
+      const projected = actionSnapshot.entries.find(entry => entry.id === raw.id);
+      assert.ok(projected, `Attached Trace retains ${raw.type} (checkpoint ${String(raw.checkpoint)}); observed ${actionSnapshot.entries.map(entry => entry.type).join(', ')}.`);
+      assert.equal(projected.agentId, raw.agentId ?? '');
+      assert.equal(projected.timestamp, raw.timestamp);
+      const evidence = JSON.parse(projected.evidence);
+      assert.equal(evidence.id, raw.id);
+      assert.equal(evidence.type, raw.type);
+      assert.deepEqual(evidence.data, raw.data);
+    }
+    const stages = actionStages(actionSnapshot.entries, actionSnapshot).get(started.id);
+    assert.deepEqual(stages.stages.map(stage => stage.id), [proposed.id, started.id, decided.id, completed.id]);
+    assert.equal(stages.permission, `Recorded permission: ${approved ? 'approved' : 'denied'}`);
+    assert.equal(stages.stages.find(stage => stage.id === decided.id).decisionSource, null, 'A result kind mentioning user does not establish who decided.');
+    assert.equal(stages.stages.find(stage => stage.id === completed.id).label, `Tool result: reported ${approved ? 'success' : 'failure'}`);
+    await session.rpc.canvas.close({ instanceId: input.instanceId });
+    await until(() => fetch(actionPanel.url).then(() => false, () => true), Boolean, 'permission fixture server shutdown');
+    const historyPanel = await session.rpc.canvas.open(input);
+    const historySnapshot = await until(() => fetch(historyPanel.url + 'events').then(response => response.json()),
+      value => value.history === 'ready', 'permission history projection');
+    const historyRequest = historySnapshot.entries.find(entry => entry.id === requested.id);
+    assert.ok(historyRequest, 'Opening a new observer retains the permission request from history.');
+    assert.deepEqual(JSON.parse(historyRequest.evidence).data, requested.data);
+    assert.equal(requested.data.ownerSessionId, session.sessionId);
+    const historyStages = actionStages(historySnapshot.entries, historySnapshot).get(started.id);
+    assert.equal(historyStages.permission, 'Permission unknown', 'Recovery ownership cannot be correlated without a verified owner mapping in the snapshot.');
+    assert.deepEqual(historyStages.stages.map(stage => stage.id), [proposed.id, started.id, completed.id]);
+    assert.ok(historySnapshot.entries.some(entry => entry.id === decided.id), 'Unlinked permission evidence remains available in its original row.');
+    await session.rpc.canvas.close({ instanceId: input.instanceId });
+    await until(() => fetch(historyPanel.url).then(() => false, () => true), Boolean, 'permission history server shutdown');
+    await session.disconnect();
+  }
+  assert.equal(requests, 10, 'Only the ten expected local synthetic responses are permitted.');
   assert.equal(expired, false);
-  console.log('PASS: installed SDK discovery, plugin ownership, history/live events, open/reopen/close, assets and zero automatic inference; actual input delivery/interaction and overlapping agent/delegation projection verified with seven fixed local responses across two disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
+  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping agents and approved/denied action boundaries verified with ten fixed local responses across four disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
 } finally {
   clearTimeout(timer);
   releaseFirst();
