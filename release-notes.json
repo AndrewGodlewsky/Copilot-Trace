@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.50",
+    "summary": "Install Trace from GitHub with clear app and CLI steps, plus update, removal and local-development guidance."
+  },
+  {
     "version": "0.1.49",
     "summary": "Inspect observed operation time and host-reported token receipts, with overlap, missing evidence and accounting limits made explicit."
   },

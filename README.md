@@ -1,12 +1,96 @@
 # Trace
 
-Current version: **0.1.49**
+Current version: **0.1.50**
 
 A GitHub Copilot desktop plugin for understanding the activity inside your current chat. `/trace` opens a live timeline with turn markers and expandable recorded evidence. This is an initial proof of concept: explanations describe what events mean; they do not infer why the model made a decision.
 
-The setup adapts reusable engineering practices from Copilot Explore. See [what was transferred](docs/context-transfer.md), [agent instructions](AGENTS.md), [host integration](docs/copilot-integration.md), and [development workflow](docs/development-workflow.md).
+## Install Trace
 
-Every completed iteration now includes a patch version bump, release notes, independent review, recorded verification, packaging, and a verified push to `main`. Tags, GitHub Releases and installation into your Copilot profile are separate actions.
+Use the **GitHub Copilot desktop app** with plugin and canvas support. [Download the app](https://github.com/features/copilot) and sign in with an account that has Copilot access. Your organization's policies must allow plugin use. See [GitHub's app customization guide](https://docs.github.com/en/copilot/how-tos/github-copilot-app/customize-github-copilot-app) for current availability and controls.
+
+The GitHub installation includes the runnable plugin. You do not need to clone this repository, install Node.js, run npm commands or build Trace. Copilot supplies its SDK and runtime.
+
+### Install in the app
+
+1. Open **Customize** in the app sidebar. Select the marketplace settings control next to the marketplace dropdown and add this repository:
+
+   ```text
+   https://github.com/AndrewGodlewsky/Copilot-Trace
+   ```
+
+2. Choose **main** if prompted for a branch. In **Browse**, select the **trace** marketplace, find **trace**, and click **Install**. Its exact plugin identifier is **`trace@trace`**.
+3. Open **Installed** and make sure Trace is enabled.
+
+Start a **new desktop session** and send `/trace`. The Trace canvas should open beside your chat. Continue chatting to see new activity. Installation and enablement alone do not confirm that the canvas rendered successfully.
+
+### Install with Copilot CLI
+
+If you prefer the terminal, use the installed Copilot CLI with the same user and Copilot configuration directory as the desktop app. A custom `COPILOT_HOME` may target another profile.
+
+```powershell
+copilot plugin marketplace add AndrewGodlewsky/Copilot-Trace
+copilot plugin install trace@trace
+copilot plugin enable trace@trace
+copilot plugin list
+```
+
+Confirm that the inventory shows Trace from marketplace `trace` as enabled, then start a **new desktop session** and send `/trace`. These commands follow [GitHub's plugin installation guide](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/plugins-finding-installing).
+
+If `copilot` is not on PATH, follow [GitHub's CLI installation guide](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli). On Windows, you can instead point PowerShell at an existing installed `copilot.exe`:
+
+```powershell
+$env:COPILOT_CLI_PATH = 'C:\path\to\installed\copilot.exe'
+& $env:COPILOT_CLI_PATH plugin list
+```
+
+Replace the example path with the actual executable. Setting this variable does not create a `copilot` command: replace the leading `copilot` in each command with `& $env:COPILOT_CLI_PATH`. Use `copilot.exe`, not the lower-level `copilot-runtime.exe`. Trace's development scripts also read this variable.
+
+### Update or remove Trace
+
+For a GitHub marketplace installation, run the update command, then start a **new desktop session**:
+
+```powershell
+copilot plugin update trace@trace
+copilot plugin list
+```
+
+To remove Trace:
+
+```powershell
+copilot plugin uninstall trace@trace
+copilot plugin marketplace remove trace
+```
+
+Removing the marketplace is optional. It must have no installed plugins remaining; do not use `--force` to remove unrelated plugins.
+
+### Switch an existing local installation to GitHub
+
+First inspect the registered names and sources:
+
+```powershell
+copilot plugin list
+copilot plugin marketplace list
+```
+
+If Trace is installed from a local checkout, use its exact installed plugin name and marketplace name in the first two commands below. The example assumes the inventory shows `trace@trace` in the local `trace` marketplace. Run one command at a time and stop if any fails:
+
+```powershell
+copilot plugin uninstall trace@trace
+copilot plugin marketplace remove trace
+copilot plugin marketplace add AndrewGodlewsky/Copilot-Trace
+copilot plugin install trace@trace
+copilot plugin enable trace@trace
+copilot plugin list
+```
+
+Keep the original checkout and any unfinished work. Do not force marketplace removal if it still contains another installed plugin. The GitHub installation is cached; it does not load your checkout live. Start a new desktop session afterward.
+
+### If Trace does not appear
+
+- Confirm **Customize → Installed** shows Trace enabled, or check `copilot plugin list`.
+- Start a new desktop session after installing, enabling or updating. If `/trace` is still absent, restart the app and ask Copilot to open the installed Trace canvas.
+- If the app has no plugin/canvas controls, check the current [app documentation](https://docs.github.com/en/copilot/how-tos/github-copilot-app/customize-github-copilot-app) and your organization's policies. A CLI install alone does not provide the desktop canvas.
+- If marketplace registration reports an existing local source, follow [the migration steps above](#switch-an-existing-local-installation-to-github).
 
 ## Use Trace
 
@@ -90,7 +174,11 @@ The footer opens Versions, Settings and Logs as centered overlay dialogs, with a
 
 ## Develop
 
-Use Node.js 22 or later. There are no npm dependencies and no build step. Copilot supplies the runtime SDK.
+Development commands require **Node.js 22 or later** and a checkout of this repository. There are no npm dependencies and no build step. These requirements apply to working on Trace; the [normal GitHub installation](#install-trace) uses Copilot's SDK and runtime.
+
+The setup adapts reusable engineering practices from Copilot Explore. See [what was transferred](docs/context-transfer.md), [agent instructions](AGENTS.md), [host integration](docs/copilot-integration.md), and [development workflow](docs/development-workflow.md).
+
+Every completed iteration includes a patch version bump, release notes, independent review, recorded verification, packaging, and a verified push to `main`. Tags, GitHub Releases and installation into your Copilot profile are separate actions.
 
 ```powershell
 npm test
@@ -102,31 +190,28 @@ Packaging creates a validated, self-contained plugin directory under ignored `di
 
 For repository development, start an issue brief with `npm run iteration -- start <id>`. Record the independent review, then use `npm run verify:iteration -- <id>` and `npm run iteration -- status <id>` before publication. For visible changes, first record the owner's actual UI acceptance with `npm run iteration -- ui <id> <report-file>`. Reports live under ignored `.iteration/`. See the [workflow](docs/development-workflow.md) for the complete sequence and optional measured usage ledger. These Git-based evidence commands run in the development checkout; a packaged plugin does not carry its Git history or private receipts.
 
-## Install a cached preview
+### Packaged previews (advanced)
 
-For the native tab logo, prefer a managed cached installation. Some desktop versions omit tab-icon metadata for live local marketplaces. Package the plugin, then install the printed package directory with the installed Copilot CLI:
+`npm run package` produces a validated snapshot for review and distribution. Use the [GitHub marketplace installation](#install-trace) for a managed cached copy, or the local marketplace below to test changes from a checkout.
 
-```powershell
-npm run package
-& $env:COPILOT_CLI_PATH plugin install 'C:\path\to\validated\package'
-```
+Some desktop versions omit native tab-icon metadata for live local marketplaces. Confirm the logo on the native tab as well as in the panel header after installation; package validation alone does not establish native rendering.
 
-When replacing an existing live Trace installation, first uninstall the registered Trace plugin and remove its local marketplace through the CLI, using the names shown by the CLI inventory. Retain the checkout. Restart Copilot and open `/trace` in a new session; confirm the logo on the native tab as well as in the panel header. A cached installation is a snapshot: package and install each new version, and retain its source package directory for updates.
+### Install for live development (advanced)
 
-## Install for live development
+Requires the supported desktop app, Node.js 22 or later and a checkout you intend to keep. If `trace` is already registered from GitHub or another checkout, inspect `copilot plugin list` and `copilot plugin marketplace list`, then uninstall Trace and remove its marketplace using those exact names before switching sources. Stop on errors and do not force removal of a marketplace containing other plugins.
 
-Requires a Copilot desktop app with canvas support. From the checkout you intend to keep:
+From the retained checkout:
 
 ```powershell
 # If copilot is not on PATH, first set COPILOT_CLI_PATH to its installed executable.
 npm run install:copilot
 ```
 
-This registers the current directory as the `trace` marketplace, installs `trace@trace`, and lists plugins through the Copilot CLI. Start a **new desktop session**, then use `/trace`. If skill discovery has not refreshed, ask Copilot to open the installed Trace canvas.
+This checks the package, registers the current directory as the `trace` marketplace, installs `trace@trace`, and lists plugins through the Copilot CLI. It uses `copilot` on PATH or the executable set in `COPILOT_CLI_PATH`; it does not download a CLI. Confirm Trace is enabled, using `copilot plugin enable trace@trace` if necessary. Start a **new desktop session**, then use `/trace`. If skill discovery has not refreshed, ask Copilot to open the installed Trace canvas.
 
 Keep the checkout in place: local marketplace installs load it live. In particular, do not install from a temporary worktree you plan to remove. Installation/enablement and successful rendering are separate checks. No profile installation is performed merely by running the tests.
 
-## Verify against the installed host
+### Verify against the installed host
 
 Set these to an inspected, matching pair already installed by Copilot:
 
