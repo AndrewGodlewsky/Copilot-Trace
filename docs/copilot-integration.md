@@ -4,7 +4,7 @@ This guide extracts reusable lessons from the source revision recorded in [trans
 
 ## Runtime and plugin layout
 
-The implemented shell uses plain ES modules and local HTML/CSS, with no bundling step or npm dependency. `extension.mjs` imports `createCanvas` and `joinSession` from the host-provided `@github/copilot-sdk/extension`, registers the canvas, and releases it on shutdown. The installed `extension.d.ts`, `canvas.d.ts`, `types.d.ts` and `generated/rpc.d.ts` are the API reference.
+The implemented shell uses plain ES modules and local HTML/CSS/JavaScript, with no bundling step or npm dependency. `extension.mjs` imports `createCanvas` and `joinSession` from the host-provided `@github/copilot-sdk/extension`, registers the canvas, and releases it on shutdown. The installed `extension.d.ts`, `canvas.d.ts`, `types.d.ts` and `generated/rpc.d.ts` are the API reference.
 
 The root Agent Plugins 1.0 `plugin.json` describes Trace; `.github/plugin/marketplace.json` lists it; `com.github.copilot/extensions/trace/` supplies the runtime extension; `skills/trace/SKILL.md` launches it. This is the plugin-packaged layout used by the reference, distinct from standalone repository/user canvas folders. GitHub's [canvas documentation](https://docs.github.com/en/copilot/how-tos/github-copilot-app/working-with-canvas-extensions) describes the native surface and common extension structure.
 
@@ -16,15 +16,29 @@ During this setup, the successful executable was `copilot.exe` adjacent to the s
 
 The host's canvas catalog supplies provider identity. `createCanvas` binds `open`, `onClose` and any declared actions. Reopening an existing instance focuses that panel; rendering reload and creating a new instance are separate concepts.
 
-Trace checks the attached session identity, shares one startup promise per instance, gives separate instances separate tokenized servers, and closes pending or active servers on close/shutdown. A new open after close gets a new capability URL. The shell has no action API or browser JavaScript.
+Trace checks the attached session identity, shares one startup promise per instance, gives separate instances separate tokenized servers, and closes pending or active servers on close/shutdown. A new open after close gets a new capability URL. The panel has no action API. Its browser module polls a protected read-only snapshot once per second; unchanged revisions return HTTP 304.
 
 For future actions, define bounded input schemas and validate runtime data. Bind asynchronous results to session, instance and request identity, plus any user-input revision that makes the result valid. Timeouts and UI cancellation do not themselves prove a worker stopped. Reject late results and preserve user edits.
 
 ## Loopback security
 
-Implemented: bind `127.0.0.1`, use an unpredictable per-instance capability path, require exact Host, allow only known static assets, reject non-read methods and apply restrictive CSP, no-store, no-sniff and no-referrer headers. Assets are read from packaged paths, never arbitrary request paths.
+Implemented: bind `127.0.0.1`, use an unpredictable per-instance capability path, require exact Host, allow only known static assets and the read-only events endpoint, reject non-read methods and apply restrictive CSP, no-store, no-sniff and no-referrer headers. Assets are read from packaged paths, never arbitrary request paths.
 
 When writes are added, require exact Origin and an intentional client marker, validate content type, enforce byte limits before parsing JSON, and authorize each operation. A local port alone is not authorization. Keep capability URLs, prompts and credentials out of error messages and support exports. Render untrusted text literally; sanitize any deliberately supported markup and validate link schemes.
+
+## Recorded session evidence
+
+Each canvas instance subscribes with `session.on(handler)` before calling `getEvents()`. History and buffered live entries reconcile by event ID, ignoring checkpoint copies. Retained records sort by recorded timestamp before trimming, so ephemeral live events remain between their persisted neighbors. Ties keep insertion order; missing/invalid timestamps appear last with a visible unknown time. History failure or a ten-second timeout leaves live collection active and displays a warning. Closing unsubscribes without disconnecting the host-owned session.
+
+`trace.mjs` projects supported event types into bounded text records; it retains at most 300 events and 12,000 UTF-16 code units of evidence per event. The SDK history call itself can materialize the full chat history. This proof of concept skips token deltas and internal canvas events, so it is not a lossless trace. No plugin transcript files are written.
+
+Skill `trigger` is observed attribution, not proof of a causal instruction. Tool start/result correlation uses both agent identity and tool-call ID. The event envelope's `parentId` is chronological linkage, not causality. Render all evidence with `textContent`; no event content is interpreted as HTML or a URL. Encrypted and opaque reasoning fields are omitted. New event fields require checking the installed declarations.
+
+The installed `generated/session-events.d.ts` defines matching `turnId` fields on `AssistantTurnStartData` / `AssistantTurnEndData` and matching `hookInvocationId` on hook start/end. Project these identifiers intact (maximum 256 characters; reject oversized identifiers rather than clipping into false matches). Turn indentation represents only the recorded same-agent interval, never a causal parent. Keep interleaved agents in timestamp order; unknown starts, mismatched ends, new user input and aborts stop inferred intervals. Session-level notices stay outside them. Statistics pair consecutive turn boundaries per agent and turn ID; each later start counts separately because loop IDs need not be session-unique. Hooks and tools deduplicate by agent plus their invocation ID; skill loads count `skill.invoked` events. `invokedAtTurn` is a projected chat-message count, not a model turn ID, and is not used for grouping. All counts describe only the retained window, including partial calls; unidentifiable events are disclosed separately.
+
+The browser can read snapshots only with the capability URL and exact Host. Supplied Origin must match the loopback origin; cross-site fetch metadata is rejected. CSP permits only same-origin script/style/connect/img. An endpoint connection does not prove every host event is available.
+
+The footer reads packaged version/release metadata and a separate read-only diagnostics endpoint. Diagnostics use the same capability/Host/Origin boundaries as events. A shared fixed-code journal accepts only allowlisted bounded numeric fields and keeps 200 entries per server/panel, without chat data or raw exceptions. Copy/export is explicitly user-triggered and stays separate from transcript evidence. Client reports label server snapshots with capture time and retain the last one when disconnected. Text size is panel-local; no preference file or cross-origin persistence is implemented. Manual refresh shares the single polling scheduler, preserving disclosures and avoiding overlapping requests.
 
 ## Model operations
 
@@ -72,10 +86,14 @@ Readiness checks should inspect prerequisites without starting inference, record
 
 Explorer observed that native composer dictation was not automatically available inside a guest canvas. It also found that a child `fork()` under the host's single-executable runtime did not behave like ordinary Node; its voice adapter used an installed bootstrap. Preserve these as reasons to investigate before adopting voice or subprocess code, not reasons to copy its adapter. Trace implements neither.
 
-Explorer observed missing native tab-logo metadata for some local marketplace installs on desktop 1.4.2. A correct SVG or canvas icon override did not prove the native tab icon would render. Recheck manually on the actual installed app.
+The reference project's canvas-icon investigation found that desktop 1.4.2 resolves the native tab icon from the owning plugin's session inventory metadata. The root manifest's `extensions.com.github.copilot.logo` supplies a compact SVG; a canvas-level icon override and page favicon do not repair missing plugin metadata. Live local marketplace installs sometimes omitted it, while a managed cached installation restored it. Trace uses `assets/trace.svg` in that manifest and serves the same file in its panel header and favicon.
+
+The installed CLI also accepts a validated local package directory and creates a managed cached install. A disposable-profile fixture verified Trace's exact SVG bytes in that cache and exercised its runtime. This establishes packaging and installation, not visible tab rendering: confirm the native tab after restarting the desktop app.
 
 ## Installation and distribution
 
-Use the Copilot CLI rather than modifying host databases. Marketplace registration, plugin installation, enablement and new-session discovery are separate steps. Local marketplaces retain a live dependency on the checkout. A cached GitHub marketplace install is the intended distribution route once this repository is published and validated. The current installer is local only.
+Use the Copilot CLI rather than modifying host databases. Marketplace registration, plugin installation, enablement and new-session discovery are separate steps. Local marketplaces retain a live dependency on the checkout. `install:copilot` registers that live development setup; installing a packaged local directory directly creates a managed cached preview. Reinstall updated packages for new versions. A cached GitHub marketplace install is the intended distribution route once this repository is published and validated.
+
+The inspected CLI warns that direct local-path installation is deprecated for a future release. Use it only for these validated previews; move to the cached GitHub marketplace for ongoing distribution.
 
 Ship runtime code, web assets, launch skill, logo and release notes together. Keep all current version references synchronized. CLI/plugin-list success proves registration, not visible rendering. Unit tests, installed-runtime fixtures, manual UI acceptance and live account/model quality answer different questions; report each separately.

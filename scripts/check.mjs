@@ -16,21 +16,39 @@ const lock = await json('package-lock.json');
 const catalog = await json('.github/plugin/marketplace.json');
 const extension = await json('com.github.copilot/extensions/trace/package.json');
 const notes = await json('release-notes.json');
-assert.equal(pkg.name, 'copilot-trace');
-assert.equal(catalog.name, 'copilot-trace');
+assert.equal(pkg.name, 'trace');
+assert.equal(lock.name, 'trace');
+assert.equal(lock.packages[''].name, 'trace');
+assert.equal(catalog.name, 'trace');
 assert.equal(catalog.plugins.length, 1);
 assert.equal(catalog.plugins[0].name, plugin.name);
 assert.equal(catalog.plugins[0].source, './');
 for (const version of [pkg.version, lock.version, lock.packages[''].version, catalog.plugins[0].version, extension.version, notes[0].version]) assert.equal(version, plugin.version);
 for (const metadata of [pkg, extension]) assert.equal(Object.keys(metadata.dependencies ?? {}).length, 0, 'The host supplies the runtime SDK.');
-for (const note of notes) assert.ok(typeof note.summary === 'string' && note.summary.trim().length && note.summary.length <= 400);
+const seenVersions = new Set();
+let previousVersion;
+for (const note of notes) {
+  assert.match(note.version, /^\d+\.\d+\.\d+$/);
+  assert.ok(!seenVersions.has(note.version), 'Release versions must be unique.');
+  seenVersions.add(note.version);
+  const parts = note.version.split('.').map(Number);
+  if (previousVersion) {
+    const changed = parts.findIndex((part, i) => part !== previousVersion[i]);
+    assert.ok(changed >= 0 && parts[changed] < previousVersion[changed], 'Release notes must be newest first.');
+  }
+  previousVersion = parts;
+  assert.ok(typeof note.summary === 'string' && note.summary.trim().length && note.summary.length <= 400, 'Every release needs a short user-facing explanation.');
+}
 assert.ok((await readFile(join(root, 'README.md'), 'utf8')).includes(`Current version: **${plugin.version}**`));
 const logo = await readFile(join(root, plugin.extensions['com.github.copilot'].logo), 'utf8');
 assert.match(logo, /<svg\b/);
+assert.equal(plugin.extensions['com.github.copilot'].logo, 'assets/trace.svg');
+assert.ok(`data:image/svg+xml;base64,${Buffer.from(logo).toString('base64')}`.length < 350000, 'The native tab selector requires a compact image data URL.');
+assert.doesNotMatch(logo, /<(script|foreignObject)\b|\b(?:href|onload)=|<linearGradient|<radialGradient/i, 'Keep the metadata logo self-contained and flat.');
 const skill = await readFile(join(root, 'skills/trace/SKILL.md'), 'utf8');
 assert.match(skill, /^---\r?\nname: trace\r?\n/);
 assert.match(skill, /open_canvas/);
-for (const asset of ['index.html', 'style.css']) await readFile(join(root, 'com.github.copilot/extensions/trace/web', asset));
+for (const asset of ['index.html', 'style.css', 'app.mjs', 'presentation.mjs', 'footer.mjs', 'diagnostics.mjs', 'polling.mjs', 'follow.mjs']) await readFile(join(root, 'com.github.copilot/extensions/trace/web', asset));
 async function syntax(folder) {
   for (const entry of await readdir(folder, { withFileTypes: true })) {
     const path = join(folder, entry.name);

@@ -1,0 +1,13 @@
+# Trace footer
+
+The owner requested a bottom utility row based on Usage Insights: version with brief release history, refresh, settings with text size, show/copy/export diagnostic logs and GitHub issue feedback. Omit review coverage. Preserve the accepted connected flow and nested hooks.
+
+Use a wrapping row below the existing about text. Following the owner's correction in 0.1.6, buttons open centered modal overlays using native `dialog.showModal()`, matching Copilot Explorer. A dimmed backdrop and inert background keep attention inside the dialog; Close/Escape returns focus to the originating button. Constrain overlays to the canvas viewport and scroll long content internally, including at large text sizes. Preserve the timeline's layout and scroll position. Keep the existing slate/white surfaces, cyan/blue actions, Segoe UI and restrained borders. No new dependency or UI automation.
+
+Read version and release notes from packaged metadata. Keep summaries newest first, one or two short user-facing sentences, at most 400 characters. Strengthen AGENTS and metadata checks so every future version ships its explanation. Feedback opens this repository's new-issue page; it never posts automatically.
+
+Refresh immediately reads the current observer snapshot through the existing protected endpoint, serialized with polling. It preserves expansion and does not reload the page or reconstruct unavailable history. Settings provide 100%, 115%, 130% and 150% text sizes for this open panel; use rem typography so labels and evidence scale too. No settings file or unreliable cross-port browser persistence in this first version.
+
+Diagnostics are bounded in-memory structured events (200 per server/panel) with fixed codes, timestamps and allowlisted numeric fields. Capture observer startup/history outcomes, browser connection changes, refresh outcomes, metadata/log retrieval failures and client errors. Never collect chat evidence, tool arguments, event/session IDs, paths, capability URLs, raw exceptions or credentials. Serve server logs with the same capability/Host/Origin checks as events. Show and export server plus client diagnostics; label cached/unavailable server data honestly. A clipboard failure leaves selectable text. Download is user-triggered and must not be reported as saved without evidence. Closing the canvas discards logs; failures before the panel/server starts cannot be shown here.
+
+Verify privacy/retention and HTTP boundaries with tests, polling serialization with a controlled scheduler, release metadata consistency, installed runtime and packaged files. Independent review is required. Owner checks footer layout, keyboard, large text, copy/download and live refresh on the actual desktop before publication.

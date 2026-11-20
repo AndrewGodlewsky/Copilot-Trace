@@ -10,6 +10,6 @@ function run(command, args) {
 }
 run(process.execPath, ['scripts/check.mjs']);
 run(cli, ['plugin', 'marketplace', 'add', root]);
-run(cli, ['plugin', 'install', 'trace@copilot-trace']);
+run(cli, ['plugin', 'install', 'trace@trace']);
 run(cli, ['plugin', 'list', '--json']);
 console.log('Start a new Copilot desktop session and use /trace. Keep this checkout: the local marketplace loads it live.');

@@ -1,5 +1,41 @@
 [
   {
+    "version": "0.1.10",
+    "summary": "Move Statistics into a quiet, always-visible bottom bar with a compact turn and tool count. Open it as an upward overlay drawer while keeping the timeline in place."
+  },
+  {
+    "version": "0.1.9",
+    "summary": "Add a collapsible activity overview with turn, hook, tool and skill counts. Show model turns as headings with indented activity and compact closing markers, keeping incomplete boundaries explicit."
+  },
+  {
+    "version": "0.1.8",
+    "summary": "Scrolling away from the bottom now turns off Follow live so you can look around without being pulled back. Check Follow live again to jump to the bottom and resume following."
+  },
+  {
+    "version": "0.1.7",
+    "summary": "Rename the product to Trace across the canvas, tab, logs and documentation. Follow live now stays at the bottom of the whole plugin, including the footer, as activity and layout change."
+  },
+  {
+    "version": "0.1.6",
+    "summary": "Open Versions, Settings and Logs in centered overlay dialogs with a dimmed backdrop. Close or press Escape to return to the footer without expanding content below the timeline."
+  },
+  {
+    "version": "0.1.5",
+    "summary": "Add a footer with expandable release notes, refresh, text-size settings and GitHub feedback. View, copy or export private-content-free plugin diagnostics to help troubleshoot problems."
+  },
+  {
+    "version": "0.1.4",
+    "summary": "Introduce a compact connected-path SVG logo for plugin metadata, panel header and favicon. Group consecutive hook events into expandable sections, retaining individual evidence, event order and agent boundaries."
+  },
+  {
+    "version": "0.1.3",
+    "summary": "Redesign Trace as a connected vertical flow with compact color-coded nodes, message previews, recorded model and tool names, and expandable evidence. Move technical metadata into details and improve narrow-pane, keyboard, light and dark presentations."
+  },
+  {
+    "version": "0.1.2",
+    "summary": "Add a live timeline of current-chat activity with turn markers, expandable recorded evidence and skill-trigger explanations. Load available history, bound in-memory retention, and preserve expanded steps during updates. No model calls or saved transcripts."
+  },
+  {
     "version": "0.1.1",
     "summary": "Restore automatic versioning and publication to main, mandatory independent review, verification receipts, manual UI acceptance evidence, and measured usage accounting. Document the expanded transfer from Copilot Explore."
   },

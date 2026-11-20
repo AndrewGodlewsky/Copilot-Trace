@@ -3,17 +3,88 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Copilot Trace</title>
+  <title>Trace</title>
+  <link rel="icon" href="trace.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.mjs"></script>
 </head>
 <body>
   <main>
-    <h1>Copilot Trace</h1>
-    <p class="lead">A space for your next plugin idea.</p>
-    <section aria-labelledby="next">
-      <h2 id="next">Ready to build</h2>
-      <p>The canvas is open. The next step is to define what Trace should help you do.</p>
-    </section>
+    <header>
+      <img class="brand-logo" src="trace.svg" width="40" height="40" alt="">
+      <h1>Trace</h1>
+      <p class="intro">Your chat, one step at a time.</p>
+    </header>
+    <div class="toolbar">
+      <p id="connection" role="status" data-state="connecting">Connecting…</p>
+      <label><input id="follow" type="checkbox" checked> Follow live</label>
+    </div>
+    <div class="legend" aria-label="Event colors">
+      <span class="legend-model">Model</span><span class="legend-tool">Tool</span><span class="legend-skill">Skill</span><span class="legend-host">Harness</span>
+    </div>
+    <p id="notice" class="notice">Reading available chat history…</p>
+    <div id="empty" class="empty">
+      <h2>Waiting for activity</h2>
+      <p>Keep this panel open and continue the chat. Supported events will appear here as the host shares them.</p>
+    </div>
+    <ol id="timeline" aria-label="Recorded chat activity"></ol>
+    <footer>
+      <p>Arrows show event order, not cause.</p>
+      <details class="about">
+        <summary>About this view</summary>
+        <p>A model turn is one iteration of the agent loop, not an entire user request. Its heading and closing marker share a recorded turn ID. Indented events were recorded between those markers for the same agent; this shows timing, not why an action happened. Tools can also run outside these markers. Missing boundaries are left ungrouped.</p>
+        <p>Recorded evidence only, with up to 300 recent supported events. Long evidence is shortened. Some host activity and earlier streaming updates may be unavailable. Trace keeps its copy of chat content in memory and makes no model calls.</p>
+      </details>
+      <dialog id="statistics-panel" class="footer-panel statistics-drawer" aria-labelledby="statistics-title">
+        <div class="drawer-grip" aria-hidden="true"></div>
+        <div class="panel-heading"><h2 id="statistics-title">Activity overview</h2><button type="button" data-close-panel>Close</button></div>
+        <div class="statistics-body">
+          <dl id="stat-counts" class="stat-counts"></dl>
+          <p id="stat-scope">Waiting for recorded activity…</p>
+          <p id="stat-unlinked" hidden></p>
+          <h3>Hooks used</h3><ul id="stat-hooks"></ul>
+          <h3>Skills loaded</h3><ul id="stat-skills"></ul>
+        </div>
+      </dialog>
+      <dialog id="releases-panel" class="footer-panel" aria-labelledby="releases-title">
+        <div class="panel-heading"><h2 id="releases-title">What changed</h2><button type="button" data-close-panel>Close</button></div>
+        <div id="release-list"><p>Loading release notes…</p></div>
+      </dialog>
+      <dialog id="settings-panel" class="footer-panel" aria-labelledby="settings-title">
+        <div class="panel-heading"><h2 id="settings-title">Settings</h2><button type="button" data-close-panel>Close</button></div>
+        <label for="text-size">Text size
+          <select id="text-size"><option value="100">Default · 100%</option><option value="115">Comfortable · 115%</option><option value="130">Large · 130%</option><option value="150">Extra large · 150%</option></select>
+        </label>
+        <p>Applies to this open panel. Resets when you reopen Trace.</p>
+      </dialog>
+      <dialog id="logs-panel" class="footer-panel" aria-labelledby="logs-title">
+        <div class="panel-heading"><h2 id="logs-title">Plugin logs</h2><button type="button" data-close-panel>Close</button></div>
+        <p>Plugin health only: no chat text, tool arguments, paths or credentials. Recent logs stay in memory until this panel closes.</p>
+        <label for="log-output">Diagnostic snapshot</label>
+        <textarea id="log-output" readonly rows="10" spellcheck="false"></textarea>
+        <div class="panel-actions"><button id="update-logs" type="button">Update logs</button><button id="copy-logs" type="button">Copy logs</button><button id="export-logs" type="button">Export logs</button></div>
+        <p id="log-status" role="status"></p>
+      </dialog>
+      <div id="footer-dock" class="footer-dock">
+        <div class="statistics-dock">
+          <button id="statistics-button" type="button" data-panel="statistics-panel" aria-controls="statistics-panel" aria-haspopup="dialog" aria-expanded="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 19v-7m7 7V5m7 14V9"/></svg>
+            Statistics <span class="drawer-arrow" aria-hidden="true"></span>
+          </button>
+          <span id="statistics-peek" title="Counts cover retained events only">Waiting for events…</span>
+        </div>
+        <nav class="footer-actions" aria-label="Plugin utilities">
+        <span class="footer-brand">Trace</span>
+        <button id="plugin-version" type="button" data-panel="releases-panel" aria-controls="releases-panel" aria-haspopup="dialog" aria-expanded="false">Version…</button>
+        <button id="refresh" type="button">↻ Refresh</button>
+        <button type="button" data-panel="settings-panel" aria-controls="settings-panel" aria-haspopup="dialog" aria-expanded="false">Settings</button>
+        <button type="button" data-panel="logs-panel" aria-controls="logs-panel" aria-haspopup="dialog" aria-expanded="false">Show logs</button>
+        <a id="feedback" href="https://github.com/AndrewGodlewsky/Copilot-Trace/issues/new" target="_blank" rel="noopener noreferrer">Feedback</a>
+        </nav>
+        <p id="footer-status" role="status"></p>
+      </div>
+    </footer>
+    <noscript>This panel needs JavaScript to display live events.</noscript>
   </main>
 </body>
 </html>

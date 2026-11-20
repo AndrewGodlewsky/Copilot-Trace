@@ -1,4 +1,4 @@
-# Copilot Trace foundation
+# Trace foundation
 
 Prepare this repository for a different Copilot desktop plugin, using the reusable engineering lessons from Copilot Explore. The user selected a minimal runnable shell in addition to instructions and technical context.
 

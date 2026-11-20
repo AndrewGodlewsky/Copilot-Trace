@@ -1,11 +1,11 @@
-# Working on Copilot Trace
+# Working on Trace
 
-Trace is a GitHub Copilot desktop plugin. `/trace` opens its native canvas. This repository currently contains a starter screen, not the eventual plugin behavior. Confirm that behavior with the owner before adding product features. Treat the name as an identity, not a specification for telemetry or tracing.
+Trace is a GitHub Copilot desktop plugin. `/trace` opens a live timeline of the current chat with expandable recorded evidence. The owner chose a small proof of concept using recorded evidence and general explanations only. Keep missing origins/reasons explicitly unknown; chronology is not causality. AI interpretation, transcript persistence/exports and cross-chat access are deferred. The footer supports user-requested export of bounded plugin diagnostics; keep those logs free of chat content, IDs, paths, URLs, raw errors and credentials.
 
 ## Integration and boundaries
 
 - Before changing host integration, read [Copilot integration](docs/copilot-integration.md) and inspect the installed SDK declarations. The host supplies `@github/copilot-sdk/extension`; keep it external and do not download or bundle a replacement runtime.
-- Shipped code lives in `com.github.copilot/extensions/trace/`: `extension.mjs` joins the host, `canvas.mjs` owns instances, `server.mjs` serves local assets, and `web/` renders the panel. Add product modules only when behavior calls for them.
+- Shipped code lives in `com.github.copilot/extensions/trace/`: `extension.mjs` joins the host, `canvas.mjs` owns instances, `server.mjs` serves local assets and read-only snapshots, `trace.mjs` observes session events, and `web/` renders the panel.
 - Validate session/instance ownership and correlate future async requests. Closing an instance must release its resources; stale results must not overwrite newer user input.
 - Model operations are not implemented. Before adding them, read [session ownership and background helpers](docs/copilot-integration.md#model-operations). Keep parent model and permission ownership with the host; isolate and account for plugin-owned work.
 - Keep HTTP bound to loopback, require the per-instance token, validate Host, and serve only allowlisted assets. Future write endpoints also need exact Origin checks, bounded JSON and request authorization.
@@ -30,7 +30,7 @@ Install through Copilot's CLI; do not edit host databases or installed-plugin re
 The owner has given standing authorization to commit and push each completed iteration to `main`. Unless the owner explicitly requests otherwise, every iteration that changes repository files, including documentation or instructions, must finish with these steps:
 
 1. Bump the plugin version at least one patch increment. Synchronize `package.json`, both root version entries in `package-lock.json`, `plugin.json`, `.github/plugin/marketplace.json`, `com.github.copilot/extensions/trace/package.json`, and the README's current version.
-2. Add a newest-first entry to `release-notes.json`, with an accurate user-facing summary of at most 400 characters. Preserve older entries and ship the complete extension, panel, skill and logo together.
+2. Every version must add a newest-first entry to `release-notes.json`: one or two very short user-facing sentences explaining what changed, at most 400 characters. The footer displays this file directly when the user clicks the version. Preserve all older entries, keep versions unique and descending, and ship the complete notes with the extension, panel, skill and logo.
 3. Obtain independent review of the final candidate and run `npm run verify:iteration -- <id>`: unit tests and checks, plus the installed-runtime fixture for host changes and recorded owner UI acceptance for visible changes. Run `npm run package`. Fix failures before publishing; report unmet manual acceptance explicitly rather than claiming it passed.
 4. Fetch remote changes, commit the iteration, integrate it into `main` without discarding others' work, and push to `origin/main`. Do not ask for push approval again or stop at a local commit or feature-branch push. Never force-push. Preserve other worktrees and unfinished changes; integration that changes tested content requires fresh review and checks.
 5. Verify the published commit on remote `main`. Report the plugin version, commit, checks actually run and any pending manual verification. If publishing is blocked, state the blocker rather than claiming completion.

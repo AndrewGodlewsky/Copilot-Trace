@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -46,11 +46,29 @@ try {
   const catalog = await until(() => session.rpc.canvas.list(), value => value.canvases?.some(canvas => canvas.canvasId === 'trace'), 'canvas registration');
   const provider = catalog.canvases.find(canvas => canvas.canvasId === 'trace');
   assert.equal(provider.extensionId, 'plugin:trace:trace');
+  const historical = await session.rpc.log({ message: 'Trace fixture history 日本語 😀', type: 'trace-fixture' });
   const input = { canvasId: 'trace', instanceId: 'trace-fixture', input: {} };
   const first = await session.rpc.canvas.open(input);
   const page = await fetch(first.url);
   assert.equal(page.status, 200);
-  assert.match(await page.text(), /Copilot Trace/);
+  assert.match(await page.text(), /<title>Trace<\/title>/);
+  assert.equal((await fetch(first.url + 'app.mjs')).status, 200);
+  assert.equal((await fetch(first.url + 'presentation.mjs')).status, 200);
+  for (const asset of ['footer.mjs', 'diagnostics.mjs', 'polling.mjs', 'follow.mjs']) assert.equal((await fetch(first.url + asset)).status, 200);
+  const metadata = await (await fetch(first.url + 'metadata')).json();
+  assert.equal(metadata.version, JSON.parse(await readFile(join(root, 'plugin.json'), 'utf8')).version);
+  assert.equal(metadata.releases[0].version, metadata.version);
+  const diagnostics = await (await fetch(first.url + 'diagnostics')).json();
+  assert.ok(diagnostics.diagnostics.entries.some(entry => entry.code === 'server_started'));
+  assert.equal(await (await fetch(first.url + 'trace.svg')).text(), await readFile(join(root, 'assets/trace.svg'), 'utf8'));
+  const history = await until(() => fetch(first.url + 'events').then(r => r.json()),
+    value => value.history !== 'loading', 'history load');
+  assert.equal(history.history, 'ready');
+  assert.ok(history.entries.some(entry => entry.id === historical.eventId && entry.evidence.includes('日本語 😀')), 'Attached extension must receive actual session history.');
+  const live = await session.rpc.log({ message: 'Trace fixture live <script>literal</script>', type: 'trace-fixture' });
+  const observed = await until(() => fetch(first.url + 'events').then(r => r.json()),
+    value => value.entries.some(entry => entry.id === live.eventId), 'live session event');
+  assert.equal(observed.entries.filter(entry => entry.id === live.eventId).length, 1);
   assert.equal((await session.rpc.canvas.open(input)).url, first.url);
   await session.rpc.canvas.close({ instanceId: input.instanceId });
   await until(() => fetch(first.url).then(() => false, () => true), Boolean, 'server shutdown');
@@ -61,7 +79,7 @@ try {
   await until(() => fetch(reopened.url).then(() => false, () => true), Boolean, 'reopened server shutdown');
   assert.equal(requests, 0);
   assert.equal(expired, false);
-  console.log('PASS: installed SDK discovery, plugin ownership, open/reopen/close, assets and zero inference. Native rendering and /trace discovery remain manual checks.');
+  console.log('PASS: installed SDK discovery, plugin ownership, real history/live event delivery, open/reopen/close, assets and zero inference. Native rendering and /trace discovery remain manual checks.');
 } finally {
   clearTimeout(timer);
   await session?.disconnect().catch(() => {});

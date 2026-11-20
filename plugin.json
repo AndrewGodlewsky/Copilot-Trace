@@ -1,8 +1,8 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "trace",
-  "version": "0.1.1",
-  "description": "Open the Copilot Trace starter canvas with /trace.",
+  "version": "0.1.10",
+  "description": "Watch activity in your current chat with /trace and inspect recorded evidence.",
   "repository": "https://github.com/AndrewGodlewsky/Copilot-Trace",
   "keywords": [
     "copilot",

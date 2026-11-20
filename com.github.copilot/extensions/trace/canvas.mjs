@@ -16,21 +16,21 @@ export function traceCanvas({ createCanvas, getSession, startServer = serve }) {
   }
   const canvas = createCanvas({
     id: 'trace',
-    displayName: 'Copilot Trace',
-    description: 'Open the Copilot Trace starter panel.',
+    displayName: 'Trace',
+    description: 'Watch recorded activity in this chat with expandable event evidence.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     async open(ctx) {
       assertSession(ctx);
       if (closed) throw new Error('Trace is closed.');
       let entry = instances.get(ctx.instanceId);
       if (!entry) {
-        entry = { ready: startServer(), closed: false };
+        entry = { ready: startServer(getSession()), closed: false };
         instances.set(ctx.instanceId, entry);
       }
       try {
         const server = await entry.ready;
         if (closed || entry.closed) throw new Error('Canvas was closed while opening.');
-        return { url: server.url, title: 'Copilot Trace' };
+        return { url: server.url, title: 'Trace' };
       } catch (error) {
         if (!entry.closed && instances.get(ctx.instanceId) === entry) instances.delete(ctx.instanceId);
         throw error;
