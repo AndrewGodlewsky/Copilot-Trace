@@ -21,6 +21,42 @@ function change(entry, mutate) {
 const shell = (exitCode = 0, content = 'FAIL 2 assertions; PASS 100 tests') => ({ content,
   contents: [{ type: 'shell_exit', shellId: 'shell', exitCode }] });
 
+test('failure presence uses explicit recorded outcomes without promoting warnings, decisions or prose', () => {
+  assert.equal(typeof presentation.recordedFailure, 'function');
+  for (const [entry, expected] of [
+    [{ type: 'session.error' }, true], [{ type: 'subagent.failed' }, true],
+    ...['tool.execution_complete', 'hook.end', 'session.compaction_complete'].flatMap(type => [
+      [{ type, success: false, truncated: true }, true], [{ type, success: true }, false], [{ type }, false],
+      [{ type, success: 'false' }, false],
+    ]),
+    [{ type: 'session.warning', success: false }, false], [{ type: 'abort' }, false],
+    [{ type: 'permission.requested', success: false }, false],
+    [{ type: 'hook.end', success: true, evidence: '{"output":{"permissionDecision":"deny"}}' }, false],
+    [{ type: 'assistant.message', preview: 'Failed with exit code 1' }, false],
+    [{ type: 'tool.execution_start', success: false }, false],
+  ]) assert.equal(presentation.recordedFailure(entry), expected, JSON.stringify(entry));
+});
+
+test('failure presence reuses validated typed process exits, including protocol success and opaque commands', async () => {
+  assert.equal(typeof presentation.recordedFailure, 'function');
+  for (const [exitCode, expected] of [[0, false], [1, true], [-1, true]]) {
+    const entries = await project(call('powershell', { command: 'Write-Output "error"', description: 'Command' }, shell(exitCode)));
+    const outcome = outcomes(entries).get('end');
+    assert.equal(outcome.exitCode, exitCode);
+    assert.equal(presentation.recordedFailure(entries[1], outcome), expected);
+  }
+  const raw = call('powershell', { command: 'npm test', description: 'Tests' }, shell(1));
+  for (const mutate of [events => events.shift(), events => { events[1].agentId = 'other'; },
+    events => { events[1].data.shellExecution = { exitCode: 0 }; },
+    events => { events[1].data.result.contents.push({ type: 'shell_exit', shellId: 'shell', exitCode: 1 }); },
+    events => { events[0].data.origin = 'builtin'; },
+  ]) {
+    const events = structuredClone(raw); mutate(events);
+    const entries = await project(events), result = entries.find(entry => entry.id === 'end');
+    assert.equal(presentation.recordedFailure(result, outcomes(entries).get('end')), false, mutate.toString());
+  }
+});
+
 test('successful read of irrelevant content establishes returned data without judging usefulness or consuming output prose', async () => {
   for (const [name, args] of [['view', { path: 'unrelated.txt' }], ['web_fetch', { url: 'https://example.test/unrelated' }]]) {
     const entries = await project(call(name, args)), before = structuredClone(entries), descriptions = outcomes(entries);

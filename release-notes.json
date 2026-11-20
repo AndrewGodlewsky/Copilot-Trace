@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.52",
+    "summary": "A small red exclamation mark highlights recorded failures, including failures inside collapsed actions. Parent markers point to contained evidence without judging the whole task."
+  },
+  {
     "version": "0.1.51",
     "summary": "Live event bursts now appear in a short progression with smoother following. Reduced motion and paused reading keep updates immediate."
   },

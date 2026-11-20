@@ -1,4 +1,4 @@
-import { describeActor, explainStep, toolOutcomes, skillInstructions, compactionAttempts, delegationHandoffs, recoveryAttempts, guidanceComparison, retrievalLedger, toolExtents, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, observerScope, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
+import { describeActor, explainStep, toolOutcomes, recordedFailure, skillInstructions, compactionAttempts, delegationHandoffs, recoveryAttempts, guidanceComparison, retrievalLedger, toolExtents, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, observerScope, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { predictionCategories, freezeLearningSnapshot, armLivePrediction, resolveLivePrediction, createReplayPractice, chooseReplayPrediction, createPlayback, createActivityCounter, createSurpriseBookmarks } from './learning.mjs';
@@ -1259,6 +1259,7 @@ function renderCompaction(node, attempt) {
     node.compaction = { details, source, outcome, note, summary, limits, metrics, links, buttons: new Map() };
   }
   const view = node.compaction, measurement = attempt.metrics;
+  view.details.failureEntries = attempt.status === 'conflict' ? [node.entry] : attempt.entries;
   const result = attempt.outcome === 'unknown' ? 'Reported success or failure unavailable.' : `Reported ${attempt.outcome}.`;
   const outcome = attempt.reportedOutcome === null ? 'Outcome field not recorded in complete matching evidence.'
     : attempt.reportedOutcome === '' ? 'Recorded outcome field is empty.' : `Recorded outcome: ${attempt.reportedOutcome}.`;
@@ -1314,6 +1315,7 @@ function renderDelegation(node, handoff) {
     delegationViews.set(handoff.id, view);
   }
   if (view.details.parentElement !== node.body) node.body.insertBefore(view.details, node.recordedEvidence);
+  view.details.failureEntries = handoff.links.map(link => link.entry);
   const parent = handoff.parentAgentId === null ? 'Parent unknown' : handoff.parentAgentId === '' ? 'Main chat' : `Agent ${handoff.parentAgentId}`;
   const lifecycle = { completed: 'Completed · Task correctness not established.', failed: 'Failed.', cancelled: 'Cancelled.',
     missing: 'Completion not retained; this does not mean the child is still running.', unknown: 'Lifecycle outcome unknown.' }[handoff.lifecycle];
@@ -1369,7 +1371,8 @@ function renderRecovery(node, recovery) {
     const id = index === 0 ? 'original' : attempt.id; ids.add(id);
     let row = view.attempts.get(id);
     if (!row) {
-      const details = element('details', undefined, 'recovery-attempt'), summary = element('summary'), identity = element('p');
+      const details = element('details', undefined, 'recovery-attempt'), summary = element('summary'), label = element('span'), identity = element('p');
+      summary.append(label);
       const status = element('p'), notes = element('p'), args = element('pre', '', 'recovery-arguments'), result = element('pre', '', 'recovery-result');
       for (const [body, label] of [[args, 'Retained argument values as JSON'], [result, 'Retained result and error values as JSON']]) {
         body.tabIndex = 0; body.setAttribute('aria-label', label);
@@ -1379,8 +1382,9 @@ function renderRecovery(node, recovery) {
       details.append(summary, identity, status, notes, element('h4', 'Retained arguments (JSON)'), args,
         element('h4', 'Retained result / error (JSON)'), result, links);
       details.addEventListener('toggle', () => { if (details.open) follow.checked = false; });
-      row = { details, summary, identity, status, notes, args, result, links, buttons: new Map() }; view.attempts.set(id, row);
+      row = { details, summary: label, identity, status, notes, args, result, links, buttons: new Map() }; view.attempts.set(id, row);
     }
+    row.details.failureEntries = attempt.links.map(link => link.entry);
     const outcome = attempt.outcome === 'unknown' ? 'Tool outcome unknown' : `Tool result: reported ${attempt.outcome}`;
     for (const [target, text] of [[row.summary, `${index === 0 ? 'Original operation' : `Suggestion ${index}`} · ${attempt.toolName} · ${outcome}`],
       [row.identity, `${describeActor({ agentId: attempt.source }).source} · ${attempt.provider}`],
@@ -1449,7 +1453,8 @@ function renderClaim(node, claim, checks) {
     if (!row) {
       const expected = linkValidationClaim(lastSnapshot.entries, claim, check);
       if (!expected) continue;
-      const details = element('details', undefined, 'claim-result'), summary = element('summary'), status = element('p'), notes = element('p');
+      const details = element('details', undefined, 'claim-result'), summary = element('summary'), label = element('span'), status = element('p'), notes = element('p');
+      summary.append(label);
       const output = element('pre', check.output ?? 'Literal result.content unavailable.', 'claim-output');
       output.tabIndex = 0; output.setAttribute('aria-label', 'Exact retained validation result content');
       const select = element('button', 'Link this result'); select.type = 'button';
@@ -1475,8 +1480,9 @@ function renderClaim(node, claim, checks) {
       details.append(summary, element('p', `${describeActor(check.start).source} · ${check.result.timestamp || 'Time unavailable'}`), status, notes,
         element('h4', 'Literal result.content'), output, select, links);
       details.addEventListener('toggle', () => { if (details.open) follow.checked = false; });
-      row = { details, summary, status, notes, select, expected }; view.results.set(check.id, row);
+      row = { details, summary: label, status, notes, select, expected }; view.results.set(check.id, row);
     }
+    row.details.failureEntries = [check.start, check.result];
     const linked = selected?.id === check.id;
     const disagreement = linked && ((claim.reported === 'passed' && check.exitCode !== null && check.exitCode !== 0)
       || (claim.reported === 'failed' && check.exitCode === 0))
@@ -1494,7 +1500,7 @@ function renderClaim(node, claim, checks) {
 function renderHookInvocation(owner, call) {
   if (!owner.hook) {
     owner.hook = element('details', undefined, 'hook-invocation');
-    owner.hookTitle = element('summary');
+    const summary = element('summary'); owner.hookTitle = element('span'); summary.append(owner.hookTitle);
     owner.hookSource = element('p');
     owner.hookTiming = element('p');
     owner.hookOutcome = element('p');
@@ -1514,12 +1520,13 @@ function renderHookInvocation(owner, call) {
     owner.hookError.tabIndex = 0;
     owner.hookError.setAttribute('aria-label', 'Recorded hook error');
     owner.hookRaw.append(element('p', 'Output'), owner.hookOutput, element('p', 'Error'), owner.hookError);
-    owner.hook.append(owner.hookTitle, owner.hookSource, element('h4', 'General lifecycle timing'), owner.hookTiming,
+    owner.hook.append(summary, owner.hookSource, element('h4', 'General lifecycle timing'), owner.hookTiming,
       element('h4', 'Recorded pipeline result'), owner.hookOutcome, owner.hookReported, owner.hookRaw,
       element('p', 'A reported result or decision request does not verify downstream effects, approval, blocking or instruction compliance. Supplied context is shown only when output exposes it; callback returns may be absent from pipeline output.'),
       owner.hookNotes, owner.hookLinks);
     owner.hook.addEventListener('toggle', () => { if (owner.hook.open) follow.checked = false; });
   }
+  owner.hook.failureEntries = call.entries;
   const title = `${call.title} · ${call.linked ? 'Pipeline invocation' : 'Unlinked boundary'}`;
   const source = `${describeActor(call.entries[0]).source} · Invocation ID: ${call.hookInvocationId ?? 'Unavailable'}`;
   const result = call.outcome === 'unknown' ? 'Pipeline outcome unknown.' : `Reported pipeline ${call.outcome}.`;
@@ -1697,6 +1704,32 @@ function unhidden(node) {
   if (!node?.isConnected) return false;
   for (let ancestor = node; ancestor; ancestor = ancestor.parentElement) if (ancestor.hidden) return false;
   return true;
+}
+
+function renderFailureMarkers(entries, outcomes) {
+  const failed = new Set(entries.filter(entry => recordedFailure(entry, outcomes.get(entry.id))));
+  const disclosures = [...timeline.querySelectorAll('details')], marked = new Map();
+  for (const source of disclosures) {
+    if (!source.failureEntries?.some(entry => failed.has(entry)) || !unhidden(source)) continue;
+    let direct = source.failureIsDirect === true;
+    // Closed disclosures still expose their summaries; filtered branches contribute only through visible evidence paths.
+    for (let details = source; details; details = details.parentElement?.closest('details')) {
+      const summary = details.firstElementChild;
+      marked.set(summary, marked.get(summary) || direct);
+      direct = false;
+    }
+  }
+  for (const details of disclosures) {
+    const summary = details.firstElementChild;
+    let marker = summary.querySelector('.failure-marker');
+    if (!marked.has(summary)) { if (marker) marker.hidden = true; continue; }
+    if (!marker) {
+      marker = element('span', '!', 'failure-marker'); marker.setAttribute('role', 'img');
+      summary.insertBefore(marker, summary.querySelector('.chevron'));
+    }
+    const label = marked.get(summary) ? 'Recorded failure' : 'Contains a recorded failure in retained evidence';
+    marker.setAttribute('aria-label', label); marker.title = label; marker.hidden = false;
+  }
 }
 
 function applyFilter(snapshot) {
@@ -1901,6 +1934,7 @@ function render(snapshot, liveFrame = false) {
     if (node && node.entry.type !== entry.type) { node.item.remove(); nodes.delete(entry.id); node = null; }
     if (!node) { node = row(entry, outcomes.get(entry.id)); nodes.set(entry.id, node); }
     node.entry = entry;
+    node.details.failureEntries = [entry]; node.details.failureIsDirect = true;
     renderValidationRoute(node, entry);
     renderExtent(node, extents.get(entry.id));
     renderCompaction(node, compactionByEvent.get(entry.id));
@@ -1980,6 +2014,7 @@ function render(snapshot, liveFrame = false) {
       oldHookRows, usedHookRows, focused);
     if (tool) {
       renderActionStages(group, stages.get(section.entries[0].id), operations.get(section.entries[0].id));
+      group.actions.failureEntries = section.entries.filter(entry => group.stageRows.has(entry.id));
       renderToolProvenance(group, provenance.get(section.entries[0].id));
       if (oldGroups.some(old => old.group.actions?.open && section.entries.some(entry => old.ids.has(entry.id)))) group.actions.open = true;
       if (oldGroups.some(old => old.group.provenance?.open && section.entries.some(entry => old.ids.has(entry.id)))) group.provenance.open = true;
@@ -2045,6 +2080,7 @@ function render(snapshot, liveFrame = false) {
   chapters = nextChapters;
   lanes = nextLanes;
   applyFilter(snapshot);
+  renderFailureMarkers(snapshot.entries, outcomes);
   updateNavigation();
   // Moving an existing disclosure into a group must not strand keyboard focus.
   const focusedNode = nodes.get(focusedId);

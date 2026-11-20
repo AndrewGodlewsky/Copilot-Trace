@@ -1197,11 +1197,12 @@ export function toolOutcomes(entries) {
     if (!operation && !validation) continue;
     const basis = 'This uses an authored argument contract; provider and implementation remain unknown. ';
     const separate = 'Missing validation is unknown. The validation overview shows separate retained observations, not checks linked to this operation.';
-    let kind, means, unknown;
+    let kind, means, unknown, exitCode = null;
     if (data.toolName === 'powershell') {
       const shell = validationExit(end);
       if (!shell || (data.arguments.shellId !== undefined && data.arguments.shellId !== shell.shellId)) continue;
       kind = 'process';
+      exitCode = shell.exitCode;
       means = `The tool protocol reports ${end.success ? 'success' : 'failure'}. The typed process exit ${shell.exitCode} reports ${shell.exitCode === 0 ? 'a zero' : 'a nonzero'} exit for this command only.`;
       unknown = `Test assertion counts and coverage remain unknown. Output text and assistant assertions do not verify the task. ${basis}${separate}`;
     } else if (end.success === true && typeof end.result?.content === 'string' && !Array.isArray(end.result)) {
@@ -1213,9 +1214,16 @@ export function toolOutcomes(entries) {
         unknown = `The change’s correctness and the overall task outcome remain unknown. ${basis}${separate}`;
       }
     }
-    if (kind) outcomes.set(result.id, { kind, means, unknown });
+    if (kind) outcomes.set(result.id, { kind, means, unknown, exitCode });
   }
   return outcomes;
+}
+
+export function recordedFailure(entry = {}, outcome) {
+  return ['session.error', 'subagent.failed'].includes(entry.type)
+    || (['tool.execution_complete', 'hook.end', 'session.compaction_complete'].includes(entry.type) && entry.success === false)
+    || (entry.type === 'tool.execution_complete' && outcome?.kind === 'process'
+      && Number.isSafeInteger(outcome.exitCode) && outcome.exitCode !== 0);
 }
 
 function canonicalArguments(value) {

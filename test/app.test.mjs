@@ -4268,3 +4268,208 @@ test('incompatible retrieval results stay unknown in both Statistics extent and 
   assert.match(ui.get('#recap-report').textContent, /Retrieval status unknown: 1/);
   assert.doesNotMatch(ui.get('#recap-report').textContent, /text returned|UNTRUSTED_RETURNED_TEXT/);
 });
+
+async function failureEntries(raw) {
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => raw.map(event => ({ timestamp: '2026-11-20T12:00:00Z', ...event })) });
+  await trace.ready; const entries = trace.snapshot().entries; trace.close(); return entries;
+}
+const failureMarker = summary => summary.querySelectorAll('.failure-marker').find(marker => !marker.hidden);
+const markedSummaries = ui => visibleWalk(ui.get('#timeline')).filter(node => node.tagName === 'summary' && failureMarker(node));
+const failureRow = (ui, entry) => walk(ui.get('#timeline')).find(node => node.tagName === 'pre' && node.textContent === entry.evidence)?.closest('li');
+
+test('failure markers distinguish recorded event failures from warning, cancellation, denial and unknown outcomes', async () => {
+  const raw = [
+    ['tool', 'tool.execution_complete', { toolCallId: 'tool', success: false }],
+    ['hook', 'hook.end', { hookInvocationId: 'hook', hookType: 'preToolUse', success: false }],
+    ['compact', 'session.compaction_complete', { compactionAttemptId: 'compact', success: false }],
+    ['agent', 'subagent.failed', {}], ['error', 'session.error', { message: 'Failure' }],
+    ['warning', 'session.warning', { message: 'Warning about failure' }], ['abort', 'abort', {}],
+    ['denied', 'hook.end', { hookInvocationId: 'denied', hookType: 'preToolUse', success: true, output: { permissionDecision: 'deny' } }],
+    ['unknown', 'tool.execution_complete', { toolCallId: 'unknown', result: { content: 'failed; exit code 1' } }],
+    ['prose', 'assistant.message', { content: 'Failed with exit code 1' }],
+  ].map(([id, type, data]) => ({ id, type, data }));
+  const entries = await failureEntries(raw), ui = fixture(appSource); ui.render(entries);
+  ui.get('#event-order').value = 'chronological'; ui.get('#event-order').dispatch('change');
+  for (const [index, entry] of entries.entries()) {
+    const summary = failureRow(ui, entry).firstElementChild.firstElementChild, marker = failureMarker(summary);
+    assert.equal(Boolean(marker), index < 5, entry.id);
+    if (marker) {
+      assert.equal(marker.textContent, '!'); assert.equal(marker.attributes.role, 'img');
+      assert.equal(marker.attributes['aria-label'], 'Recorded failure'); assert.match(marker.title, /Recorded failure/);
+      assert.equal(marker.tabIndex, undefined); assert.equal(marker.tagName, 'span');
+      assert.equal(summary.children.at(-1).className, 'chevron');
+    }
+  }
+});
+
+test('collapsed summaries expose typed command failures and hook failures across groups, chapters and lanes', async () => {
+  const entries = await failureEntries([
+    { id: 'request-one', type: 'user.message', data: { content: 'First request', delivery: 'immediate' } },
+    { id: 'start', type: 'tool.execution_start', data: { toolCallId: 'command', toolName: 'powershell', arguments: { command: 'npm test', description: 'Tests' } } },
+    { id: 'hook-start', type: 'hook.start', data: { hookInvocationId: 'pipeline', hookType: 'postToolUse' } },
+    { id: 'request-two', type: 'user.message', data: { content: 'Second request', delivery: 'immediate' } },
+    { id: 'hook-end', type: 'hook.end', data: { hookInvocationId: 'pipeline', hookType: 'postToolUse', success: false } },
+    { id: 'end', type: 'tool.execution_complete', data: { toolCallId: 'command', success: true, result: { content: 'PASS', contents: [{ type: 'shell_exit', shellId: 'shell', exitCode: 1 }] } } },
+    { id: 'agent-failure', agentId: 'child', type: 'subagent.failed', data: {} },
+  ]);
+  const ui = fixture(appSource); ui.render(entries);
+  const tool = byClass(ui.get('#timeline'), 'tool-group'), firstHook = byClass(ui.get('#timeline'), 'hook-group');
+  for (const group of [tool, firstHook]) {
+    assert.equal(group.firstElementChild.open, false);
+    assert.match(failureMarker(group.firstElementChild.firstElementChild)?.attributes['aria-label'] || '', /Contains a recorded failure/);
+  }
+  const invocation = byClass(firstHook, 'hook-invocation');
+  assert.match(failureMarker(invocation.firstElementChild)?.attributes['aria-label'] || '', /Contains a recorded failure/);
+  const marker = failureMarker(tool.firstElementChild.firstElementChild);
+  tool.firstElementChild.open = true; tool.firstElementChild.firstElementChild.focus(); ui.render(entries);
+  assert.equal(failureMarker(tool.firstElementChild.firstElementChild), marker);
+  assert.equal(ui.document.activeElement, tool.firstElementChild.firstElementChild);
+  for (const mode of ['chronological', 'chapters', 'lanes']) {
+    ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change');
+    for (const id of ['hook-end', 'end', 'agent-failure']) {
+      assert.equal(failureMarker(failureRow(ui, entries.find(entry => entry.id === id)).firstElementChild.firstElementChild)?.attributes['aria-label'], 'Recorded failure', `${mode}: ${id}`);
+    }
+    const startSummary = failureRow(ui, entries.find(entry => entry.id === 'hook-start')).firstElementChild.firstElementChild;
+    assert.match(failureMarker(startSummary)?.attributes['aria-label'] || '', /Contains a recorded failure/, mode);
+    if (mode !== 'chronological') for (const parent of ui.get('#timeline').children) {
+      assert.match(failureMarker(parent.firstElementChild.firstElementChild)?.attributes['aria-label'] || '', /Contains a recorded failure/, `${mode}: parent`);
+    }
+  }
+  const endLink = walk(byClass(ui.get('#timeline'), 'hook-invocation')).find(node => node.tagName === 'button' && /End/.test(node.textContent));
+  endLink.dispatch('click');
+  assert.equal(ui.document.activeElement, failureRow(ui, entries.find(entry => entry.id === 'hook-end')).firstElementChild.firstElementChild);
+});
+
+test('failure markers refresh on hydration and same-ID replacement, preserve disclosures and clear on retention', async () => {
+  const failed = await hookFixture(), ui = fixture(appSource);
+  ui.render(failed.slice(0, 2), { history: 'loading' });
+  const group = ui.get('#timeline').firstElementChild, summary = group.firstElementChild.firstElementChild;
+  assert.equal(markedSummaries(ui).length, 0);
+  group.firstElementChild.open = true; summary.focus(); ui.document.scrollingElement.scrollTop = 230;
+  ui.render(failed);
+  assert.equal(ui.get('#timeline').firstElementChild, group); assert.ok(failureMarker(summary));
+  assert.equal(group.firstElementChild.open, true); assert.equal(ui.document.activeElement, summary);
+  assert.equal(ui.document.scrollingElement.scrollTop, 230);
+  const succeeded = await failureEntries(failed.map(entry => {
+    const raw = JSON.parse(entry.evidence); if (raw.type === 'hook.end') raw.data.success = true; return raw;
+  }));
+  ui.render(succeeded); assert.equal(markedSummaries(ui).length, 0);
+  ui.render(failed); assert.ok(failureMarker(summary));
+  ui.render(failed.filter(entry => entry.type !== 'hook.end'), { omitted: 2 });
+  assert.equal(markedSummaries(ui).length, 0); assert.equal(ui.document.activeElement, summary);
+});
+
+test('filtered containers mark only exposed failures and keep nested evidence links reachable', async () => {
+  const entries = await failureEntries([
+    { id: 'prompt', type: 'user.message', data: { content: 'Request' } },
+    { id: 'hook', type: 'hook.end', data: { hookInvocationId: 'pipeline', hookType: 'preToolUse', success: false } },
+    { id: 'start', type: 'tool.execution_start', data: { toolCallId: 'read', toolName: 'view', arguments: { path: 'file' } } },
+    { id: 'end', type: 'tool.execution_complete', data: { toolCallId: 'read', success: true, result: { content: 'Data' } } },
+  ]);
+  for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    const ui = fixture(appSource); ui.render(entries); ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change');
+    filterMode(ui, 'tools'); assert.equal(markedSummaries(ui).length, 0, mode);
+    filterMode(ui, 'automation'); assert.ok(markedSummaries(ui).length > 0, mode);
+    ui.get('#reset-filter').dispatch('click'); assert.ok(markedSummaries(ui).length > 0, mode);
+  }
+});
+
+test('compaction and action-stage disclosures retain a marked path to original failed evidence', async () => {
+  const entries = await compactionFixture({ success: false });
+  const ui = fixture(appSource); ui.render(entries);
+  const first = ui.get('#timeline').firstElementChild;
+  assert.match(failureMarker(first.firstElementChild.firstElementChild)?.attributes['aria-label'] || '', /Contains a recorded failure/);
+  assert.ok(failureMarker(byClass(first, 'compaction').firstElementChild));
+  const command = await failureEntries([
+    { id: 'start', type: 'tool.execution_start', data: { toolCallId: 'cmd', toolName: 'view', arguments: { path: 'file' } } },
+    { id: 'end', type: 'tool.execution_complete', data: { toolCallId: 'cmd', success: false } },
+  ]);
+  ui.render(command); ui.get('#event-order').value = 'chronological'; ui.get('#event-order').dispatch('change');
+  const stages = byClass(failureRow(ui, command[0]), 'action-stages');
+  assert.ok(failureMarker(stages.firstElementChild));
+  const original = stages.querySelectorAll('button').find(button => /Result|Failure/i.test(button.textContent));
+  assert.ok(original); original.dispatch('click');
+  assert.equal(ui.document.activeElement, failureRow(ui, command[1]).firstElementChild.firstElementChild);
+});
+
+test('action-stage markers exclude clipped, mismatched and unparseable results while original failures remain marked', async () => {
+  const raw = [
+    { id: 'start', type: 'tool.execution_start', data: { toolCallId: 'call', toolName: 'view', arguments: { path: 'file' } } },
+    { id: 'end', type: 'tool.execution_complete', data: { toolCallId: 'call', success: false, result: { content: 'Failure' } } },
+  ];
+  const complete = await failureEntries(raw);
+  for (const variant of ['clipped', 'mismatched', 'unparseable']) {
+    const changed = structuredClone(raw);
+    if (variant === 'clipped') changed[1].data.result.content = 'x'.repeat(20000);
+    const entries = await failureEntries(changed);
+    if (variant === 'clipped') assert.equal(entries[1].truncated, true);
+    else if (variant === 'unparseable') entries[1].evidence = '{';
+    else {
+      const evidence = JSON.parse(entries[1].evidence); evidence.data.toolCallId = 'different';
+      entries[1].evidence = JSON.stringify(evidence);
+    }
+    const ui = fixture(appSource); ui.render(complete);
+    const stages = byClass(ui.get('#timeline'), 'action-stages');
+    assert.ok(failureMarker(stages.firstElementChild), 'Complete failure evidence initially has a marked stage path');
+    ui.render(entries);
+    assert.equal(byClass(ui.get('#timeline'), 'action-stages'), stages);
+    assert.equal(stages.querySelectorAll('button').length, 1, variant);
+    assert.match(stages.querySelector('button').textContent, /Tool invocation entered/);
+    assert.equal(failureMarker(stages.firstElementChild), undefined, variant);
+    assert.match(failureMarker(ui.get('#timeline').firstElementChild.firstElementChild.firstElementChild)?.attributes['aria-label'] || '', /Contains a recorded failure/, variant);
+    ui.get('#event-order').value = 'chronological'; ui.get('#event-order').dispatch('change');
+    assert.equal(failureMarker(failureRow(ui, entries[0]).firstElementChild.firstElementChild), undefined, variant);
+    assert.equal(failureMarker(failureRow(ui, entries[1]).firstElementChild.firstElementChild)?.attributes['aria-label'], 'Recorded failure', variant);
+  }
+});
+
+test('failure markers use displayed playback and prediction prefixes without leaking future, live or example outcomes', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  data.emit('later-failure', 'session.error', { message: 'Future failure' });
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot()), undefined, Date, async () => exampleResponse(exampleText));
+  await ui.refreshFeed(); assert.ok(markedSummaries(ui).length > 0);
+  ui.get('#playback-start').dispatch('click'); assert.equal(markedSummaries(ui).length, 0);
+  data.emit('live-failure', 'session.error', { message: 'Live failure' }); await ui.refreshFeed();
+  assert.equal(markedSummaries(ui).length, 0);
+  ui.get('#playback-next').dispatch('click'); assert.equal(markedSummaries(ui).length, 1);
+  ui.get('#playback-previous').dispatch('click'); assert.equal(markedSummaries(ui).length, 0);
+  ui.get('#playback-exit').dispatch('click'); assert.equal(markedSummaries(ui).length, 2);
+  ui.render(data.trace.snapshot().entries.slice(0, 1)); ui.get('#prediction-live').dispatch('click');
+  data.emit('prediction-failure', 'session.error', { message: 'Unrevealed failure' }); await ui.refreshFeed();
+  assert.equal(markedSummaries(ui).length, 0);
+  ui.get('#prediction-exit').dispatch('click'); assert.equal(markedSummaries(ui).length, 3);
+  ui.get('#examples-load').dispatch('click'); await ui.settleExamples(); ui.get('#examples-open').dispatch('click');
+  assert.equal(markedSummaries(ui).length, 0); ui.closePage();
+});
+
+test('failure markers wait for the displayed staged-live result in every arrangement', async t => {
+  for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    const data = await predictionFixture(); t.after(() => data.trace.close());
+    data.emit('hook-start', 'hook.start', { hookInvocationId: 'pipeline', hookType: 'postToolUse' });
+    const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot())); await ui.refreshFeed();
+    ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change');
+    ui.get('#follow').checked = true; ui.get('#follow').dispatch('change');
+    for (let i = 1; i <= 7; i++) data.response(`burst-${i}`);
+    data.emit('hook-end', 'hook.end', { hookInvocationId: 'pipeline', hookType: 'postToolUse', success: false });
+    await ui.refreshFeed(); assert.equal(markedSummaries(ui).length, 0, mode);
+    ui.frameAt(60); assert.equal(markedSummaries(ui).length, 0, mode);
+    ui.frameAt(240); assert.ok(markedSummaries(ui).length > 0, mode);
+    const end = data.trace.snapshot().entries.find(entry => entry.id === 'hook-end');
+    assert.equal(failureMarker(failureRow(ui, end).firstElementChild.firstElementChild)?.attributes['aria-label'], 'Recorded failure');
+    ui.closePage();
+  }
+});
+
+test('conflicting hook outcomes keep explicit failed boundaries discoverable without claiming a unique failed invocation', async () => {
+  const entries = await failureEntries([
+    { id: 'start', type: 'hook.start', data: { hookInvocationId: 'hook', hookType: 'preToolUse' } },
+    { id: 'failed', type: 'hook.end', data: { hookInvocationId: 'hook', hookType: 'preToolUse', success: false } },
+    { id: 'succeeded', type: 'hook.end', data: { hookInvocationId: 'hook', hookType: 'preToolUse', success: true } },
+  ]);
+  const ui = fixture(appSource); ui.render(entries);
+  const invocation = byClass(ui.get('#timeline'), 'hook-invocation');
+  assert.match(invocation.textContent, /Pipeline outcome unknown/);
+  assert.match(failureMarker(invocation.firstElementChild)?.attributes['aria-label'] || '', /Contains a recorded failure/);
+  assert.equal(failureMarker(failureRow(ui, entries[1]).firstElementChild.firstElementChild)?.attributes['aria-label'], 'Recorded failure');
+  assert.equal(failureMarker(failureRow(ui, entries[2]).firstElementChild.firstElementChild), undefined);
+});

@@ -154,6 +154,9 @@ input { accent-color: var(--model); margin: 0; }
 .node-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 7px; color: var(--node-color); background: var(--code); flex: 0 0 auto; }
 .node-icon svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .node-copy { display: block; min-width: 0; flex: 1; }
+.failure-marker { color: var(--error); font-weight: 800; font-size: 1.1rem; line-height: 1; text-align: center; width: .8rem; flex: 0 0 .8rem; }
+details:not(.node) > summary:has(> .failure-marker:not([hidden])) { position: relative; padding-inline-end: 1.5rem; }
+details:not(.node) > summary > .failure-marker { position: absolute; inset-inline-end: 0; top: 50%; transform: translateY(-50%); }
 .node-kind { display: block; font-size: 0.714rem; line-height: 1.3; color: var(--node-color); font-weight: 600; margin-bottom: 2px; }
 .node-title { display: block; font-size: 1rem; line-height: 1.35; font-weight: 600; overflow-wrap: anywhere; }
 .step[data-activity='reported'] .node-title { white-space: pre-wrap; }
