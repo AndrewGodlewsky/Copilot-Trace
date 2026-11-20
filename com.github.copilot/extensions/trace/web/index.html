@@ -50,6 +50,25 @@
         <p>Live order uses Trace’s receipt order after history is ready; timestamps and chronology do not establish causality. Disconnects, missing receipts or retention changes leave the exercise unanswered. Retained practice uses recorded event order and hides the later window until each choice or skip.</p>
       </details>
     </details>
+    <details id="playback" class="playback">
+      <summary>Replay retained activity · Optional playback</summary>
+      <p>Step through a fixed window of recorded evidence while live capture continues. Playback never pauses the host agent, sends commands or re-runs tools.</p>
+      <button id="playback-start" type="button">Start playback</button>
+      <div id="playback-controls" hidden>
+        <p id="playback-scope"></p>
+        <div class="playback-actions">
+          <button id="playback-previous" type="button">Previous</button>
+          <button id="playback-next" type="button">Next</button>
+          <button id="playback-play" type="button" aria-pressed="false">Play</button>
+        </div>
+        <p id="playback-motion"></p>
+        <p>Views, Statistics and original-evidence links use only events through this step. Opening an inspector or changing the view pauses playback. Return to live before starting prediction practice.</p>
+        <label><input id="playback-follow" type="checkbox"> Follow live when returning</label>
+        <button id="playback-exit" type="button">Return to live view</button>
+      </div>
+      <p id="playback-status" role="status" aria-atomic="true">Playback is off.</p>
+    </details>
+    <p id="learning-activity" role="status" aria-atomic="true" hidden></p>
     <div class="order-control">
       <label for="event-order">View
         <select id="event-order" aria-describedby="order-help">

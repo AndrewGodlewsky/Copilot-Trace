@@ -95,6 +95,54 @@ function replayView(retained, count) {
   return Object.freeze({ ...retained, entries: Object.freeze(retained.entries.slice(0, count)) });
 }
 
+export function createActivityCounter(snapshot) {
+  const baseline = snapshot?.liveReceipt;
+  let previous = baseline, known = snapshot?.history === 'ready' && counter(baseline);
+  return current => {
+    known &&= current?.history === 'ready' && counter(current.liveReceipt) && current.liveReceipt >= previous;
+    previous = current?.liveReceipt;
+    return known ? previous - baseline : null;
+  };
+}
+
+export function createPlayback(snapshot, { onChange = () => {}, schedule = setTimeout, cancel = clearTimeout, reducedMotion = false } = {}) {
+  let retained = freezeLearningSnapshot(snapshot);
+  const valid = retained.entries.every(entry => identity(entry?.id))
+    && new Set(retained.entries.map(entry => entry.id)).size === retained.entries.length;
+  let state = { valid, count: valid ? Math.min(1, retained.entries.length) : 0, total: retained.entries.length, playing: false, reducedMotion };
+  state.snapshot = replayView(retained, state.count);
+  let timer, generation = 0;
+  function stop() { generation++; cancel(timer); timer = undefined; if (state) state.playing = false; }
+  function changed() { state.snapshot = replayView(retained, state.count); onChange(state); }
+  function advance() {
+    const active = generation;
+    timer = schedule(() => {
+      if (!state || generation !== active || !state.playing) return;
+      timer = undefined; state.count++;
+      if (state.count === state.total) stop();
+      changed();
+      if (state?.playing) advance();
+    }, 2000);
+  }
+  function step(direction) {
+    if (!state) return;
+    stop();
+    if (state.valid && state.total) state.count = Math.max(1, Math.min(state.total, state.count + direction));
+    changed();
+  }
+  return {
+    get state() { return state; },
+    next() { step(1); }, previous() { step(-1); },
+    play() {
+      if (!state || !state.valid || state.playing || state.reducedMotion || state.count >= state.total) return;
+      state.playing = true; changed(); if (state?.playing) advance();
+    },
+    pause() { if (state) { stop(); changed(); } },
+    setReducedMotion(value) { if (state) { state.reducedMotion = value; if (value) stop(); changed(); } },
+    close() { stop(); state = null; retained = null; },
+  };
+}
+
 export function createReplayPractice(snapshot) {
   const retained = freezeLearningSnapshot(snapshot);
   const valid = retained.entries.every(entry => identity(entry?.id))

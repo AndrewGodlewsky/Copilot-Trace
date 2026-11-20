@@ -17,7 +17,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   class Element {
     constructor(tagName) {
       this.tagName = tagName; this.children = []; this.parentElement = null; this.dataset = {};
-      this.attributes = {}; this.listeners = new Map(); this.style = { setProperty() {} };
+      this.attributes = {}; this.listeners = new Map(); this.captureListeners = new Map(); this.style = { setProperty() {} };
       this.className = ''; this._text = ''; this.open = false; this.checked = false;
       this.scrollTop = 0; this.clientTop = 0;
       this.classList = {
@@ -56,10 +56,16 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
         : selector === '[data-close-panel]' ? node.dataset.closePanel !== undefined : node.tagName === selector;
       return this.children.flatMap(child => [child, ...child.querySelectorAll('*')]).filter(node => selector === '*' || matches(node));
     }
-    addEventListener(name, listener) { if (!this.listeners.has(name)) this.listeners.set(name, []); this.listeners.get(name).push(listener); }
+    addEventListener(name, listener, options) {
+      const listeners = options === true || options?.capture ? this.captureListeners : this.listeners;
+      if (!listeners.has(name)) listeners.set(name, []); listeners.get(name).push(listener);
+    }
     dispatch(name) {
       let prevented = false;
-      for (const listener of this.listeners.get(name) || []) listener({ target: this, preventDefault() { prevented = true; } });
+      const event = { target: this, preventDefault() { prevented = true; } }, path = [];
+      for (let node = this; node; node = node.parentElement) path.unshift(node);
+      for (const node of path) for (const listener of node.captureListeners.get(name) || []) listener(event);
+      for (const listener of this.listeners.get(name) || []) listener(event);
       if (name === 'cancel' && !prevented) this.close();
     }
     showModal() { this.open = true; }
@@ -86,6 +92,8 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   for (const selector of ['main', '#timeline', '#connection', '#notice', '#empty', '#follow', '#actor-legend', '#stat-counts',
     '#prediction', '#prediction-live', '#prediction-replay', '#prediction-controls', '#prediction-category', '#prediction-record',
     '#prediction-next', '#prediction-skip', '#prediction-exit', '#prediction-follow', '#prediction-status', '#prediction-result', '#prediction-mode',
+    '#playback', '#playback-start', '#playback-controls', '#playback-previous', '#playback-next', '#playback-play',
+    '#playback-exit', '#playback-follow', '#playback-status', '#playback-scope', '#playback-motion', '#learning-activity',
     '#stat-scope', '#stat-hooks', '#stat-skills', '#statistics-peek', '#footer-dock', '#event-order',
     '#activity-filter', '#reset-filter', '#filter-status', '#filter-empty', '#lane-help',
     '#event-target', '#jump-event', '#navigation-status', '#capabilities', '#capability-refresh', '#capability-status',
@@ -155,7 +163,13 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   document.getElementById = id => selectors.get(`#${id}`);
   document.querySelectorAll = selector => document.body.querySelectorAll(selector);
   const windowEvents = new Map();
-  const context = vm.createContext({ ...presentation, ...learning, document, window: { addEventListener(name, listener) {
+  const playbackTimers = new Map(), playbackCallbacks = []; let playbackTimerId = 0, motionListener;
+  const motion = { matches: false, addEventListener(name, listener) { motionListener = listener; }, removeEventListener() { motionListener = undefined; } };
+  const context = vm.createContext({ ...presentation, ...learning,
+    createPlayback: (snapshot, options) => learning.createPlayback(snapshot, { ...options,
+      schedule(callback) { playbackCallbacks.push(callback); playbackTimers.set(++playbackTimerId, callback); return playbackTimerId; },
+      cancel(id) { playbackTimers.delete(id); } }),
+    document, window: { matchMedia: () => motion, addEventListener(name, listener) {
     if (!windowEvents.has(name)) windowEvents.set(name, []); windowEvents.get(name).push(listener);
   } },
     ResizeObserver: class { observe() {} disconnect() {} }, createDiagnostics: () => ({ record() {} }),
@@ -168,6 +182,9 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   });
   vm.runInContext(source.replace(/^import .*;\r?\n/gm, ''), context);
   return { document, get: selector => selectors.get(selector),
+    playbackTimers, playbackCallbacks,
+    tickPlayback() { const [id, callback] = playbackTimers.entries().next().value; playbackTimers.delete(id); callback(); },
+    reduceMotion(matches) { motion.matches = matches; motionListener?.({ matches }); },
     closePage() { for (const listener of windowEvents.get('pagehide') || []) listener(); },
     refreshFeed() { return vm.runInContext('poller.refresh();', context); },
     refreshCapabilities() { return vm.runInContext('capabilityView.refresh();', context); },
@@ -192,6 +209,181 @@ async function predictionFixture() {
   await trace.ready;
   return { trace, emit: (id, type, data) => emit(event(id, type, data)), response: (id, timestamp) => emit({ ...event(id, 'assistant.message', { messageId: id, content: `Answer ${id} 日本語 😀 <script>` }), ...(timestamp ? { timestamp } : {}) }) };
 }
+
+test('playback freezes evidence through live eviction, reports arrivals and returns with an explicit Follow choice', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close()); data.response('second'); data.response('last');
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot())); await ui.refreshFeed();
+  ui.get('#playback-start').dispatch('click');
+  assert.match(ui.get('#connection').textContent, /Playback.*live capture continues/);
+  assert.doesNotMatch(ui.get('#timeline').textContent, /Answer second|Answer last/);
+  assert.equal(ui.get('#follow').checked, false); assert.equal(ui.get('#follow').disabled, true);
+  assert.equal(ui.document.activeElement, ui.get('#playback-next'));
+  ui.get('#playback-next').dispatch('click');
+  assert.match(ui.get('#timeline').textContent, /Answer second/); assert.doesNotMatch(ui.get('#timeline').textContent, /Answer last/);
+  ui.get('#playback-next').focus(); ui.document.scrollingElement.scrollTop = 210;
+  for (let i = 0; i < 305; i++) data.response(`arrival-${i}`);
+  await ui.refreshFeed();
+  assert.match(ui.get('#learning-activity').textContent, /305 newly received/);
+  assert.match(ui.get('#timeline').textContent, /Answer second/); assert.doesNotMatch(ui.get('#timeline').textContent, /arrival/);
+  assert.equal(ui.document.activeElement, ui.get('#playback-next')); assert.equal(ui.document.scrollingElement.scrollTop, 210);
+  ui.get('#playback-next').dispatch('click'); assert.match(ui.get('#playback-status').textContent, /End of snapshot/);
+  assert.equal(ui.get('#playback-next').attributes['aria-disabled'], 'true');
+  ui.get('#playback-exit').dispatch('click');
+  assert.equal(ui.get('#follow').checked, false); assert.equal(ui.get('#follow').disabled, false);
+  assert.match(ui.get('#timeline').textContent, /arrival-304/); assert.doesNotMatch(ui.get('#timeline').textContent, /Answer second/);
+  assert.equal(ui.document.scrollingElement.scrollTop, 210);
+  ui.get('#playback-start').dispatch('click'); ui.get('#playback-follow').checked = true; ui.get('#playback-exit').dispatch('click');
+  assert.equal(ui.get('#follow').checked, true); assert.equal(ui.document.scrollingElement.scrollTop, 800);
+});
+
+test('playback timers stop for manual inspection, reduced motion, replacement and page close', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close()); data.response('second'); data.response('third');
+  const ui = fixture(appSource); ui.render(data.trace.snapshot().entries, data.trace.snapshot());
+  ui.get('#playback-start').dispatch('click'); ui.get('#playback-play').dispatch('click');
+  assert.equal(ui.playbackTimers.size, 1); const stale = ui.playbackCallbacks.at(-1);
+  ui.get('#playback-previous').focus(); ui.get('#playback-previous').dispatch('click');
+  assert.equal(ui.playbackTimers.size, 1, 'An aria-disabled boundary control must be inert when activated.');
+  assert.equal(ui.document.activeElement, ui.get('#playback-previous'));
+  ui.get('#playback-play').dispatch('click'); ui.get('#playback-play').dispatch('click'); stale();
+  assert.doesNotMatch(ui.get('#timeline').textContent, /Answer second/); assert.equal(ui.playbackTimers.size, 1);
+  ui.tickPlayback(); assert.match(ui.get('#timeline').textContent, /Answer second/);
+  ui.get('#statistics-button').dispatch('click'); assert.equal(ui.playbackTimers.size, 0, 'Inspection pauses playback.');
+  ui.get('#statistics-panel').close(); ui.get('#playback-play').dispatch('click'); const motionStale = ui.playbackCallbacks.at(-1);
+  ui.reduceMotion(true); motionStale();
+  assert.equal(ui.playbackTimers.size, 0); assert.doesNotMatch(ui.get('#timeline').textContent, /Answer third/);
+  assert.match(ui.get('#playback-motion').textContent, /Reduced motion.*manual/i);
+  ui.get('#playback-play').dispatch('click'); assert.equal(ui.playbackTimers.size, 0);
+  ui.get('#playback-next').dispatch('click'); assert.match(ui.get('#timeline').textContent, /Answer third/);
+  ui.reduceMotion(false); ui.get('#playback-previous').dispatch('click'); ui.get('#playback-play').dispatch('click');
+  const replaced = ui.playbackCallbacks.at(-1); ui.get('#playback-exit').dispatch('click'); ui.get('#playback-start').dispatch('click'); replaced();
+  assert.doesNotMatch(ui.get('#timeline').textContent, /Answer second/); assert.equal(ui.playbackTimers.size, 0);
+  ui.get('#playback-play').dispatch('click'); const afterClose = ui.playbackCallbacks.at(-1); ui.closePage();
+  const closed = ui.get('#timeline').textContent; afterClose(); ui.get('#playback-next').dispatch('click'); ui.get('#playback-start').dispatch('click');
+  assert.equal(ui.get('#timeline').textContent, closed); assert.equal(ui.playbackTimers.size, 0);
+});
+
+test('nested evidence and analysis inspection pauses resumed playback and invalidates its pending callback', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close()); data.response('second');
+  for (const [entries, selectors] of [[data.trace.snapshot().entries, ['.recorded-evidence', '.general-definition']],
+    [await argumentFixture(), ['.tool-provenance', '.action-stages']]]) {
+    const ui = fixture(appSource); ui.render(entries, { liveReceipt: 0 }); ui.get('#playback-start').dispatch('click');
+    for (const selector of selectors) {
+      const nested = ui.get('#timeline').querySelector(selector);
+      assert.ok(nested, `The ${selector} inspector is present in the active prefix.`);
+      const outer = nested.parentElement.closest('details'); outer.open = true; outer.dispatch('toggle');
+      ui.get('#playback-play').dispatch('click'); assert.equal(ui.playbackTimers.size, 1);
+      const stale = ui.playbackCallbacks.at(-1), before = ui.get('#timeline').textContent;
+      const summary = nested.querySelector('summary'); summary.focus(); ui.document.scrollingElement.scrollTop = 210;
+      nested.open = true; nested.dispatch('toggle');
+      assert.equal(ui.playbackTimers.size, 0, `${selector} must pause playback even when its outer event is already open.`);
+      stale(); assert.equal(ui.get('#timeline').textContent, before);
+      assert.equal(ui.document.activeElement, summary); assert.equal(ui.document.scrollingElement.scrollTop, 210);
+      assert.match(ui.get('#playback-status').textContent, /Paused.*1 of/);
+    }
+  }
+});
+
+test('linking an already-open validation result pauses playback before changing the analysis', async t => {
+  const entries = await claimFixture({ exitCode: 0 }), data = await predictionFixture(); t.after(() => data.trace.close());
+  data.response('later', '2026-11-21T00:00:00Z');
+  const ui = fixture(appSource); ui.render([...entries, data.trace.snapshot().entries.at(-1)], { liveReceipt: 0 });
+  ui.get('#playback-start').dispatch('click');
+  for (let i = 1; i < entries.length; i++) ui.get('#playback-next').dispatch('click');
+  const claim = byClass(ui.get('#timeline'), 'claim-evidence'); claim.open = true; claim.dispatch('toggle');
+  const result = claim.querySelector('.claim-result'); result.open = true; result.dispatch('toggle');
+  const link = result.querySelectorAll('button').find(button => button.textContent === 'Link this result');
+  ui.get('#playback-play').dispatch('click'); assert.equal(ui.playbackTimers.size, 1);
+  const stale = ui.playbackCallbacks.at(-1); link.focus(); link.dispatch('click');
+  assert.equal(ui.playbackTimers.size, 0); stale();
+  assert.match(claim.textContent, /User-linked result/); assert.doesNotMatch(ui.get('#timeline').textContent, /Answer later/);
+  assert.equal(ui.document.activeElement, link);
+});
+
+test('playback and prediction controls cannot reveal each other’s hidden future and reverse stepping clears inspectors', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  data.emit('tool', 'tool.execution_start', { toolName: 'view', toolCallId: 't', arguments: { path: 'LATER-PATH' } });
+  data.response('future');
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot())); await ui.refreshFeed();
+  ui.get('#playback-start').dispatch('click');
+  ui.get('#prediction-replay').dispatch('click'); ui.get('#prediction-live').dispatch('click');
+  ui.get('#prediction-category').value = 'response'; ui.get('#prediction-record').dispatch('click'); ui.get('#prediction-skip').dispatch('click');
+  assert.equal(ui.get('#prediction-controls').hidden, true); assert.doesNotMatch(ui.get('#timeline').textContent, /LATER-PATH|Answer future/);
+  ui.get('#playback-next').dispatch('click'); ui.get('#arguments-button').dispatch('click');
+  ui.get('#arguments-first').value = '0'; ui.get('#arguments-first').dispatch('change');
+  const staleOriginal = ui.get('#arguments-first-detail').querySelector('button');
+  ui.get('#playback-previous').dispatch('click'); staleOriginal.dispatch('click');
+  assert.equal(ui.get('#arguments-panel').open, false); assert.equal(ui.get('#arguments-first-detail').textContent, '');
+  for (const view of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    ui.get('#event-order').value = view; ui.get('#event-order').dispatch('change');
+    assert.doesNotMatch(ui.get('#timeline').textContent, /LATER-PATH|Answer future/);
+  }
+  assert.doesNotMatch(ui.get('#statistics-panel').textContent, /LATER-PATH|Answer future/);
+  ui.get('#playback-exit').dispatch('click'); ui.get('#prediction-replay').dispatch('click');
+  ui.get('#playback-start').dispatch('click'); ui.get('#playback-next').dispatch('click'); ui.get('#playback-play').dispatch('click');
+  assert.equal(ui.get('#playback-controls').hidden, true); assert.equal(ui.playbackTimers.size, 0);
+  assert.doesNotMatch(ui.get('#timeline').textContent, /LATER-PATH|Answer future/);
+  data.response('arrival'); await ui.refreshFeed();
+  assert.match(ui.get('#learning-activity').textContent, /1 newly received/); assert.doesNotMatch(ui.get('#learning-activity').textContent, /response|arrival|LATER/);
+});
+
+test('playback empty and partial-history states stay usable and activity count is honestly unavailable', () => {
+  const ui = fixture(appSource); ui.render([], { history: 'loading', omitted: 12, liveReceipt: 0 });
+  ui.get('#playback-start').dispatch('click');
+  assert.match(ui.get('#playback-status').textContent, /No retained events/); assert.match(ui.get('#playback-scope').textContent, /12 older.*loading/i);
+  assert.match(ui.get('#learning-activity').textContent, /unknown/i);
+  ui.get('#playback-play').dispatch('click'); ui.get('#playback-next').dispatch('click'); ui.get('#playback-previous').dispatch('click');
+  assert.equal(ui.playbackTimers.size, 0); ui.get('#playback-exit').dispatch('click');
+  assert.equal(ui.get('#playback-controls').hidden, true);
+});
+
+test('playback original links use their frozen source after a live same-ID replacement', async () => {
+  const entries = await argumentFixture();
+  let snapshot = { entries, history: 'ready', omitted: 0, liveReceipt: 0 };
+  const ui = fixture(appSource, undefined, async () => feedResponse(snapshot)); await ui.refreshFeed();
+  ui.get('#playback-start').dispatch('click'); ui.get('#playback-next').dispatch('click');
+  ui.get('#arguments-button').dispatch('click'); ui.get('#arguments-first').value = '1'; ui.get('#arguments-first').dispatch('change');
+  const original = ui.get('#arguments-first-detail').querySelector('button');
+  snapshot = { entries: [{ ...entries[1], agentId: 'different-source', evidence: 'REPLACED-LIVE-EVIDENCE' }], history: 'ready', omitted: 2, liveReceipt: 1 };
+  await ui.refreshFeed(); original.dispatch('click');
+  const shown = walk(ui.get('#timeline')).find(node => node.scrolled);
+  assert.ok(shown, 'The original-evidence control opens a retained snapshot row.');
+  assert.match(shown.closest('details').textContent, /agent-b.*second.txt/s);
+  assert.doesNotMatch(shown.closest('details').textContent, /different-source|REPLACED-LIVE/);
+  ui.get('#playback-exit').dispatch('click');
+  assert.match(ui.get('#timeline').textContent, /REPLACED-LIVE-EVIDENCE/);
+});
+
+test('reverse playback removes cached results and closes future glossary selections across all evidence views', async () => {
+  const entries = await claimFixture({ output: 'LATER-CHECK', exitCode: 0 }), ui = fixture(appSource);
+  ui.render(entries, { liveReceipt: 0 }); ui.get('#playback-start').dispatch('click');
+  for (let i = 1; i < entries.length; i++) ui.get('#playback-next').dispatch('click');
+  const claim = byClass(ui.get('#timeline'), 'claim-evidence');
+  const select = claim.querySelectorAll('button').find(button => button.textContent === 'Link this result');
+  select.dispatch('click'); assert.match(claim.textContent, /User-linked result/);
+  const original = claim.querySelectorAll('button').find(button => button.textContent.startsWith('Original result'));
+  ui.get('#glossary-button').dispatch('click'); ui.get('#glossary-concept').value = 'tool-result'; ui.get('#glossary-concept').dispatch('change');
+  for (let i = 1; i < entries.length; i++) ui.get('#playback-previous').dispatch('click');
+  select.dispatch('click'); original.dispatch('click'); ui.get('#glossary-source').dispatch('click');
+  assert.equal(ui.get('#glossary-panel').open, false); assert.equal(ui.get('#glossary-example').textContent, '');
+  for (const view of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    ui.get('#event-order').value = view; ui.get('#event-order').dispatch('change');
+    assert.doesNotMatch(ui.get('#timeline').textContent, /LATER-CHECK|Tests passed/);
+  }
+  assert.doesNotMatch(ui.get('#statistics-panel').textContent, /LATER-CHECK|Tests passed/);
+  ui.get('#event-target').value = 'result'; ui.get('#event-target').dispatch('change'); ui.get('#jump-event').dispatch('click');
+  assert.equal(ui.get('#jump-event').disabled, true); assert.doesNotMatch(ui.get('#timeline').textContent, /LATER-CHECK/);
+});
+
+test('single-event playback reaches its end without disabling the focused stepping control', async () => {
+  const entries = await argumentFixture(), ui = fixture(appSource); ui.render(entries.slice(0, 1), { liveReceipt: 0 });
+  ui.get('#playback-start').dispatch('click');
+  assert.match(ui.get('#playback-status').textContent, /1 of 1.*End of snapshot/);
+  for (const action of ['previous', 'next', 'play']) {
+    const control = ui.get(`#playback-${action}`); control.focus(); control.dispatch('click');
+    assert.equal(control.attributes['aria-disabled'], 'true'); assert.notEqual(control.disabled, true);
+    assert.equal(ui.document.activeElement, control); assert.equal(ui.playbackTimers.size, 0);
+  }
+});
 
 test('live practice waits for an in-flight poll and then a fresh baseline, preserving reading and one outcome', async t => {
   const data = await predictionFixture(); t.after(() => data.trace.close());

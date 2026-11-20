@@ -1,7 +1,7 @@
 import { describeActor, explainStep, toolOutcomes, skillInstructions, compactionAttempts, delegationHandoffs, recoveryAttempts, guidanceComparison, retrievalLedger, toolExtents, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, observerScope, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
-import { predictionCategories, freezeLearningSnapshot, armLivePrediction, resolveLivePrediction, createReplayPractice, chooseReplayPrediction } from './learning.mjs';
+import { predictionCategories, freezeLearningSnapshot, armLivePrediction, resolveLivePrediction, createReplayPractice, chooseReplayPrediction, createPlayback, createActivityCounter } from './learning.mjs';
 import { initFooter } from './footer.mjs';
 import { createFollow } from './follow.mjs';
 import { initCapabilities } from './capabilities.mjs';
@@ -15,6 +15,8 @@ window.addEventListener('error', () => diagnostics.record('client_error'));
 window.addEventListener('unhandledrejection', () => diagnostics.record('client_error'));
 
 const timeline = document.querySelector('#timeline');
+// Toggle does not bubble; capture also covers nested evidence and analysis disclosures.
+timeline.addEventListener('toggle', event => { if (event.target.open) pausePlayback(); }, true);
 const connection = document.querySelector('#connection');
 const empty = document.querySelector('#empty');
 const follow = document.querySelector('#follow');
@@ -58,7 +60,7 @@ let chapters = [];
 let lanes = [];
 let etag;
 let lastSnapshot;
-let liveSnapshot, practice, armingPrediction, practiceGeneration = 0;
+let liveSnapshot, practice, playback, activityCount, armingPrediction, practiceGeneration = 0;
 let feedState;
 const argumentsButton = document.querySelector('#arguments-button'), argumentsPanel = document.querySelector('#arguments-panel');
 const argumentSelects = ['first', 'second'].map(side => document.querySelector(`#arguments-${side}`));
@@ -261,14 +263,17 @@ function updateGlossary() {
   }
 }
 eventOrder.addEventListener('change', () => {
+  pausePlayback();
   follow.checked = false;
   if (lastSnapshot) render(lastSnapshot);
 });
 activityFilter.addEventListener('change', () => {
+  pausePlayback();
   follow.checked = false;
   if (lastSnapshot) render(lastSnapshot);
 });
 document.querySelector('#reset-filter').addEventListener('click', () => {
+  pausePlayback();
   follow.checked = false;
   activityFilter.value = 'everything';
   if (lastSnapshot) render(lastSnapshot);
@@ -387,7 +392,16 @@ function renderObserverScope() {
   ]) {
     const node = document.querySelector(selector); if (node.textContent !== text) node.textContent = text;
   }
-  if (feedState === 'disconnected') setConnection('Disconnected · retrying', 'error');
+  const activity = document.querySelector('#learning-activity');
+  activity.hidden = !practice && !playback;
+  if (!activity.hidden) {
+    const count = activityCount(liveSnapshot || lastSnapshot);
+    const text = count === null ? 'New live activity count unknown: a ready, continuous observation boundary is unavailable. Live capture continues separately.'
+      : `${count} newly received live records since this view opened. Counts cover supported live callbacks after history was ready, not hydrated history, streamed deltas or execution progress.`;
+    if (activity.textContent !== text) activity.textContent = text;
+  }
+  if (playback) setConnection(feedState === 'disconnected' ? 'Playback · live feed disconnected; retrying' : 'Playback · live capture continues', feedState === 'disconnected' ? 'error' : 'connected');
+  else if (feedState === 'disconnected') setConnection('Disconnected · retrying', 'error');
   else if (practice) setConnection('Practice view · live capture continues', 'connected');
   else if (lastSnapshot) setConnection(lastSnapshot.history === 'unsupported' ? 'Events unavailable' : `Connected · ${lastSnapshot.entries.length} events`,
     lastSnapshot.history === 'unsupported' ? 'error' : 'connected');
@@ -1068,6 +1082,7 @@ function renderClaim(node, claim, checks) {
       };
       select.addEventListener('click', () => {
         if (!guard()) return;
+        pausePlayback();
         view.link = view.link?.result.id === check.id ? null : expected; view.expired = false;
         follow.checked = false; render(lastSnapshot);
       });
@@ -1287,6 +1302,7 @@ function showBoundary(id, message = 'Showing original retained event. Follow liv
     navigationStatus.textContent = 'That event is no longer retained. Reading position unchanged.';
     return;
   }
+  pausePlayback();
   follow.checked = false;
   eventOrder.value = 'chronological';
   activityFilter.value = 'everything';
@@ -1680,7 +1696,7 @@ function render(snapshot) {
 }
 
 const following = createFollow(follow, () => document.scrollingElement);
-follow.addEventListener('change', () => { if (practice) follow.checked = false; following.onChange(); });
+follow.addEventListener('change', () => { if (practice || playback) follow.checked = false; following.onChange(); });
 window.addEventListener('scroll', following.onScroll, { passive: true });
 window.addEventListener('resize', following.sync);
 // Reserve the dock's actual height, including wrapped controls and status messages.
@@ -1709,8 +1725,8 @@ const poller = createPoller({
       etag = response.headers.get('etag');
       if (feedState !== 'connected') diagnostics.record('connected');
       feedState = 'connected';
-      if (!practice) { lastSnapshot = snapshot; render(lastSnapshot); }
-      else if (practice.attempt?.status === 'waiting') {
+      if (!practice && !playback) { lastSnapshot = snapshot; render(lastSnapshot); }
+      else if (practice?.attempt?.status === 'waiting') {
         const attempt = resolveLivePrediction(practice.attempt, snapshot);
         if (attempt !== practice.attempt) {
           practice.attempt = attempt;
@@ -1723,7 +1739,7 @@ const poller = createPoller({
           renderPractice();
         }
       }
-      if (practice) renderObserverScope();
+      if (practice || playback) renderObserverScope();
     } else if (response.status === 304 && liveSnapshot) {
       lastFeedReceipt = Date.now(); unchangedFeed = true;
       if (feedState !== 'connected') diagnostics.record('connected');
@@ -1747,7 +1763,7 @@ const poller = createPoller({
     renderObserverScope();
   },
 });
-const footerPanels = initFooter({ diagnostics, refresh: poller.refresh, onInspect: () => { follow.checked = false; } });
+const footerPanels = initFooter({ diagnostics, refresh: poller.refresh, onInspect: () => { follow.checked = false; pausePlayback(); } });
 
 const prediction = id => document.querySelector(`#prediction-${id}`);
 function closePracticeInspectors() {
@@ -1758,8 +1774,9 @@ function closePracticeInspectors() {
 }
 function renderPractice() {
   prediction('controls').hidden = !practice;
-  prediction('live').disabled = Boolean(practice); prediction('replay').disabled = Boolean(practice);
-  follow.disabled = Boolean(practice);
+  prediction('live').disabled = Boolean(practice || playback); prediction('replay').disabled = Boolean(practice || playback);
+  document.querySelector('#playback-start').disabled = Boolean(practice || playback);
+  follow.disabled = Boolean(practice || playback);
   if (!practice) return;
   const attempt = practice.attempt, status = attempt?.status;
   prediction('category').disabled = Boolean(attempt);
@@ -1789,12 +1806,13 @@ function renderPractice() {
   }
 }
 function startPractice(mode) {
-  if (panelClosed || practice || !lastSnapshot) return;
+  if (panelClosed || practice || playback || !lastSnapshot) return;
   const snapshot = freezeLearningSnapshot(lastSnapshot);
   practiceGeneration++; follow.checked = false; prediction('follow').checked = false;
   closePracticeInspectors();
   const replay = mode === 'replay' ? createReplayPractice(snapshot) : null;
   practice = { mode, replay, snapshot: replay?.snapshot || snapshot, attempt: null };
+  activityCount = createActivityCounter(liveSnapshot || lastSnapshot);
   capabilityView.suspend(true); instructionView.suspend(true);
   lastSnapshot = practice.snapshot; render(lastSnapshot); renderPractice();
   document.querySelector('#prediction').open = true; prediction('category').focus({ preventScroll: true });
@@ -1841,7 +1859,7 @@ prediction('skip').addEventListener('click', () => {
 prediction('exit').addEventListener('click', () => {
   if (panelClosed || !practice) return;
   const resume = prediction('follow').checked;
-  practiceGeneration++; practice = undefined; closePracticeInspectors();
+  practiceGeneration++; practice = undefined; activityCount = undefined; closePracticeInspectors();
   capabilityView.suspend(false); instructionView.suspend(false);
   lastSnapshot = liveSnapshot || lastSnapshot; render(lastSnapshot); renderPractice();
   prediction('result').replaceChildren();
@@ -1849,9 +1867,67 @@ prediction('exit').addEventListener('click', () => {
   prediction('status').textContent = `Returned to the current live view. Follow live is ${resume ? 'on' : 'paused'}.`;
   follow.checked = resume; following.onChange(); prediction('live').focus({ preventScroll: true });
 });
+
+const playbackControl = id => document.querySelector(`#playback-${id}`);
+const motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)');
+function pausePlayback() { if (playback?.state?.playing) playback.pause(); }
+function renderPlayback() {
+  playbackControl('controls').hidden = !playback;
+  if (!playback) return;
+  const state = playback.state, snapshot = state.snapshot;
+  playbackControl('previous').setAttribute('aria-disabled', String(!state.valid || state.count <= 1));
+  playbackControl('next').setAttribute('aria-disabled', String(!state.valid || state.count >= state.total));
+  playbackControl('play').setAttribute('aria-disabled', String(!state.valid || state.reducedMotion || state.count >= state.total));
+  playbackControl('play').setAttribute('aria-pressed', String(state.playing));
+  playbackControl('play').textContent = state.playing ? 'Pause' : 'Play';
+  playbackControl('status').textContent = !state.valid ? 'Playback unavailable: retained event identities are missing or ambiguous. Return to live to inspect the available records.'
+    : !state.total ? 'No retained events in this snapshot. Return to live for current activity.'
+      : `${state.playing ? 'Playing' : 'Paused'} · Showing events through ${state.count} of ${state.total}. ${state.count === state.total ? 'End of snapshot. Use Previous to revisit earlier evidence.' : 'Later snapshot events remain hidden.'}`;
+  playbackControl('scope').textContent = `Playback is a fixed, memory-only window of ${state.total} events (maximum 300), in recorded order. ${snapshot.omitted || 0} older events omitted. History at capture: ${snapshot.history || 'unknown'}. Original source identities and evidence gaps are preserved; chronology is not causality.`;
+  playbackControl('motion').textContent = state.reducedMotion ? 'Reduced motion is on: use manual Previous / Next. Automatic playback is unavailable.'
+    : 'Play advances one recorded event every 2 seconds, not at the original execution speed. Previous / Next pause playback.';
+}
+function updatePlayback(state) {
+  if (panelClosed || !playback) return;
+  if (state.count < (lastSnapshot?.entries.length || 0)) closePracticeInspectors();
+  lastSnapshot = state.snapshot; render(lastSnapshot); renderPlayback();
+}
+playbackControl('start').addEventListener('click', () => {
+  if (panelClosed || practice || playback || !lastSnapshot) return;
+  follow.checked = false; playbackControl('follow').checked = false;
+  closePracticeInspectors(); activityCount = createActivityCounter(liveSnapshot || lastSnapshot);
+  playback = createPlayback(lastSnapshot, { onChange: updatePlayback, reducedMotion: motionPreference.matches });
+  capabilityView.suspend(true); instructionView.suspend(true);
+  updatePlayback(playback.state); renderPractice();
+  document.querySelector('#playback').open = true; playbackControl('next').focus({ preventScroll: true });
+});
+for (const direction of ['previous', 'next']) playbackControl(direction).addEventListener('click', () => {
+  if (panelClosed || !playback || !playback.state.valid
+    || (direction === 'previous' ? playback.state.count <= 1 : playback.state.count >= playback.state.total)) return;
+  playback[direction]();
+});
+playbackControl('play').addEventListener('click', () => {
+  if (panelClosed || !playback) return;
+  if (playback.state.playing) playback.pause(); else playback.play();
+});
+playbackControl('exit').addEventListener('click', () => {
+  if (panelClosed || !playback) return;
+  const resume = playbackControl('follow').checked;
+  playback.close(); playback = undefined; activityCount = undefined; closePracticeInspectors();
+  capabilityView.suspend(false); instructionView.suspend(false);
+  lastSnapshot = liveSnapshot || lastSnapshot; render(lastSnapshot); renderPractice(); renderPlayback();
+  playbackControl('scope').textContent = ''; playbackControl('motion').textContent = '';
+  playbackControl('status').textContent = `Returned to the current live view. Follow live is ${resume ? 'on' : 'paused'}.`;
+  follow.checked = resume; following.onChange(); playbackControl('start').focus({ preventScroll: true });
+});
+function changeMotion(event) { if (!panelClosed) playback?.setReducedMotion(event.matches); }
+motionPreference.addEventListener('change', changeMotion);
+document.querySelector('#playback').addEventListener('toggle', () => { if (!document.querySelector('#playback').open) pausePlayback(); });
 window.addEventListener('pagehide', () => {
   panelClosed = true;
-  practiceGeneration++; practice = undefined; liveSnapshot = undefined;
+  playback?.close(); playback = undefined; activityCount = undefined;
+  motionPreference.removeEventListener('change', changeMotion);
+  practiceGeneration++; practice = undefined; liveSnapshot = undefined; lastSnapshot = undefined;
   prediction('result').replaceChildren();
   clearArgumentComparison();
   poller.stop(); capabilityView.close(); instructionView.close(); pageSize.disconnect();
@@ -1865,5 +1941,6 @@ window.addEventListener('pagehide', () => {
   for (const node of repeatedRows.values()) { node.rows.clear(); node.item.remove(); }
   repeatedRows.clear(); repetition = undefined;
 });
+renderPractice(); renderPlayback();
 renderObserverScope();
 void poller.refresh();

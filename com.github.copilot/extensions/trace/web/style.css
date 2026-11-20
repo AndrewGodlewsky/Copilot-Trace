@@ -307,12 +307,12 @@ body:has(.footer-panel[open]) { overflow: hidden; }
   .step + .step::after, .chevron { border-color: CanvasText; }
 }
 /* Practice shares the pane's ordinary flow, including short and narrow layouts. */
-.prediction { margin-block: 1rem; padding: .8rem; border: 1px solid var(--line); border-radius: .4rem; }
-.prediction summary { cursor: pointer; }
-.prediction-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-block: .6rem; }
-#prediction-controls { display: grid; gap: .6rem; }
-#prediction-controls[hidden] { display: none; }
+.prediction, .playback { margin-block: 1rem; padding: .8rem; border: 1px solid var(--line); border-radius: .4rem; }
+.prediction summary, .playback summary { cursor: pointer; }
+.prediction-actions, .playback-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-block: .6rem; }
+#prediction-controls, #playback-controls { display: grid; gap: .6rem; }
+#prediction-controls[hidden], #playback-controls[hidden] { display: none; }
 #prediction-result { min-width: 0; overflow-wrap: anywhere; }
 #prediction-result pre { max-height: 18rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
-.prediction label { flex-wrap: wrap; }
-#prediction-record[aria-disabled='true'] { opacity: .65; cursor: default; }
+.prediction label, .playback label { flex-wrap: wrap; }
+#prediction-record[aria-disabled='true'], .playback button[aria-disabled='true'] { opacity: .65; cursor: default; }
