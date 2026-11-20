@@ -33,6 +33,31 @@ function host(history = Promise.resolve([])) {
   };
 }
 
+test('protected evidence omissions are explicit without exposing suppressed argument values', async t => {
+  const fixture = host(Promise.resolve([
+    event('history-protected', 'tool.execution_start', { toolCallId: 'history', toolName: 'mcp.query',
+      arguments: { encryptedContent: 'hidden-history', keep: 'literal encryptedContent' } }),
+    event('ordinary', 'tool.execution_start', { toolCallId: 'ordinary', toolName: 'view', arguments: { path: 'fixture.txt' } }),
+  ]));
+  const trace = createTrace(fixture.session);
+  t.after(() => trace.close());
+  await trace.ready;
+  fixture.emit(event('live-protected', 'tool.execution_start', { toolCallId: 'live', toolName: 'mcp.query',
+    arguments: { items: [{ reasoningOpaque: 'hidden-live', keep: null }], encryptedContent: null } }));
+  fixture.emit(event('undefined', 'assistant.message', { content: 'visible', encryptedContent: undefined }));
+  fixture.emit(event('clipped-protected', 'assistant.message', { content: 'x'.repeat(13000), reasoningOpaque: 'hidden-clipped' }));
+  const [historical, ordinary, live, absent, clipped] = trace.snapshot().entries;
+  assert.equal(historical.protectedContentOmitted, true);
+  assert.equal(ordinary.protectedContentOmitted, false);
+  assert.equal(live.protectedContentOmitted, true);
+  assert.equal(absent.protectedContentOmitted, false);
+  assert.equal(clipped.protectedContentOmitted, true);
+  assert.equal(clipped.truncated, true);
+  assert.deepEqual(JSON.parse(historical.evidence).data.arguments, { keep: 'literal encryptedContent' });
+  assert.deepEqual(JSON.parse(live.evidence).data.arguments, { items: [{ keep: null }] });
+  assert.doesNotMatch(JSON.stringify(trace.snapshot()), /hidden-history|hidden-live|hidden-clipped/);
+});
+
 test('correlation IDs remain exact and oversized IDs cannot create false matches', async () => {
   const fixture = host(Promise.resolve([
     event('turn', 'assistant.turn_start', { turnId: '0' }),

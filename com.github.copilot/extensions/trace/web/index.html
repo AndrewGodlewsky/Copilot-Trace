@@ -170,6 +170,18 @@
           </details>
         </div>
       </dialog>
+      <dialog id="arguments-panel" class="footer-panel" aria-labelledby="arguments-title">
+        <div class="panel-heading"><h2 id="arguments-title">Compare tool arguments</h2><button type="button" data-close-panel>Close</button></div>
+        <p>Choose two invocations to inspect recorded differences. Your selection does not establish a retry or explain why a value changed. No command is executed.</p>
+        <p id="arguments-scope"></p>
+        <label for="arguments-first">First invocation <select id="arguments-first" aria-describedby="arguments-first-detail"></select></label>
+        <section id="arguments-first-detail" class="argument-selection" aria-label="First invocation identity"></section>
+        <label for="arguments-second">Second invocation <select id="arguments-second" aria-describedby="arguments-second-detail"></select></label>
+        <section id="arguments-second-detail" class="argument-selection" aria-label="Second invocation identity"></section>
+        <p id="arguments-status" role="status" aria-atomic="true"></p>
+        <p id="arguments-limits"></p>
+        <ol id="arguments-diff" tabindex="0" aria-label="Recorded JSON argument differences"></ol>
+      </dialog>
       <dialog id="glossary-panel" class="footer-panel" aria-labelledby="glossary-title">
         <div class="panel-heading"><h2 id="glossary-title">AI glossary</h2><button type="button" data-close-panel>Close</button></div>
         <label for="glossary-concept">Concept <select id="glossary-concept"></select></label>
@@ -217,6 +229,7 @@
         <span class="footer-brand">Trace</span>
         <button id="plugin-version" type="button" data-panel="releases-panel" aria-controls="releases-panel" aria-haspopup="dialog" aria-expanded="false">Version…</button>
         <button id="refresh" type="button">↻ Refresh</button>
+        <button id="arguments-button" type="button" aria-controls="arguments-panel" aria-haspopup="dialog" aria-expanded="false">Compare arguments</button>
         <button id="glossary-button" type="button" aria-controls="glossary-panel" aria-haspopup="dialog" aria-expanded="false">Glossary</button>
         <button type="button" data-panel="settings-panel" aria-controls="settings-panel" aria-haspopup="dialog" aria-expanded="false">Settings</button>
         <button type="button" data-panel="logs-panel" aria-controls="logs-panel" aria-haspopup="dialog" aria-expanded="false">Show logs</button>

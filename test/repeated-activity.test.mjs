@@ -19,6 +19,19 @@ function inspect(entries, options) {
 }
 const mcp = { toolName: 'mcp.read', mcpConfigServerName: 'a', mcpServerDisplayName: 'Shared', mcpToolName: 'read' };
 
+test('protected arguments omitted by the actual projection cannot create false exact repetition', async () => {
+  const entries = await project([...call('one', { nested: { encryptedContent: 'first', keep: 'same' } }, true, mcp),
+    ...call('two', { nested: { encryptedContent: 'second', keep: 'same' } }, true, mcp)]);
+  const result = inspect(entries);
+  assert.equal(result.patterns.length, 0); assert.equal(result.unclassifiedCalls, 2);
+  assert.match(result.notes.join(' '), /protected.*omission/i);
+  for (const marker of ['true', null, 1, undefined]) {
+    const unmarked = await project([...call('one', { keep: 'same' }, true, mcp), ...call('two', { keep: 'same' }, true, mcp)]);
+    for (const entry of unmarked.filter(entry => entry.type === 'tool.execution_start')) entry.protectedContentOmitted = marker;
+    assert.equal(inspect(unmarked).patterns.length, 0); assert.equal(inspect(unmarked).unclassifiedCalls, 2);
+  }
+});
+
 test('exact repetition counts invocations once, canonicalizes object keys, and keeps tied occurrence order', async () => {
   const entries = await project([...call('one'), ...call('two', { view_range: [1, 10], path: 'same.txt' }),
     ...call('different', { path: 'other.txt', view_range: [1, 10] })]);

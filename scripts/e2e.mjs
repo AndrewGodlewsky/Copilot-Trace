@@ -223,11 +223,15 @@ try {
   const history = await until(() => fetch(first.url + 'events').then(r => r.json()),
     value => value.history !== 'loading', 'history load');
   assert.equal(history.history, 'ready');
+  assert.equal(history.entries.find(entry => entry.id === historical.eventId)?.protectedContentOmitted, false,
+    'Actual historical projection reports no protected omission for the literal fixture log.');
   assert.ok(history.entries.some(entry => entry.id === historical.eventId && entry.evidence.includes('日本語 😀')), 'Attached extension must receive actual session history.');
   const live = await session.rpc.log({ message: 'Trace fixture live <script>literal</script>', type: 'trace-fixture' });
   const observed = await until(() => fetch(first.url + 'events').then(r => r.json()),
     value => value.entries.some(entry => entry.id === live.eventId), 'live session event');
   assert.equal(observed.entries.filter(entry => entry.id === live.eventId).length, 1);
+  assert.equal(observed.entries.find(entry => entry.id === live.eventId)?.protectedContentOmitted, false,
+    'Actual live projection carries the same explicit omission status.');
   assert.equal((await session.rpc.canvas.open(input)).url, first.url);
   await session.rpc.canvas.close({ instanceId: input.instanceId });
   await until(() => fetch(first.url).then(() => false, () => true), Boolean, 'server shutdown');

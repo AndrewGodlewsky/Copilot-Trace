@@ -88,6 +88,8 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     '#capability-scope', '#capability-window', '#capability-list', '#glossary-button', '#glossary-panel',
     '#glossary-concept', '#glossary-definition', '#glossary-deeper', '#glossary-example', '#glossary-source', '#glossary-status',
     '#guidance-comparison', '#guidance-examples',
+    '#arguments-button', '#arguments-panel', '#arguments-first', '#arguments-second', '#arguments-first-detail', '#arguments-second-detail',
+    '#arguments-status', '#arguments-limits', '#arguments-diff', '#arguments-scope',
     '#retrieval-ledger', '#retrieval-summary', '#retrieval-scope', '#retrieval-list', '#retrieval-unclassified', '#retrieval-unknown-list',
     '#validation-overview', '#validation-summary', '#validation-scope', '#validation-list',
     '#repeated-activity', '#repeated-summary', '#repeated-scope', '#repeated-list',
@@ -100,6 +102,12 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   }
   const glossary = selectors.get('#glossary-panel');
   const statistics = selectors.get('#statistics-panel');
+  const argumentsPanel = selectors.get('#arguments-panel'); argumentsPanel.tagName = 'dialog'; argumentsPanel.className = 'footer-panel';
+  const argumentsClose = new Element('button'); argumentsClose.textContent = 'Close'; argumentsClose.dataset.closePanel = ''; argumentsPanel.append(argumentsClose);
+  selectors.get('#arguments-button').tagName = 'button';
+  for (const id of ['first', 'second', 'first-detail', 'second-detail', 'status', 'limits', 'diff', 'scope']) argumentsPanel.append(selectors.get(`#arguments-${id}`));
+  for (const id of ['first', 'second']) selectors.get(`#arguments-${id}`).tagName = 'select';
+  selectors.get('#arguments-diff').tagName = 'ol';
   for (const [id, summary, body] of [['#evidence-scope', '#scope-summary', '#notice'], ['#stat-evidence-scope', '#stat-scope-summary', '#stat-scope']]) {
     const disclosure = selectors.get(id); disclosure.tagName = 'details';
     selectors.get(summary).tagName = 'summary'; disclosure.append(selectors.get(summary), selectors.get(body));
@@ -169,6 +177,166 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
 const appSource = await readFile(new URL('../com.github.copilot/extensions/trace/web/app.mjs', import.meta.url), 'utf8');
 
 const feedResponse = (snapshot, status = 200) => ({ status, headers: { get: () => 'fixture-revision' }, json: async () => snapshot });
+
+async function argumentFixture(mcp = false) {
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => [0, 1, 2].map(index => ({
+    id: `argument-${index}`, type: 'tool.execution_start', agentId: index === 1 ? 'agent-b' : undefined,
+    data: { toolCallId: `call-${index}`, toolName: mcp ? 'mcp.query' : 'view',
+      ...(mcp ? { mcpConfigServerName: 'service-a', mcpToolName: 'query', mcpServerDisplayName: 'Shared' } : {}),
+      arguments: mcp ? { nested: { text: '<script>日🧪</script>\nnext', value: index === 0 ? null : [null, 'new'] }, ...(index ? { added: null } : {}) }
+        : { path: index === 0 ? 'first.txt' : 'second.txt' } },
+  })) });
+  await trace.ready; const entries = trace.snapshot().entries; trace.close(); return entries;
+}
+function chooseArguments(ui, first = '0', second = '1') {
+  for (const [id, value] of [['first', first], ['second', second]]) {
+    const select = ui.get(`#arguments-${id}`); select.value = value; select.dispatch('change');
+  }
+}
+
+test('argument comparison requires two explicit choices and exposes nested MCP null changes as literal JSON in the usable panel', async () => {
+  const entries = await argumentFixture(true), ui = fixture(appSource); ui.render(entries);
+  ui.document.scrollingElement.scrollTop = 200; ui.get('#arguments-button').dispatch('click');
+  assert.equal(ui.get('#arguments-panel').open, true); assert.equal(ui.get('#follow').checked, false);
+  assert.equal(ui.get('#arguments-first').value, ''); assert.equal(ui.get('#arguments-second').value, '');
+  assert.equal(ui.get('#arguments-diff').children.length, 0);
+  assert.equal(ui.document.activeElement, ui.get('#arguments-panel').querySelector('button'));
+  chooseArguments(ui);
+  assert.match(ui.get('#arguments-status').textContent, /1 added.*1 changed.*1 identical/);
+  const rows = ui.get('#arguments-diff').children;
+  assert.match(rows[0].textContent, /added.*\["added"\].*Absent.*null/is);
+  assert.match(rows[2].textContent, /changed.*\["nested"\]\["value"\].*null.*\[null,"new"\]/is);
+  assert.equal(rows[1].querySelector('pre').textContent, '"<script>日🧪</script>\\nnext"');
+  assert.match(ui.get('#arguments-limits').textContent, /literal JSON.*historical.*schema.*unknown/is);
+  assert.match(ui.get('#arguments-second-detail').textContent, /agent-b.*call-1.*argument-1.*service-a/s);
+  assert.equal(ui.get('#arguments-panel').querySelectorAll('script').length, 0);
+  assert.equal(ui.document.scrollingElement.scrollTop, 200);
+});
+
+test('comparison choices and rendered values stay frozen through live arrivals, view changes and filtering, then close clears local evidence', async () => {
+  const entries = await argumentFixture(), ui = fixture(appSource); ui.render(entries.slice(0, 2)); ui.get('#arguments-button').dispatch('click');
+  chooseArguments(ui); const diff = ui.get('#arguments-diff'), row = diff.firstElementChild;
+  const link = ui.get('#arguments-first-detail').querySelector('button'); link.focus();
+  diff.scrollTop = 30; ui.get('#arguments-panel').scrollTop = 90; ui.document.scrollingElement.scrollTop = 220;
+  ui.render(entries);
+  for (const mode of ['chronological', 'chapters', 'lanes', 'grouped']) {
+    ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change'); filterMode(ui, 'automation');
+    assert.equal(ui.get('#arguments-first').children.length, 3); assert.equal(ui.get('#arguments-first').value, '0');
+    assert.equal(diff.firstElementChild, row); assert.equal(ui.document.activeElement, link);
+    assert.equal(diff.scrollTop, 30); assert.equal(ui.get('#arguments-panel').scrollTop, 90); assert.equal(ui.document.scrollingElement.scrollTop, 220);
+  }
+  ui.get('#arguments-panel').dispatch('cancel'); assert.equal(ui.get('#arguments-panel').open, false);
+  assert.equal(ui.document.activeElement, ui.get('#arguments-button'));
+  assert.equal(diff.children.length, 0); assert.equal(ui.get('#arguments-first-detail').textContent, '');
+  ui.get('#arguments-button').dispatch('click'); assert.equal(ui.get('#arguments-first').value, '');
+  assert.equal(ui.get('#arguments-first').children.length, 4);
+  chooseArguments(ui); ui.closePage(); assert.equal(diff.children.length, 0);
+  ui.get('#arguments-button').dispatch('click'); assert.equal(ui.get('#arguments-first').children.length, 0);
+});
+
+test('frozen selections invalidate permanently after replacement, duplication or eviction without navigation or focus loss', async () => {
+  const entries = await argumentFixture();
+  for (const mutate of [items => items.shift(), items => items.push({ ...items[0] }), items => { items[0].evidence += ' '; },
+    items => { items[0].toolCallId = 'replacement'; }, items => { items.push({ ...items[0], id: 'duplicate-call' }); }]) {
+    const ui = fixture(appSource); ui.render(entries); ui.get('#arguments-button').dispatch('click'); chooseArguments(ui);
+    const link = ui.get('#arguments-first-detail').querySelector('button'); link.focus(); ui.document.scrollingElement.scrollTop = 210;
+    const changed = structuredClone(entries); mutate(changed); ui.render(changed);
+    assert.match(ui.get('#arguments-status').textContent, /unavailable.*changed|changed.*unavailable/is);
+    assert.equal(ui.get('#arguments-diff').children.length, 0); assert.equal(ui.document.activeElement, link);
+    ui.render(entries); link.dispatch('click');
+    assert.equal(ui.get('#arguments-panel').open, true); assert.equal(ui.document.scrollingElement.scrollTop, 210);
+    assert.equal(ui.get('#arguments-diff').children.length, 0);
+  }
+});
+
+test('both original call links use guarded evidence navigation even when argument comparison is unsupported', async () => {
+  const entries = await argumentFixture(); const raw = JSON.parse(entries[1].evidence); raw.data.arguments.path = null;
+  entries[1].evidence = JSON.stringify(raw);
+  for (const which of ['first', 'second']) {
+    const ui = fixture(appSource); ui.render(entries); ui.get('#arguments-button').dispatch('click'); chooseArguments(ui);
+    assert.match(ui.get('#arguments-status').textContent, /schema|unsupported/i); assert.equal(ui.get('#arguments-diff').children.length, 0);
+    filterMode(ui, 'automation'); ui.get(`#arguments-${which}-detail`).querySelector('button').dispatch('click');
+    assert.equal(ui.get('#arguments-panel').open, false); assert.equal(ui.get('#event-order').value, 'chronological');
+    assert.equal(ui.get('#activity-filter').value, 'everything'); assert.equal(ui.get('#follow').checked, false);
+    assert.match(ui.get('#navigation-status').textContent, /original.*arguments/i);
+    assert.equal(ui.document.activeElement.parentElement.open, true);
+  }
+});
+
+test('discarded comparison controls cannot navigate after a selection change or dialog close and reopen', async () => {
+  const entries = await argumentFixture();
+  for (const discard of [ui => chooseArguments(ui, '2', '1'), ui => {
+    ui.get('#arguments-panel').dispatch('cancel'); ui.get('#arguments-button').dispatch('click'); chooseArguments(ui);
+  }]) {
+    const ui = fixture(appSource); ui.render(entries); ui.get('#arguments-button').dispatch('click'); chooseArguments(ui);
+    const old = ui.get('#arguments-first-detail').querySelector('button'); discard(ui);
+    ui.document.scrollingElement.scrollTop = 225; old.dispatch('click');
+    assert.equal(ui.get('#arguments-panel').open, true); assert.equal(ui.document.scrollingElement.scrollTop, 225);
+  }
+});
+
+test('malformed and clipped unknown-source comparison choices never attribute their evidence to Main chat', async () => {
+  for (const [agentId, path] of [[null, 'file.txt'], [17, 'file.txt'], ['x'.repeat(257), 'file.txt'], [null, 'x'.repeat(13000)]]) {
+    const trace = createTrace({ on() { return () => {}; }, getEvents: async () => [
+      { id: 'unknown-source', type: 'tool.execution_start', agentId, data: { toolCallId: 'unknown-call', toolName: 'view', arguments: { path } } },
+      { id: 'known-source', type: 'tool.execution_start', data: { toolCallId: 'known-call', toolName: 'view', arguments: { path: 'other.txt' } } },
+    ] });
+    await trace.ready; const entries = trace.snapshot().entries; trace.close();
+    const ui = fixture(appSource); ui.render(entries); ui.get('#arguments-button').dispatch('click'); chooseArguments(ui);
+    assert.match(ui.get('#arguments-first').children[1].textContent, /Source unavailable/);
+    assert.doesNotMatch(ui.get('#arguments-first').children[1].textContent, /Main chat/);
+    assert.match(ui.get('#arguments-first-detail').textContent, /Source unavailable/);
+    assert.doesNotMatch(ui.get('#arguments-first-detail').textContent, /Main chat/);
+    assert.match(ui.get('#arguments-second-detail').textContent, /Main chat/);
+    assert.equal(ui.get('#arguments-diff').children.length, 0);
+    ui.document.scrollingElement.scrollTop = 200; ui.get('#arguments-first-detail').querySelector('button').dispatch('click');
+    assert.equal(ui.get('#arguments-panel').open, true); assert.equal(ui.document.scrollingElement.scrollTop, 200);
+  }
+});
+
+test('protected arguments never produce a precise diff and both original links expose readable projection-omission notices', async () => {
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => ['protected-one', 'protected-two'].map((value, index) => ({
+    id: `protected-${index}`, type: 'tool.execution_start', data: { toolCallId: `protected-call-${index}`, toolName: 'mcp.query',
+      mcpConfigServerName: 'service-a', mcpToolName: 'query', arguments: { nested: { reasoningOpaque: value, keep: 'same' } } },
+  })) });
+  await trace.ready; const entries = trace.snapshot().entries; trace.close();
+  for (const side of ['first', 'second']) {
+    const ui = fixture(appSource); ui.render(entries); ui.get('#arguments-button').dispatch('click'); chooseArguments(ui);
+    assert.equal(ui.get('#arguments-diff').children.length, 0);
+    assert.match(ui.get('#arguments-status').textContent, /protected.*omitted.*original.*incomplete/is);
+    assert.match(ui.get(`#arguments-${side}-detail`).textContent, /protected.*omitted.*original.*incomplete/is);
+    ui.get(`#arguments-${side}-detail`).querySelector('button').dispatch('click');
+    assert.equal(ui.get('#arguments-panel').open, false);
+    const original = ui.document.activeElement.parentElement.querySelector('.recorded-evidence');
+    const notice = original.querySelector('.evidence-protected'); assert.ok(notice); assert.equal(notice.hidden, false);
+    assert.match(notice.textContent, /protected.*omitted.*incomplete.*cannot.*recover/is);
+    assert.doesNotMatch(original.querySelector('pre').textContent, /protected-one|protected-two/);
+  }
+});
+
+test('changing only the protected-content marker invalidates comparison selection and updates retained evidence notices', async () => {
+  const entries = await argumentFixture(true), ui = fixture(appSource); ui.render(entries);
+  ui.get('#arguments-button').dispatch('click'); chooseArguments(ui);
+  const link = ui.get('#arguments-first-detail').querySelector('button'); link.focus();
+  const changed = structuredClone(entries); changed[0].protectedContentOmitted = true;
+  ui.document.scrollingElement.scrollTop = 210; ui.render(changed);
+  assert.equal(ui.get('#arguments-diff').children.length, 0); assert.equal(ui.document.activeElement, link);
+  assert.match(ui.get('#arguments-status').textContent, /unavailable.*changed/is);
+  link.dispatch('click'); assert.equal(ui.get('#arguments-panel').open, true); assert.equal(ui.document.scrollingElement.scrollTop, 210);
+  assert.equal(ui.get('#timeline').querySelectorAll('.evidence-protected').filter(node => !node.hidden).length, 1);
+  ui.render(entries); assert.equal(ui.get('#timeline').querySelectorAll('.evidence-protected').filter(node => !node.hidden).length, 0);
+  link.dispatch('click'); assert.equal(ui.get('#arguments-panel').open, true);
+});
+
+test('an invalid protected-content marker reports unknown completeness in the comparison and retained original', async () => {
+  const entries = await argumentFixture(true); entries[0].protectedContentOmitted = 'true';
+  const ui = fixture(appSource); ui.render(entries); ui.get('#arguments-button').dispatch('click'); chooseArguments(ui);
+  assert.equal(ui.get('#arguments-diff').children.length, 0);
+  assert.match(ui.get('#arguments-status').textContent, /omission.*invalid.*complete.*unknown/is);
+  ui.get('#arguments-first-detail').querySelector('button').dispatch('click');
+  const notice = ui.document.activeElement.parentElement.querySelector('.evidence-protected');
+  assert.ok(notice); assert.equal(notice.hidden, false); assert.match(notice.textContent, /omission.*invalid.*complete.*unknown/is);
+});
 
 async function repeatedFixture() {
   const trace = createTrace({ on() { return () => {}; }, getEvents: async () => [0, 1, 2].flatMap(index => [

@@ -1034,6 +1034,95 @@ function canonicalArguments(value) {
   try { const encoded = encode(value, 0); return encoded.length <= 8000 ? encoded : null; } catch { return null; }
 }
 
+export function argumentComparisonCalls(retained) {
+  const entries = retained.slice(-300), counts = new Map(), positions = new Map(entries.map((entry, index) => [entry, index]));
+  for (const entry of entries) counts.set(entry.id, (counts.get(entry.id) || 0) + 1);
+  return toolBuckets(entries).filter(bucket => bucket.start).map(({ boundaries, start }) => {
+    const ends = boundaries.filter(entry => entry.type === 'tool.execution_complete'), end = ends[0];
+    const identityValid = boundaries.filter(entry => entry.type === 'tool.execution_start').length === 1 && ends.length <= 1
+      && (!end || positions.get(start) < positions.get(end)) && boundaries.every(entry => counts.get(entry.id) === 1
+        && identityText(entry.id) && identityText(entry.toolCallId) && (entry.agentId === '' || identityText(entry.agentId))
+        && typeof entry.timestamp === 'string' && typeof entry.truncated === 'boolean'
+        && typeof entry.evidence === 'string' && entry.evidence.length <= 12000);
+    const data = explanationData(start), result = end && explanationData(end);
+    const matched = identityValid && data?.toolCallId === start.toolCallId && data?.toolName === start.toolName
+      && identityText(data?.toolName, 180) && (!end || ((end.toolName === '' || end.toolName === data.toolName)
+        && (!result || (result.toolCallId === end.toolCallId && (result.toolName === undefined || result.toolName === data.toolName)
+          && [...mcpFields, 'origin', 'overridesBuiltInTool'].every(field => !Object.hasOwn(result, field)
+            || (Object.hasOwn(data, field) && result[field] === data[field]))))));
+    const hasMcp = data && mcpFields.some(field => Object.hasOwn(data, field));
+    const args = data?.arguments;
+    let limitation = !identityValid ? 'Conflicting, duplicated or unusable source/call boundaries; comparison unavailable.'
+      : Object.hasOwn(start, 'protectedContentOmitted') && typeof start.protectedContentOmitted !== 'boolean'
+        ? 'Protected-content omission status is invalid; completeness of the arguments and original evidence is unknown.'
+      : start.protectedContentOmitted === true ? 'Protected fields were omitted from this event, so complete arguments cannot be established. Original evidence is also incomplete and cannot recover the omitted values.'
+      : start.truncated ? 'Trace clipped this invocation; complete arguments are unavailable.'
+        : !matched ? 'Complete matching source, call and tool evidence is unavailable.'
+          : ['origin', 'overridesBuiltInTool'].some(field => Object.hasOwn(data, field)) ? 'Unsupported provider markers; historical contract unknown.'
+            : !args || typeof args !== 'object' || Array.isArray(args) ? 'A complete JSON argument object is not recorded.'
+              : hasMcp ? !validMcpMetadata(data) || !identityText(data.mcpConfigServerName)
+                ? 'Exact configured MCP server and tool identity unavailable; display names cannot establish compatibility.' : ''
+                : !requestedOperation(data) ? 'Unsupported or differing ordinary argument schema; unknown fields, types or required values prevent a precise comparison.' : '';
+    if (!limitation && canonicalArguments(args) === null) limitation = 'Argument bound exceeded: depth 12, 512 values or 8,000 serialized characters. Inspect the original evidence.';
+    const key = limitation ? null : JSON.stringify([data.toolName, hasMcp
+      ? mcpFields.map(field => Object.hasOwn(data, field) ? [field, data[field]] : [field]) : 'provider-unrecorded']);
+    return { start: Object.freeze({ ...start, ...(start.hostOutput ? { hostOutput: Object.freeze({ ...start.hostOutput }) } : {}) }),
+      source: start.agentId === '' ? 'Main chat' : identityText(start.agentId) ? `Agent ${start.agentId}` : 'Source unavailable',
+      identityValid, key, arguments: limitation ? null : args, limitation,
+      mode: hasMcp ? 'literal-json' : 'ordinary-contract',
+      provider: hasMcp ? `Recorded MCP metadata: ${JSON.stringify(Object.fromEntries(mcpFields.filter(field => Object.hasOwn(data, field)).map(field => [field, data[field]])))}`
+        : 'Provider / origin unknown; the recorded name does not establish implementation identity.' };
+  });
+}
+
+export function retainedArgumentCall(entries, selected) {
+  if (!selected?.identityValid) return false;
+  const current = argumentComparisonCalls(entries).find(call => call.start.id === selected.start.id);
+  return Boolean(current?.identityValid && current.key === selected.key && current.limitation === selected.limitation
+    && ['id', 'type', 'timestamp', 'agentId', 'toolCallId', 'toolName', 'evidence', 'truncated', 'protectedContentOmitted']
+      .every(field => current.start[field] === selected.start[field])
+    && JSON.stringify(current.start.hostOutput) === JSON.stringify(selected.start.hostOutput));
+}
+
+// JSON members and array indexes only: selection establishes neither retry intent nor schema history.
+export function compareToolArguments(first, second) {
+  const unavailable = note => ({ status: 'unavailable', rows: [], note, omittedRows: 0, omittedValues: 0 });
+  if (!first || !second) return unavailable('Choose two retained invocations.');
+  if (toolIdentity(first.start) === toolIdentity(second.start)) return unavailable('Choose two distinct invocations.');
+  if (first.limitation || second.limitation) return unavailable([first.limitation, second.limitation].filter(Boolean).join(' '));
+  if (!first.key || first.key !== second.key) return unavailable('Recorded tool/provider identities or supported request contracts differ; no precise comparison is available. Inspect both originals.');
+  const rows = [], counts = { added: 0, removed: 0, changed: 0, identical: 0 };
+  let omittedRows = 0, omittedValues = 0, characters = 0;
+  function walk(before, after, path, hasBefore = true, hasAfter = true) {
+    const object = value => value !== null && typeof value === 'object';
+    if (hasBefore && hasAfter && object(before) && object(after) && Array.isArray(before) === Array.isArray(after)) {
+      const keys = Array.isArray(before) ? Array.from({ length: Math.max(before.length, after.length) }, (_, index) => index)
+        : [...new Set([...Object.keys(before), ...Object.keys(after)])].sort();
+      if (keys.length) {
+        for (const key of keys) walk(before[key], after[key], `${path}[${JSON.stringify(key)}]`, Object.hasOwn(before, key), Object.hasOwn(after, key));
+        return;
+      }
+    }
+    const left = hasBefore ? canonicalArguments(before) : 'Absent', right = hasAfter ? canonicalArguments(after) : 'Absent';
+    const status = !hasBefore ? 'added' : !hasAfter ? 'removed' : left === right ? 'identical' : 'changed';
+    counts[status]++;
+    if (rows.length >= 80 || characters + (path || '$').length > 12000) { omittedRows++; return; }
+    characters += (path || '$').length;
+    function display(value) {
+      if (value.length > 1000 || characters + value.length > 12000) { omittedValues++; return null; }
+      characters += value.length; return value;
+    }
+    rows.push({ path: path || '$', status, before: display(left), after: display(right) });
+  }
+  walk(first.arguments, second.arguments, '');
+  return { status: 'compared', rows, counts, omittedRows, omittedValues,
+    note: (first.mode === 'literal-json'
+      ? 'Literal JSON comparison only. Exact recorded MCP identity matches; historical tool schema and field meaning are unknown. These are JSON member differences, not verified parameter changes.'
+      : 'Both requests match the same authored ordinary argument contract. Provider and implementation identity remain unknown.')
+      + ' Object key order is ignored; arrays compare by index, so an insertion can change later indexes. Strings, types and whitespace remain literal; JSON escapes represent newlines and quotes. Reasons for changes and retry relationships are unknown.'
+      + ' Display limits: 80 rows, 1,000 characters per value and 12,000 total path/value characters. Omitted values are not previews; inspect both original calls for retained evidence.' };
+}
+
 // Exact recorded requests only; a repeated request is not evidence of a retry or a loop.
 export function repeatedActivity(retained, { history = 'ready', omitted = 0 } = {}) {
   const entries = retained.slice(-300), counts = new Map(), positions = new Map(entries.map((entry, index) => [entry, index]));
@@ -1049,6 +1138,7 @@ export function repeatedActivity(retained, { history = 'ready', omitted = 0 } = 
     const data = unique && explanationData(start), args = data?.arguments;
     const hasMcp = data && mcpFields.some(field => Object.hasOwn(data, field));
     const supported = data && data.toolCallId === start.toolCallId && data.toolName === start.toolName && identityText(data.toolName, 180)
+      && (!Object.hasOwn(start, 'protectedContentOmitted') || start.protectedContentOmitted === false)
       && !['origin', 'overridesBuiltInTool'].some(field => Object.hasOwn(data, field))
       && args && typeof args === 'object' && !Array.isArray(args)
       && (hasMcp ? validMcpMetadata(data) && identityText(data.mcpConfigServerName) : requestedOperation(data));
@@ -1082,7 +1172,7 @@ export function repeatedActivity(retained, { history = 'ready', omitted = 0 } = 
   }
   return { patterns: [...patterns.values()].filter(pattern => pattern.count >= 2), unclassifiedCalls, unlinkedBoundaries,
     notes: [`Only up to 300 retained events are compared (${entries.length} here), across all timeline filters and views. Two or more distinct usable call IDs form a pattern; start and result count as one invocation.`,
-      'Argument comparison is bounded to depth 12, 512 values and 8,000 serialized characters. Unsupported requests, clipped starts, incomplete MCP identities, unsupported provider markers and ambiguous identities remain unclassified; they may conceal repetition.',
+      'Argument comparison is bounded to depth 12, 512 values and 8,000 serialized characters. Unsupported requests, clipped starts, protected-content omissions or invalid omission markers, incomplete MCP identities, unsupported provider markers and ambiguous identities remain unclassified; they may conceal repetition.',
       'Counts describe exact recorded requests, not semantic similarity, retry intent, cause, wasted work or an agent being stuck. No action is taken. Later success does not change an earlier failure or establish recovery.',
       'Tool protocol failure and typed nonzero process exit are separate counts and can overlap. Missing or conflicting results remain unknown, not necessarily still running. Process exit is inspected only for supported ordinary powershell requests, never from output text.',
       ...(history !== 'ready' ? ['Earlier history is unavailable or still loading.'] : []),

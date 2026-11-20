@@ -263,6 +263,16 @@ body:has(.footer-panel[open]) { overflow: hidden; }
 #capability-list li { white-space: pre-wrap; margin-bottom: 10px; }
 .footer-panel label { flex-wrap: wrap; font-size: inherit; }
 .footer-panel select { max-width: 100%; }
+#arguments-panel { overflow-wrap: anywhere; }
+#arguments-panel label { display: grid; gap: 6px; margin-top: 16px; }
+#arguments-panel select { width: 100%; min-width: 0; }
+#arguments-panel button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.argument-selection p { white-space: pre-wrap; }
+#arguments-diff { padding-left: 22px; max-height: min(30rem, 55vh); overflow: auto; overscroll-behavior: contain; }
+#arguments-diff li { border-top: 1px solid var(--line); padding-block: 12px; }
+#arguments-diff h3, .argument-selection h3 { font-size: 1rem; }
+#arguments-diff p { margin-bottom: 4px; }
+#arguments-diff pre { max-height: min(12rem, 30vh); }
 #glossary-panel { overflow-wrap: anywhere; }
 #glossary-panel button, .glossary-term { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 #glossary-panel p { margin-block: 12px; }

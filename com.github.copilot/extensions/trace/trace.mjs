@@ -55,9 +55,13 @@ function project(event) {
       : data.trigger ? 'The host supplied an unrecognized trigger; see the evidence.' : 'The invocation trigger was not recorded.';
     explanation += ` ${origin} The event does not record which instruction caused the choice.`;
   }
+  let protectedContentOmitted = false;
   const evidence = JSON.stringify({ id: event.id, type: event.type, timestamp: event.timestamp,
-    agentId: event.agentId, parentId: event.parentId, data }, (key, value) =>
-    ['encryptedContent', 'reasoningOpaque'].includes(key) ? undefined : value, 2);
+    agentId: event.agentId, parentId: event.parentId, data }, (key, value) => {
+    if (!['encryptedContent', 'reasoningOpaque'].includes(key)) return value;
+    if (value !== undefined) protectedContentOmitted = true;
+    return undefined;
+  }, 2);
   const hostOutput = projectHostOutput(event);
   return {
     id: event.id, type: event.type, category, title, explanation,
@@ -71,7 +75,7 @@ function project(event) {
     toolCallId: identifier(data.toolCallId), toolName: clip(data.toolName, 180),
     success: typeof data.success === 'boolean' ? data.success : null,
     ...(hostOutput ? { hostOutput } : {}),
-    evidence: clip(evidence, EVIDENCE_LIMIT), truncated: evidence.length > EVIDENCE_LIMIT,
+    evidence: clip(evidence, EVIDENCE_LIMIT), truncated: evidence.length > EVIDENCE_LIMIT, protectedContentOmitted,
   };
 }
 

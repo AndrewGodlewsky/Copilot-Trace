@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.40",
+    "summary": "Compare two selected retained tool calls with bounded literal argument differences and original evidence links. Protected omissions, incomplete arguments, incompatible calls and expired records remain explicit."
+  },
+  {
     "version": "0.1.39",
     "summary": "Inspect exact repeated operations and recurring recorded failures in an optional retained-window overview. Counts link to original evidence and keep tool results, process exits and missing outcomes separate."
   },

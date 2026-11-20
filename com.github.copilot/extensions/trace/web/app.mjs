@@ -6,7 +6,7 @@ import { createFollow } from './follow.mjs';
 import { initCapabilities } from './capabilities.mjs';
 import { initInstructionSources } from './instructions.mjs';
 import { vocabulary, conceptForEntry, glossaryExample, retainedExample } from './glossary.mjs';
-import { validationClaims, validationChecks, validationOverview, linkValidationClaim, retainedValidationLink, observedActivity, repeatedActivity } from './presentation.mjs';
+import { validationClaims, validationChecks, validationOverview, linkValidationClaim, retainedValidationLink, observedActivity, repeatedActivity, argumentComparisonCalls, retainedArgumentCall, compareToolArguments } from './presentation.mjs';
 
 const diagnostics = createDiagnostics();
 diagnostics.record('panel_started');
@@ -58,6 +58,101 @@ let lanes = [];
 let etag;
 let lastSnapshot;
 let feedState;
+const argumentsButton = document.querySelector('#arguments-button'), argumentsPanel = document.querySelector('#arguments-panel');
+const argumentSelects = ['first', 'second'].map(side => document.querySelector(`#arguments-${side}`));
+const argumentDetails = ['first', 'second'].map(side => document.querySelector(`#arguments-${side}-detail`));
+const argumentRows = document.querySelector('#arguments-diff'), argumentStatus = document.querySelector('#arguments-status');
+let argumentChoices = [], argumentSelections = [null, null], argumentLinks = [];
+argumentsButton.addEventListener('click', () => {
+  if (panelClosed || !footerPanels.openPanel('arguments-panel', argumentsButton)) return;
+  argumentChoices = argumentComparisonCalls(lastSnapshot?.entries || []).map(call => ({ call, expired: false }));
+  for (const select of argumentSelects) {
+    const empty = element('option', 'Choose an invocation'); empty.value = ''; select.replaceChildren(empty);
+    argumentChoices.forEach(({ call }, index) => {
+      const entry = call.start;
+      const option = element('option', `${index + 1}. ${entry.toolName || 'Unknown tool'} · ${call.source} · Call ${entry.toolCallId}`);
+      option.value = String(index); select.append(option);
+    });
+    select.value = '';
+  }
+  document.querySelector('#arguments-scope').textContent = `${argumentChoices.length} retained invocations available when opened, across all views and filters. Choices stay fixed; close and reopen for current calls.`
+    + ` At most 300 retained events are inspected. ${lastSnapshot?.omitted || 0} older events omitted.`
+    + (lastSnapshot?.history !== 'ready' ? ' Earlier history is unavailable or loading.' : '');
+  renderArgumentComparison();
+});
+argumentSelects.forEach((select, index) => select.addEventListener('change', () => {
+  if (panelClosed || !argumentsPanel.open) return;
+  argumentSelections[index] = /^\d+$/.test(select.value) ? argumentChoices[Number(select.value)] || null : null;
+  const selection = argumentSelections[index], detail = argumentDetails[index]; detail.replaceChildren(); argumentLinks[index] = null;
+  if (selection) {
+    const { start, source, provider, limitation } = selection.call;
+    detail.append(element('h3', index === 0 ? 'First invocation' : 'Second invocation'),
+      element('p', `Source: ${source} · Call ID: ${start.toolCallId} · Event ID: ${start.id}`),
+      element('p', `Recorded tool: ${start.toolName || 'Unknown'} · Time: ${start.timestamp || 'Unavailable'}`), element('p', provider));
+    if (limitation) detail.append(element('p', limitation));
+    const button = element('button', 'Open original arguments'); button.type = 'button'; argumentLinks[index] = button;
+    button.addEventListener('click', () => {
+      if (panelClosed || !argumentsPanel.open || argumentSelections[index] !== selection || argumentLinks[index] !== button) return;
+      updateArgumentComparison();
+      if (selection.expired || !retainedArgumentCall(lastSnapshot?.entries || [], selection.call)) return;
+      const original = selection.call.start;
+      footerPanels.closePanel('arguments-panel', { restoreFocus: false });
+      const protection = protectedEvidenceNotice(original);
+      showBoundary(original.id, protection
+        ? `Showing retained argument evidence. ${protection} Follow live is paused.`
+        : 'Showing original recorded arguments. Follow live is paused.', original);
+    });
+    detail.append(button);
+  }
+  updateArgumentComparison(); renderArgumentComparison();
+}));
+function renderArgumentComparison() {
+  if (argumentRows.contains(document.activeElement)) argumentRows.focus({ preventScroll: true });
+  argumentRows.replaceChildren();
+  const expired = argumentSelections.some(selection => selection?.expired);
+  const comparison = compareToolArguments(...argumentSelections.map(selection => selection?.call));
+  argumentStatus.textContent = expired ? 'Comparison unavailable: selected evidence changed, became ambiguous or left the retained window. Close and reopen to choose current calls. Reading position unchanged.'
+    : comparison.status === 'compared' ? `${comparison.counts.added} added · ${comparison.counts.removed} removed · ${comparison.counts.changed} changed · ${comparison.counts.identical} identical JSON values. ${comparison.omittedRows} rows and ${comparison.omittedValues} displayed values omitted.`
+      : comparison.note;
+  document.querySelector('#arguments-limits').textContent = expired ? '' : comparison.status === 'compared' ? comparison.note : '';
+  if (expired || comparison.status !== 'compared') return;
+  for (const row of comparison.rows) {
+    const item = element('li'); item.dataset.change = row.status;
+    item.append(element('h3', `${row.status} · ${row.path}`));
+    for (const [label, value] of [['First invocation', row.before], ['Second invocation', row.after]]) {
+      item.append(element('p', label));
+      const literal = element('pre', value === null ? 'Value omitted by display limit; open original arguments.' : value);
+      literal.tabIndex = 0; item.append(literal);
+    }
+    argumentRows.append(item);
+  }
+}
+function updateArgumentComparison() {
+  if (!argumentsPanel.open || panelClosed) return;
+  let changed = false;
+  for (const [index, selection] of argumentSelections.entries()) {
+    if (!selection) continue;
+    if (!selection.expired && !retainedArgumentCall(lastSnapshot?.entries || [], selection.call)) { selection.expired = true; changed = true; }
+    const button = argumentLinks[index];
+    if (button) {
+      button.setAttribute('aria-disabled', String(selection.expired));
+      button.textContent = selection.expired ? 'Original arguments unavailable' : 'Open original arguments';
+    }
+  }
+  if (changed) renderArgumentComparison();
+}
+function clearArgumentComparison() {
+  argumentChoices = []; argumentSelections = [null, null]; argumentLinks = [];
+  for (const node of [...argumentSelects, ...argumentDetails, argumentRows, argumentStatus,
+    document.querySelector('#arguments-scope'), document.querySelector('#arguments-limits')]) node.replaceChildren();
+  for (const select of argumentSelects) select.value = '';
+}
+argumentsPanel.addEventListener('close', () => { if (!argumentsPanel.open) clearArgumentComparison(); });
+function protectedEvidenceNotice(entry) {
+  if (entry.protectedContentOmitted === true) return 'Protected content was omitted by Trace. This retained raw event is incomplete; omitted values cannot be recovered from this panel.';
+  return Object.hasOwn(entry, 'protectedContentOmitted') && typeof entry.protectedContentOmitted !== 'boolean'
+    ? 'Protected-content omission status is invalid; completeness of this retained raw event is unknown.' : '';
+}
 for (const selector of ['#evidence-scope', '#stat-evidence-scope']) {
   const disclosure = document.querySelector(selector);
   disclosure.addEventListener('toggle', () => { if (disclosure.open) follow.checked = false; });
@@ -640,10 +735,12 @@ function row(entry) {
   node.recordedEvidence.append(element('summary', 'Recorded evidence'));
   node.truncated = element('p', 'Trace clipped raw evidence to at most 12,000 UTF-16 code units. The complete raw event is not retained by this panel.', 'evidence-truncated');
   node.truncated.hidden = !entry.truncated;
+  node.protectedContent = element('p', protectedEvidenceNotice(entry), 'evidence-truncated evidence-protected');
+  node.protectedContent.hidden = !node.protectedContent.textContent;
   node.pre = element('pre', entry.evidence);
   node.pre.tabIndex = 0;
   node.pre.setAttribute('aria-label', 'Recorded event data');
-  node.recordedEvidence.append(node.truncated, node.pre);
+  node.recordedEvidence.append(node.truncated, node.protectedContent, node.pre);
   body.append(node.recordedEvidence);
   node.details.append(body);
   return node;
@@ -1326,6 +1423,7 @@ function reconcileLanes(snapshot, visible) {
 
 function render(snapshot) {
   updateGlossary();
+  updateArgumentComparison();
   const focused = document.activeElement;
   const focusedId = [...nodes].find(([, node]) => node.item.contains(focused))?.[0];
   const focusedGroup = groups.find(group => group.item.contains(focused) || group.ids.has(focusedId));
@@ -1403,6 +1501,9 @@ function render(snapshot) {
     renderSkillInstructions(node, entry);
     if (node.pre.textContent !== (entry.evidence || '')) node.pre.textContent = entry.evidence || '';
     node.truncated.hidden = !entry.truncated;
+    const protection = protectedEvidenceNotice(entry);
+    if (node.protectedContent.textContent !== protection) node.protectedContent.textContent = protection;
+    node.protectedContent.hidden = !protection;
     applyContext(node, context, entry);
   }
   const nextGroups = [];
@@ -1599,6 +1700,7 @@ const poller = createPoller({
 const footerPanels = initFooter({ diagnostics, refresh: poller.refresh, onInspect: () => { follow.checked = false; } });
 window.addEventListener('pagehide', () => {
   panelClosed = true;
+  clearArgumentComparison();
   poller.stop(); capabilityView.close(); instructionView.close(); pageSize.disconnect();
   claimsClosed = true;
   for (const view of claimViews.values()) { view.link = null; view.results.clear(); view.details.remove(); }
