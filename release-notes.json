@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.44",
+    "summary": "Explore three synthetic examples of repository exploration, a bug fix and recovery after failure. Step through each demonstration while keeping live activity separate."
+  },
+  {
     "version": "0.1.43",
     "summary": "Replay a retained activity snapshot with step and playback controls while live capture continues. Return to current activity with an explicit Follow choice."
   },

@@ -1,10 +1,11 @@
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, open } from 'node:fs/promises';
 import { createTrace } from './trace.mjs';
 import { createDiagnostics } from './web/diagnostics.mjs';
 import { createCapabilities } from './capabilities.mjs';
 import { createInstructionSources } from './instructions.mjs';
+import { parseExampleLibrary, EXAMPLE_BYTES } from './web/examples.mjs';
 
 export async function startServer(session) {
   const assets = new Map(await Promise.all([
@@ -13,6 +14,7 @@ export async function startServer(session) {
     ['app.mjs', 'app.mjs', 'text/javascript; charset=utf-8'],
     ['presentation.mjs', 'presentation.mjs', 'text/javascript; charset=utf-8'],
     ['learning.mjs', 'learning.mjs', 'text/javascript; charset=utf-8'],
+    ['examples.mjs', 'examples.mjs', 'text/javascript; charset=utf-8'],
     ['host-output.mjs', 'host-output.mjs', 'text/javascript; charset=utf-8'],
     ['glossary.mjs', 'glossary.mjs', 'text/javascript; charset=utf-8'],
     ['diagnostics.mjs', 'diagnostics.mjs', 'text/javascript; charset=utf-8'],
@@ -23,6 +25,21 @@ export async function startServer(session) {
     ['instructions.mjs', 'instructions.mjs', 'text/javascript; charset=utf-8'],
     ['trace.svg', '../../../../assets/trace.svg', 'image/svg+xml'],
   ].map(async ([route, file, type]) => [route, { type, body: await readFile(new URL(`./web/${file}`, import.meta.url)) }])));
+  try {
+    const file = await open(new URL('./web/examples.json', import.meta.url), 'r');
+    const bytes = Buffer.alloc(EXAMPLE_BYTES + 1); let size = 0;
+    try {
+      while (size < bytes.length) {
+        const { bytesRead } = await file.read(bytes, size, bytes.length - size, null);
+        if (!bytesRead) break;
+        size += bytesRead;
+      }
+    } finally { await file.close(); }
+    if (size > EXAMPLE_BYTES) throw new Error('Example library exceeds the supported size.');
+    const body = bytes.subarray(0, size);
+    parseExampleLibrary(body.toString('utf8'));
+    assets.set('examples.json', { type: 'application/json; charset=utf-8', body });
+  } catch { assets.set('examples.json', { unavailable: true }); }
   const { version } = JSON.parse(await readFile(new URL('../../../plugin.json', import.meta.url), 'utf8'));
   const releases = JSON.parse(await readFile(new URL('../../../release-notes.json', import.meta.url), 'utf8'));
   assets.set('metadata', { type: 'application/json; charset=utf-8', body: Buffer.from(JSON.stringify({ version, releases })) });
@@ -71,6 +88,7 @@ export async function startServer(session) {
     }
     const asset = assets.get(req.url.slice(prefix.length));
     if (!asset) return fail(404);
+    if (asset.unavailable) return fail(503);
     res.writeHead(200, { 'Content-Type': asset.type, 'Content-Length': asset.body.length });
     res.end(req.method === 'HEAD' ? undefined : asset.body);
   });

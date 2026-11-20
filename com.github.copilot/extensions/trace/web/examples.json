@@ -1,0 +1,386 @@
+{
+  "schemaVersion": 1,
+  "examples": [
+    {
+      "id": "exploration",
+      "kind": "synthetic",
+      "title": "Explore a small repository",
+      "lesson": "Distinguish requested reads, returned file text and an assistant’s summary. A returned file is not proof of relevance or complete repository coverage.",
+      "provenance": "Locally authored for Trace. All messages, identifiers, files, times and outcomes are invented; no private session or real execution was used.",
+      "events": [
+        {
+          "id": "synthetic:exploration:event-1",
+          "type": "user.message",
+          "timestamp": "2026-01-01T12:00:00.000Z",
+          "data": {
+            "content": "Find where the demonstration project formats greetings. Explain what you inspected.",
+            "delivery": "idle"
+          }
+        },
+        {
+          "id": "synthetic:exploration:event-2",
+          "type": "tool.execution_start",
+          "timestamp": "2026-01-01T12:00:01.000Z",
+          "data": {
+            "toolCallId": "synthetic:exploration:read-guide",
+            "toolName": "view",
+            "arguments": {
+              "path": "demo/README.md"
+            }
+          }
+        },
+        {
+          "id": "synthetic:exploration:event-3",
+          "type": "tool.execution_complete",
+          "timestamp": "2026-01-01T12:00:02.000Z",
+          "data": {
+            "toolCallId": "synthetic:exploration:read-guide",
+            "success": true,
+            "result": {
+              "content": "Demo project: greeting text lives in demo/greet.mjs.\nSample greeting: café 日本語 🧭"
+            }
+          }
+        },
+        {
+          "id": "synthetic:exploration:event-4",
+          "type": "tool.execution_start",
+          "timestamp": "2026-01-01T12:00:03.000Z",
+          "data": {
+            "toolCallId": "synthetic:exploration:read-source",
+            "toolName": "view",
+            "arguments": {
+              "path": "demo/greet.mjs"
+            }
+          }
+        },
+        {
+          "id": "synthetic:exploration:event-5",
+          "type": "tool.execution_complete",
+          "timestamp": "2026-01-01T12:00:04.000Z",
+          "data": {
+            "toolCallId": "synthetic:exploration:read-source",
+            "success": true,
+            "result": {
+              "content": "export const greet = name => `Hello, ${name}!`;\n"
+            }
+          }
+        },
+        {
+          "id": "synthetic:exploration:event-6",
+          "type": "assistant.message",
+          "timestamp": "2026-01-01T12:00:05.000Z",
+          "data": {
+            "messageId": "synthetic:exploration:message",
+            "content": "I inspected demo/README.md and demo/greet.mjs. The latter defines greet. I have not inspected other files or run this code."
+          }
+        }
+      ],
+      "annotations": [
+        {
+          "eventId": "synthetic:exploration:event-1",
+          "note": "This prompt and every later event are invented teaching facts. Start by separating the user’s goal from what the run eventually observes.",
+          "alternative": "A different exploration could begin with a directory listing. That is a hypothetical option, not an event in this example."
+        },
+        {
+          "eventId": "synthetic:exploration:event-2",
+          "note": "The tool arguments request one file. The start records invocation entry, not returned content, approval or proof that the file was useful.",
+          "alternative": "The assistant could ask a clarifying question before reading; that choice is not recorded here."
+        },
+        {
+          "eventId": "synthetic:exploration:event-3",
+          "note": "A successful read returned this text. Its reference to another file is content, not evidence that the next file was already read.",
+          "alternative": "A broader search could locate other greeting implementations; this example has not performed it."
+        },
+        {
+          "eventId": "synthetic:exploration:event-6",
+          "note": "The final statement reports what the assistant says it inspected. Two returned files support a narrow description, not complete repository knowledge.",
+          "alternative": "To check completeness, a later run could inspect callers and tests. No such checks are recorded here."
+        }
+      ]
+    },
+    {
+      "id": "bug-fix",
+      "kind": "synthetic",
+      "title": "Follow a bug-fix workflow",
+      "lesson": "Compare a reported failing check, a requested edit and a later check. Process exit and tool protocol success are different; a later zero exit does not establish complete correctness.",
+      "provenance": "Locally authored for Trace. All messages, identifiers, files, times and outcomes are invented; no private session or real execution was used.",
+      "events": [
+        {
+          "id": "synthetic:bug-fix:event-1",
+          "type": "user.message",
+          "timestamp": "2026-01-01T12:00:00.000Z",
+          "data": {
+            "content": "In the demonstration add function, investigate the failing addition check and make a minimal change.",
+            "delivery": "idle"
+          }
+        },
+        {
+          "id": "synthetic:bug-fix:event-2",
+          "type": "tool.execution_start",
+          "timestamp": "2026-01-01T12:00:01.000Z",
+          "data": {
+            "toolCallId": "synthetic:bug-fix:before",
+            "toolName": "powershell",
+            "arguments": {
+              "command": "node demo/add.test.mjs",
+              "description": "Run the demonstration addition check"
+            }
+          }
+        },
+        {
+          "id": "synthetic:bug-fix:event-3",
+          "type": "tool.execution_complete",
+          "timestamp": "2026-01-01T12:00:02.000Z",
+          "data": {
+            "toolCallId": "synthetic:bug-fix:before",
+            "success": true,
+            "result": {
+              "content": "Assertion: add(2, 3) expected 5, received -1.",
+              "contents": [
+                {
+                  "type": "shell_exit",
+                  "shellId": "synthetic:bug-fix:shell-before",
+                  "exitCode": 1
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "synthetic:bug-fix:event-4",
+          "type": "tool.execution_start",
+          "timestamp": "2026-01-01T12:00:03.000Z",
+          "data": {
+            "toolCallId": "synthetic:bug-fix:edit",
+            "toolName": "edit",
+            "arguments": {
+              "path": "demo/add.mjs",
+              "old_str": "return a - b;",
+              "new_str": "return a + b;"
+            }
+          }
+        },
+        {
+          "id": "synthetic:bug-fix:event-5",
+          "type": "permission.completed",
+          "timestamp": "2026-01-01T12:00:04.000Z",
+          "data": {
+            "requestId": "synthetic:bug-fix:permission",
+            "toolCallId": "synthetic:bug-fix:edit",
+            "result": {
+              "kind": "approved"
+            }
+          }
+        },
+        {
+          "id": "synthetic:bug-fix:event-6",
+          "type": "tool.execution_complete",
+          "timestamp": "2026-01-01T12:00:05.000Z",
+          "data": {
+            "toolCallId": "synthetic:bug-fix:edit",
+            "success": true,
+            "result": {
+              "content": "The demonstration edit tool reported the replacement."
+            }
+          }
+        },
+        {
+          "id": "synthetic:bug-fix:event-7",
+          "type": "tool.execution_start",
+          "timestamp": "2026-01-01T12:00:06.000Z",
+          "data": {
+            "toolCallId": "synthetic:bug-fix:after",
+            "toolName": "powershell",
+            "arguments": {
+              "command": "node demo/add.test.mjs",
+              "description": "Run the demonstration addition check again"
+            }
+          }
+        },
+        {
+          "id": "synthetic:bug-fix:event-8",
+          "type": "tool.execution_complete",
+          "timestamp": "2026-01-01T12:00:07.000Z",
+          "data": {
+            "toolCallId": "synthetic:bug-fix:after",
+            "success": true,
+            "result": {
+              "content": "The demonstration check reported success.",
+              "contents": [
+                {
+                  "type": "shell_exit",
+                  "shellId": "synthetic:bug-fix:shell-after",
+                  "exitCode": 0
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "synthetic:bug-fix:event-9",
+          "type": "assistant.message",
+          "timestamp": "2026-01-01T12:00:08.000Z",
+          "data": {
+            "messageId": "synthetic:bug-fix:message",
+            "content": "I changed subtraction to addition and the later demonstration check returned exit 0. Other inputs and broader correctness remain unverified."
+          }
+        }
+      ],
+      "annotations": [
+        {
+          "eventId": "synthetic:bug-fix:event-3",
+          "note": "The result has protocol success true and typed process exit 1. A successful tool exchange can report a failing process; output assertion text is still just reported text.",
+          "alternative": "Another investigation could inspect the implementation before running a check. That sequence is not recorded here."
+        },
+        {
+          "eventId": "synthetic:bug-fix:event-4",
+          "note": "Invocation entry appears before the permission decision. A tool start does not prove that the edit already happened.",
+          "alternative": "A permission decision could deny the request. That did not occur in this synthetic sequence."
+        },
+        {
+          "eventId": "synthetic:bug-fix:event-5",
+          "note": "An approval decision is present, but its request boundary and decision source are absent. Who approved and the full permission story remain unknown.",
+          "alternative": "A fuller retained window might contain the request. Trace does not invent it or infer a human decision."
+        },
+        {
+          "eventId": "synthetic:bug-fix:event-8",
+          "note": "The later check returned typed exit 0. This does not establish assertion counts, coverage, or that the preceding edit caused the outcome.",
+          "alternative": "Additional boundary cases could increase confidence. No additional checks were performed in this demonstration."
+        }
+      ]
+    },
+    {
+      "id": "recovery",
+      "kind": "synthetic",
+      "title": "Recover after a failed operation",
+      "lesson": "Inspect failure evidence before interpreting a later attempt. Changed arguments and a later successful result show sequence, not a proven causal retry or a fully solved task.",
+      "provenance": "Locally authored for Trace. All messages, identifiers, files, times and outcomes are invented; no private session or real execution was used.",
+      "events": [
+        {
+          "id": "synthetic:recovery:event-1",
+          "type": "user.message",
+          "timestamp": "2026-01-01T12:00:00.000Z",
+          "data": {
+            "content": "Run the demonstration summary check. If it fails, inspect the reported problem and try a corrected path.",
+            "delivery": "idle"
+          }
+        },
+        {
+          "id": "synthetic:recovery:event-2",
+          "type": "tool.execution_start",
+          "timestamp": "2026-01-01T12:00:01.000Z",
+          "data": {
+            "toolCallId": "synthetic:recovery:first",
+            "toolName": "powershell",
+            "arguments": {
+              "command": "node demo/check.mjs demo/missing.txt",
+              "description": "Run the demonstration summary check"
+            }
+          }
+        },
+        {
+          "id": "synthetic:recovery:event-3",
+          "type": "tool.execution_complete",
+          "timestamp": "2026-01-01T12:00:02.000Z",
+          "data": {
+            "toolCallId": "synthetic:recovery:first",
+            "success": true,
+            "result": {
+              "content": "Input not found: demo/missing.txt",
+              "contents": [
+                {
+                  "type": "shell_exit",
+                  "shellId": "synthetic:recovery:shell-first",
+                  "exitCode": 2
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "synthetic:recovery:event-4",
+          "type": "tool.execution_start",
+          "timestamp": "2026-01-01T12:00:03.000Z",
+          "data": {
+            "toolCallId": "synthetic:recovery:guide",
+            "toolName": "view",
+            "arguments": {
+              "path": "demo/README.md"
+            }
+          }
+        },
+        {
+          "id": "synthetic:recovery:event-5",
+          "type": "tool.execution_complete",
+          "timestamp": "2026-01-01T12:00:04.000Z",
+          "data": {
+            "toolCallId": "synthetic:recovery:guide",
+            "success": true,
+            "result": {
+              "content": "The example input is demo/sample.txt. This is invented guide text."
+            }
+          }
+        },
+        {
+          "id": "synthetic:recovery:event-6",
+          "type": "tool.execution_start",
+          "timestamp": "2026-01-01T12:00:05.000Z",
+          "data": {
+            "toolCallId": "synthetic:recovery:later",
+            "toolName": "powershell",
+            "arguments": {
+              "command": "node demo/check.mjs demo/sample.txt",
+              "description": "Run a later check with the demonstration sample"
+            }
+          }
+        },
+        {
+          "id": "synthetic:recovery:event-7",
+          "type": "tool.execution_complete",
+          "timestamp": "2026-01-01T12:00:06.000Z",
+          "data": {
+            "toolCallId": "synthetic:recovery:later",
+            "success": true,
+            "result": {
+              "content": "Summary created for the demonstration input.",
+              "contents": [
+                {
+                  "type": "shell_exit",
+                  "shellId": "synthetic:recovery:shell-later",
+                  "exitCode": 0
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "synthetic:recovery:event-8",
+          "type": "assistant.message",
+          "timestamp": "2026-01-01T12:00:07.000Z",
+          "data": {
+            "messageId": "synthetic:recovery:message",
+            "content": "The first process returned exit 2. I read the guide and a later command with demo/sample.txt returned exit 0. I have not independently verified the reported summary."
+          }
+        }
+      ],
+      "annotations": [
+        {
+          "eventId": "synthetic:recovery:event-3",
+          "note": "The protocol succeeded while the process returned exit 2. The text reports a missing path; the record does not establish every cause of failure.",
+          "alternative": "A run could stop and ask the user about the intended input. That is a hypothetical alternative."
+        },
+        {
+          "eventId": "synthetic:recovery:event-5",
+          "note": "The read returned a suggested sample path. Returned text is evidence of what was supplied, not proof that the suggestion is correct.",
+          "alternative": "The assistant could inspect the sample content before another command. This example does not include that step."
+        },
+        {
+          "eventId": "synthetic:recovery:event-7",
+          "note": "The later command changed its input and returned exit 0. The nearby sequence does not prove causality, automatic retry status or correctness of the reported summary.",
+          "alternative": "A separate inspection of the summary could check its contents. No inspection is recorded here."
+        }
+      ]
+    }
+  ]
+}
+

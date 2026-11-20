@@ -19,6 +19,18 @@
       <p id="connection" role="status" data-state="connecting">Connecting…</p>
       <label><input id="follow" type="checkbox" checked> Follow live</label>
     </div>
+    <details id="examples" class="playback">
+      <summary>Example library · Synthetic demonstrations</summary>
+      <p>Explore three locally authored lessons. Every message, file and outcome is invented. Opening a lesson never runs its commands, contacts a model or changes your chat.</p>
+      <div class="playback-actions">
+        <button id="examples-load" type="button">Load example library</button>
+        <label for="examples-select">Demonstration <select id="examples-select" disabled></select></label>
+        <button id="examples-open" type="button" disabled>Open demonstration</button>
+      </div>
+      <p id="examples-status" role="status" aria-atomic="true">Examples are off. Return to live before switching lessons or starting prediction practice.</p>
+      <div id="examples-notes"></div>
+    </details>
+    <p id="example-banner" class="example-banner" role="status" aria-atomic="true" hidden></p>
     <details id="prediction" class="prediction">
       <summary>Predict next action · Optional practice</summary>
       <p>Choose an action category, then compare it with one observed record. Local practice only: no score, model confidence or claim that one action was the only reasonable choice.</p>

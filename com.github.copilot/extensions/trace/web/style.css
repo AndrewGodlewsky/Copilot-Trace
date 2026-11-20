@@ -316,3 +316,8 @@ body:has(.footer-panel[open]) { overflow: hidden; }
 #prediction-result pre { max-height: 18rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .prediction label, .playback label { flex-wrap: wrap; }
 #prediction-record[aria-disabled='true'], .playback button[aria-disabled='true'] { opacity: .65; cursor: default; }
+.example-banner { border-inline-start: 3px solid var(--focus); padding: .5rem .75rem; font-weight: 600; overflow-wrap: anywhere; }
+#examples-notes section { margin-block: .75rem; padding-inline-start: .75rem; border-inline-start: 1px solid var(--line); }
+#examples-notes h3 { font-size: 1rem; }
+#examples .playback-actions > label { min-width: 0; max-width: 100%; }
+#examples-select { max-width: 100%; }

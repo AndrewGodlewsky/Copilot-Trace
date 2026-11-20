@@ -10,9 +10,10 @@ import * as instructions from '../com.github.copilot/extensions/trace/web/instru
 import * as footer from '../com.github.copilot/extensions/trace/web/footer.mjs';
 import { createPoller } from '../com.github.copilot/extensions/trace/web/polling.mjs';
 import * as learning from '../com.github.copilot/extensions/trace/web/learning.mjs';
+import * as examples from '../com.github.copilot/extensions/trace/web/examples.mjs';
 
 // A small DOM boundary double exercises reconciliation, not browser layout or native focus behavior.
-function fixture(source, inventoryLoad = async () => { throw new Error('Unexpected inventory request'); }, feedLoad, instructionLoad = async () => { throw new Error('Unexpected instruction request'); }, clock = Date) {
+function fixture(source, inventoryLoad = async () => { throw new Error('Unexpected inventory request'); }, feedLoad, instructionLoad = async () => { throw new Error('Unexpected instruction request'); }, clock = Date, exampleLoad) {
   let document;
   class Element {
     constructor(tagName) {
@@ -94,6 +95,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     '#prediction-next', '#prediction-skip', '#prediction-exit', '#prediction-follow', '#prediction-status', '#prediction-result', '#prediction-mode',
     '#playback', '#playback-start', '#playback-controls', '#playback-previous', '#playback-next', '#playback-play',
     '#playback-exit', '#playback-follow', '#playback-status', '#playback-scope', '#playback-motion', '#learning-activity',
+    '#examples', '#examples-load', '#examples-select', '#examples-open', '#examples-status', '#examples-notes', '#example-banner',
     '#stat-scope', '#stat-hooks', '#stat-skills', '#statistics-peek', '#footer-dock', '#event-order',
     '#activity-filter', '#reset-filter', '#filter-status', '#filter-empty', '#lane-help',
     '#event-target', '#jump-event', '#navigation-status', '#capabilities', '#capability-refresh', '#capability-status',
@@ -165,7 +167,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   const windowEvents = new Map();
   const playbackTimers = new Map(), playbackCallbacks = []; let playbackTimerId = 0, motionListener;
   const motion = { matches: false, addEventListener(name, listener) { motionListener = listener; }, removeEventListener() { motionListener = undefined; } };
-  const context = vm.createContext({ ...presentation, ...learning,
+  const context = vm.createContext({ ...presentation, ...learning, ...examples, TextEncoder,
     createPlayback: (snapshot, options) => learning.createPlayback(snapshot, { ...options,
       schedule(callback) { playbackCallbacks.push(callback); playbackTimers.set(++playbackTimerId, callback); return playbackTimerId; },
       cancel(id) { playbackTimers.delete(id); } }),
@@ -176,7 +178,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     createFollow,
     initCapabilities: options => capabilities.initCapabilities({ ...options, document, load: inventoryLoad }),
     initInstructionSources: options => instructions.initInstructionSources({ ...options, document, load: instructionLoad }),
-    fetch: feedLoad, AbortSignal, Date: clock,
+    fetch: (url, options) => url === 'examples.json' && exampleLoad ? exampleLoad(url, options) : feedLoad(url, options), AbortSignal, AbortController, Date: clock,
     createPoller: options => feedLoad ? createPoller({ ...options, schedule: () => 1, cancel() {} }) : ({ refresh() {}, stop() {} }),
     initFooter: options => footer.initPanels?.({ ...options, document }),
   });
@@ -192,6 +194,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     refreshInstructions() { return vm.runInContext('instructionView.refresh();', context); },
     closeInstructions() { vm.runInContext('instructionView.close();', context); },
     settlePrediction() { return vm.runInContext('armingPrediction;', context); },
+    settleExamples() { return vm.runInContext('loadingExamples;', context); },
     syncFollowing() { vm.runInContext('following.sync();', context); },
     render(entries, extra = {}) {
       context.fixtureSnapshot = { entries, history: 'ready', omitted: 0, ...extra };
@@ -201,6 +204,117 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
 const appSource = await readFile(new URL('../com.github.copilot/extensions/trace/web/app.mjs', import.meta.url), 'utf8');
 
 const feedResponse = (snapshot, status = 200) => ({ status, headers: { get: () => 'fixture-revision' }, json: async () => snapshot });
+
+const exampleText = await readFile(new URL('../com.github.copilot/extensions/trace/web/examples.json', import.meta.url), 'utf8');
+const exampleResponse = text => ({ ok: true, text: async () => text });
+
+test('synthetic lessons reveal only their prefix, label all viewers and preserve live capture, reading settings and marks on return', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close()); data.response('live answer');
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot()), undefined, Date, async () => exampleResponse(exampleText));
+  await ui.refreshFeed();
+  ui.get('#event-order').value = 'chronological'; ui.get('#event-order').dispatch('change');
+  ui.get('#activity-filter').value = 'problems'; ui.get('#activity-filter').dispatch('change');
+  ui.document.scrollingElement.scrollTop = 137;
+  ui.get('#examples-load').dispatch('click'); await ui.settleExamples();
+  ui.get('#examples-select').value = 'bug-fix'; ui.get('#examples-open').dispatch('click');
+  assert.match(ui.get('#example-banner').textContent, /Synthetic demonstration.*bug-fix/i);
+  assert.match(ui.get('#statistics-peek').textContent, /Synthetic demonstration/);
+  assert.match(ui.get('#stat-scope').textContent, /not.*current chat/i);
+  assert.match(ui.get('#connection').textContent, /Demonstration/);
+  assert.doesNotMatch(ui.get('#timeline').textContent, /return a \+ b|exit 0|live answer/);
+  assert.equal(ui.get('#event-order').value, 'chronological'); assert.equal(ui.get('#activity-filter').value, 'everything');
+  ui.get('#prediction-live').dispatch('click'); ui.get('#prediction-replay').dispatch('click');
+  ui.get('#prediction-record').dispatch('click'); assert.equal(ui.get('#prediction-controls').hidden, true);
+  data.response('arrived-during-example'); await ui.refreshFeed();
+  assert.match(ui.get('#learning-activity').textContent, /1 newly received/);
+  assert.doesNotMatch(ui.get('#timeline').textContent, /arrived-during-example/);
+  ui.get('#playback-next').dispatch('click'); ui.get('#playback-next').dispatch('click');
+  assert.match(ui.get('#examples-notes').textContent, /Authored annotation.*protocol success true/s);
+  assert.match(ui.get('#examples-notes').textContent, /Hypothetical alternative/);
+  assert.doesNotMatch(ui.get('#examples-notes').textContent, /typed exit 0|Who approved/);
+  ui.get('#glossary-button').dispatch('click');
+  assert.match(ui.get('#glossary-panel').textContent, /Synthetic demonstration/);
+  assert.doesNotMatch(ui.get('#glossary-example').textContent, /Current chat example/);
+  ui.get('#playback-previous').dispatch('click'); assert.doesNotMatch(ui.get('#examples-notes').textContent, /protocol success true/);
+  ui.get('#playback-follow').checked = false; ui.get('#playback-exit').dispatch('click');
+  assert.equal(ui.get('#example-banner').hidden, true); assert.equal(ui.get('#examples-notes').textContent, '');
+  assert.equal(ui.get('#event-order').value, 'chronological'); assert.equal(ui.get('#activity-filter').value, 'problems');
+  assert.equal(ui.document.scrollingElement.scrollTop, 137); assert.equal(ui.get('#follow').checked, false);
+  assert.match(ui.get('#timeline').textContent, /arrived-during-example/); assert.doesNotMatch(ui.get('#statistics-peek').textContent, /Synthetic/);
+  assert.equal(ui.document.activeElement, ui.get('#examples-open'));
+  for (const id of ['exploration', 'recovery', 'bug-fix']) {
+    ui.get('#examples-select').value = id; ui.get('#examples-open').dispatch('click');
+    assert.doesNotMatch(ui.get('#timeline').textContent, /arrived-during-example/);
+    ui.get('#playback-play').dispatch('click'); const stale = ui.playbackCallbacks.at(-1);
+    ui.get('#playback-exit').dispatch('click'); stale();
+    assert.match(ui.get('#timeline').textContent, /arrived-during-example/);
+  }
+  ui.get('#prediction-live').dispatch('click'); ui.get('#examples-open').dispatch('click');
+  assert.equal(ui.get('#example-banner').hidden, true); ui.get('#prediction-exit').dispatch('click');
+  ui.closePage();
+});
+
+test('lesson loading failures, bounded data and stale completions never replace or freeze live state', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  for (const response of [{ ok: false, text: async () => exampleText }, exampleResponse('{'), exampleResponse(' '.repeat(262145))]) {
+    const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot()), undefined, Date, async () => response);
+    await ui.refreshFeed(); const before = ui.get('#timeline').textContent;
+    ui.get('#examples-load').dispatch('click'); await ui.settleExamples();
+    assert.match(ui.get('#examples-status').textContent, /unavailable/i);
+    assert.equal(ui.get('#timeline').textContent, before); assert.equal(ui.get('#follow').disabled, false);
+    ui.closePage();
+  }
+  let release;
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot()), undefined, Date, () => new Promise(resolve => { release = resolve; }));
+  await ui.refreshFeed(); ui.get('#examples-load').dispatch('click'); ui.closePage();
+  const status = ui.get('#examples-status').textContent; release(exampleResponse(exampleText)); await ui.settleExamples();
+  assert.equal(ui.get('#examples-status').textContent, status); assert.equal(ui.get('#examples-select').children.length, 0);
+});
+
+test('live claim links and disclosures survive lessons, and detached controls cannot alter matching synthetic or live evidence', async () => {
+  const live = await claimFixture({ exitCode: 0 }), library = JSON.parse(exampleText);
+  const raw = live.map(entry => JSON.parse(entry.evidence));
+  raw.forEach((event, index) => {
+    event.id = `synthetic:bug-fix:event-${index + 1}`;
+    event.timestamp = new Date(event.timestamp).toISOString();
+    if (event.data.toolCallId) event.data.toolCallId = 'synthetic:bug-fix:check';
+    if (event.data.messageId) event.data.messageId = 'synthetic:bug-fix:message';
+    if (event.data.result?.contents) event.data.result.contents[0].shellId = 'synthetic:bug-fix:shell';
+  });
+  library.examples[1].events = raw; library.examples[1].annotations = [{ eventId: raw[0].id, note: 'Authored fixture annotation.', alternative: 'An invented alternative.' }];
+  const model = createTrace({ on() { return () => {}; }, getEvents: async () => raw }); await model.ready;
+  const ui = fixture(appSource, undefined, undefined, undefined, Date, async () => exampleResponse(JSON.stringify(library)));
+  ui.render(model.snapshot().entries); model.close();
+  const liveClaim = byClass(ui.get('#timeline'), 'claim-evidence');
+  const liveSelect = walk(liveClaim).find(node => node.tagName === 'button' && node.textContent === 'Link this result');
+  liveSelect.dispatch('click'); liveClaim.open = true;
+  ui.get('#examples-load').dispatch('click'); await ui.settleExamples();
+  assert.match(ui.get('#examples-status').textContent, /ready/);
+  ui.get('#examples-select').value = 'bug-fix'; ui.get('#examples-open').dispatch('click');
+  ui.get('#playback-next').dispatch('click'); ui.get('#playback-next').dispatch('click');
+  const syntheticClaim = byClass(ui.get('#timeline'), 'claim-evidence');
+  assert.notEqual(syntheticClaim, liveClaim); assert.doesNotMatch(syntheticClaim.textContent, /User-linked result/);
+  liveSelect.dispatch('click');
+  const syntheticSelect = walk(syntheticClaim).find(node => node.tagName === 'button' && node.textContent === 'Link this result');
+  syntheticSelect.dispatch('click'); assert.match(syntheticClaim.textContent, /User-linked result/);
+  ui.get('#playback-exit').dispatch('click');
+  assert.equal(byClass(ui.get('#timeline'), 'claim-evidence'), liveClaim); assert.equal(liveClaim.open, true);
+  assert.match(liveClaim.textContent, /User-linked result/);
+  syntheticSelect.dispatch('click'); assert.match(liveClaim.textContent, /User-linked result/);
+  ui.closePage();
+});
+
+test('reloading a loaded library cannot open an obsolete selection while its response is pending', async () => {
+  let release, reload = false;
+  const ui = fixture(appSource, undefined, undefined, undefined, Date, () => reload
+    ? new Promise(resolve => { release = resolve; }) : Promise.resolve(exampleResponse(exampleText)));
+  ui.render([]); ui.get('#examples-load').dispatch('click'); await ui.settleExamples();
+  reload = true; ui.get('#examples-load').dispatch('click');
+  assert.equal(ui.get('#examples-select').disabled, true); assert.equal(ui.get('#examples-open').disabled, true);
+  ui.get('#examples-open').dispatch('click'); assert.equal(ui.get('#example-banner').hidden, true);
+  release(exampleResponse(exampleText)); await ui.settleExamples();
+  assert.equal(ui.get('#examples-open').disabled, false); ui.closePage();
+});
 
 async function predictionFixture() {
   let emit;

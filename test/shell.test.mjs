@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { request } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdtemp, cp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { parseExampleLibrary } from '../com.github.copilot/extensions/trace/web/examples.mjs';
 import { startServer } from '../com.github.copilot/extensions/trace/server.mjs';
 import { traceCanvas } from '../com.github.copilot/extensions/trace/canvas.mjs';
 
@@ -43,6 +47,41 @@ test('serves only authenticated local assets, with restrictive headers', async t
     }).on('error', reject).end();
   });
   assert.equal(status, 403);
+});
+
+test('packaged examples are local authenticated assets and never enter the live observer', async t => {
+  const server = await startServer({ on() { return () => {}; }, getEvents: async () => [] });
+  t.after(() => server.close());
+  const response = await fetch(server.url + 'examples.json'); assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type'), /application\/json/);
+  const library = parseExampleLibrary(await response.text()); assert.equal(library.length, 3);
+  assert.equal((await fetch(server.url + 'examples.mjs')).status, 200);
+  assert.equal((await fetch(server.url + 'examples.json', { method: 'HEAD' })).status, 200);
+  assert.equal((await fetch(new URL('/examples.json', server.url))).status, 404);
+  assert.equal((await fetch(server.url + 'examples.json', { method: 'POST' })).status, 405);
+  const snapshot = await (await fetch(server.url + 'events')).json();
+  assert.deepEqual(snapshot.entries, []); assert.equal(snapshot.liveReceipt, 0);
+});
+
+test('missing or malformed optional lesson data leaves the live server usable with an explicit unavailable response', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'trace-examples-')); t.after(() => rm(root, { recursive: true, force: true }));
+  await cp(new URL('../com.github.copilot', import.meta.url), join(root, 'com.github.copilot'), { recursive: true });
+  await cp(new URL('../assets', import.meta.url), join(root, 'assets'), { recursive: true });
+  for (const name of ['plugin.json', 'release-notes.json']) await cp(new URL(`../${name}`, import.meta.url), join(root, name));
+  const path = join(root, 'com.github.copilot/extensions/trace/web/examples.json');
+  const { startServer: copiedStart } = await import(pathToFileURL(join(root, 'com.github.copilot/extensions/trace/server.mjs')));
+  for (const content of [null, '{', ' '.repeat(262145)]) {
+    if (content === null) await rm(path); else await writeFile(path, content);
+    let emit;
+    const server = await copiedStart({ on(fn) { emit = fn; return () => {}; }, getEvents: async () => [] });
+    try {
+      assert.equal((await fetch(server.url + 'examples.json')).status, 503);
+      assert.equal((await fetch(server.url)).status, 200);
+      emit({ id: 'still-live', type: 'user.message', data: { content: 'The live session remains available.' } });
+      const snapshot = await (await fetch(server.url + 'events')).json();
+      assert.equal(snapshot.entries.at(-1).id, 'still-live');
+    } finally { await server.close(); }
+  }
 });
 
 test('snapshot endpoint requires capability, Host and same Origin, validates revisions and releases subscription', async () => {

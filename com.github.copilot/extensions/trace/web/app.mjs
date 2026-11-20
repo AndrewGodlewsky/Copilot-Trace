@@ -2,6 +2,7 @@ import { describeActor, explainStep, toolOutcomes, skillInstructions, compaction
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { predictionCategories, freezeLearningSnapshot, armLivePrediction, resolveLivePrediction, createReplayPractice, chooseReplayPrediction, createPlayback, createActivityCounter } from './learning.mjs';
+import { parseExampleLibrary } from './examples.mjs';
 import { initFooter } from './footer.mjs';
 import { createFollow } from './follow.mjs';
 import { initCapabilities } from './capabilities.mjs';
@@ -61,6 +62,7 @@ let lanes = [];
 let etag;
 let lastSnapshot;
 let liveSnapshot, practice, playback, activityCount, armingPrediction, practiceGeneration = 0;
+let exampleLibrary, activeExample, savedLiveView, loadingExamples, exampleLoading = false, exampleRequest;
 let feedState;
 const argumentsButton = document.querySelector('#arguments-button'), argumentsPanel = document.querySelector('#arguments-panel');
 const argumentSelects = ['first', 'second'].map(side => document.querySelector(`#arguments-${side}`));
@@ -202,7 +204,7 @@ function selectGlossary(id, preferred) {
   glossaryTarget = glossaryExample(lastSnapshot?.entries || [], id, preferred);
   glossaryExpired = false;
   document.querySelector('#glossary-example').textContent = glossaryTarget
-    ? `Current chat example: ${glossaryTarget.type} · ${glossaryTarget.agentId ? `Agent ${glossaryTarget.agentId}` : 'Main chat'} · ${glossaryTarget.timestamp || 'Time unavailable'}`
+    ? `${activeExample ? 'Synthetic demonstration event' : 'Current chat example'}: ${glossaryTarget.type} · ${glossaryTarget.agentId ? `Agent ${glossaryTarget.agentId}` : 'Main chat'} · ${glossaryTarget.timestamp || 'Time unavailable'}`
     : `Static example — not from this chat: ${concept.example}`;
   glossarySource.hidden = !glossaryTarget;
   selectGuidance(preferred);
@@ -390,7 +392,9 @@ function renderObserverScope() {
     ['#stat-scope-summary', `${scope.label} · Count scope`], ['#notice', scope.detail],
     ['#stat-scope', `${scope.detail} Tool calls and hook pipeline invocations count once per exact source and call ID, including partial calls. Hook pipelines are not counts of configured scripts or callbacks. A pipeline can span hook groups, so group counts do not add up to this total. Conflicting boundaries count once; their outcome is unknown.`],
   ]) {
-    const node = document.querySelector(selector); if (node.textContent !== text) node.textContent = text;
+    const node = document.querySelector(selector);
+    const scoped = activeExample ? `Synthetic demonstration · ${text} These invented events are not current chat activity.` : text;
+    if (node.textContent !== scoped) node.textContent = scoped;
   }
   const activity = document.querySelector('#learning-activity');
   activity.hidden = !practice && !playback;
@@ -400,7 +404,7 @@ function renderObserverScope() {
       : `${count} newly received live records since this view opened. Counts cover supported live callbacks after history was ready, not hydrated history, streamed deltas or execution progress.`;
     if (activity.textContent !== text) activity.textContent = text;
   }
-  if (playback) setConnection(feedState === 'disconnected' ? 'Playback · live feed disconnected; retrying' : 'Playback · live capture continues', feedState === 'disconnected' ? 'error' : 'connected');
+  if (playback) setConnection(`${activeExample ? 'Demonstration' : 'Playback'} · ${feedState === 'disconnected' ? 'live feed disconnected; retrying' : 'live capture continues'}`, feedState === 'disconnected' ? 'error' : 'connected');
   else if (feedState === 'disconnected') setConnection('Disconnected · retrying', 'error');
   else if (practice) setConnection('Practice view · live capture continues', 'connected');
   else if (lastSnapshot) setConnection(lastSnapshot.history === 'unsupported' ? 'Events unavailable' : `Connected · ${lastSnapshot.entries.length} events`,
@@ -414,7 +418,9 @@ function renderObserverScope() {
       : unchangedFeed ? 'Unchanged response; no new retained events received. This does not establish inactivity.'
         : 'Feed receipt time is separate from the recorded host event time.');
   for (const [selector, text] of [['#observed-time', time], ['#observed-feed', feed]]) {
-    const target = document.querySelector(selector); if (target.textContent !== text) target.textContent = text;
+    const target = document.querySelector(selector), scoped = activeExample && selector === '#observed-time'
+      ? `Synthetic demonstration time: ${timestamp || 'no event yet'}. Invented timestamps are not live activity or compute time.` : text;
+    if (target.textContent !== scoped) target.textContent = scoped;
   }
 }
 
@@ -1764,6 +1770,10 @@ const poller = createPoller({
   },
 });
 const footerPanels = initFooter({ diagnostics, refresh: poller.refresh, onInspect: () => { follow.checked = false; pausePlayback(); } });
+const exampleContexts = ['statistics-panel', 'glossary-panel', 'arguments-panel'].map(id => {
+  const panel = document.querySelector(`#${id}`), note = element('p', '', 'example-banner');
+  note.hidden = true; panel.insertBefore(note, panel.children[1] || null); return note;
+});
 
 const prediction = id => document.querySelector(`#prediction-${id}`);
 function closePracticeInspectors() {
@@ -1777,6 +1787,9 @@ function renderPractice() {
   prediction('live').disabled = Boolean(practice || playback); prediction('replay').disabled = Boolean(practice || playback);
   document.querySelector('#playback-start').disabled = Boolean(practice || playback);
   follow.disabled = Boolean(practice || playback);
+  document.querySelector('#examples-load').disabled = Boolean(practice || playback || exampleLoading);
+  document.querySelector('#examples-open').disabled = Boolean(practice || playback || exampleLoading || !exampleLibrary);
+  document.querySelector('#examples-select').disabled = Boolean(practice || playback || exampleLoading || !exampleLibrary);
   if (!practice) return;
   const attempt = practice.attempt, status = attempt?.status;
   prediction('category').disabled = Boolean(attempt);
@@ -1870,6 +1883,66 @@ prediction('exit').addEventListener('click', () => {
 
 const playbackControl = id => document.querySelector(`#playback-${id}`);
 const motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)');
+const viewerCaches = [nodes, delegationViews, recoveryViews, claimViews, retrievalRows, retrievalUnknown, validationRows, observedRows, repeatedRows];
+function detachViewer() {
+  for (const cache of viewerCaches) { for (const node of cache.values()) node.item?.remove(); cache.clear(); }
+  timeline.replaceChildren(); groups = []; chapters = []; lanes = [];
+}
+function saveLiveView() {
+  savedLiveView = { order: eventOrder.value, filter: activityFilter.value, target: eventTarget.value,
+    scroll: document.scrollingElement.scrollTop, caches: viewerCaches.map(cache => new Map(cache)), groups, chapters, lanes };
+  detachViewer(); eventOrder.value = 'chronological'; activityFilter.value = 'everything';
+}
+function restoreLiveView() {
+  detachViewer();
+  eventOrder.value = savedLiveView.order; activityFilter.value = savedLiveView.filter; eventTarget.value = savedLiveView.target;
+  viewerCaches.forEach((cache, index) => { for (const [key, value] of savedLiveView.caches[index]) cache.set(key, value); });
+  groups = savedLiveView.groups; chapters = savedLiveView.chapters; lanes = savedLiveView.lanes;
+}
+function renderExampleNotes() {
+  const banner = document.querySelector('#example-banner'), notes = document.querySelector('#examples-notes');
+  const label = activeExample ? `Synthetic demonstration · ${activeExample.title}. All displayed event views and inspectors use invented lesson facts, not your current chat.` : '';
+  for (const node of [banner, ...exampleContexts]) { node.hidden = !activeExample; if (node.textContent !== label) node.textContent = label; }
+  notes.replaceChildren();
+  if (!activeExample) return;
+  notes.append(element('p', `Intended lesson: ${activeExample.lesson}`), element('p', `Provenance: ${activeExample.provenance}`));
+  const visible = new Set(playback.state.snapshot.entries.map(entry => entry.id));
+  for (const annotation of activeExample.annotations.filter(note => visible.has(note.eventId))) {
+    const step = activeExample.snapshot.entries.findIndex(entry => entry.id === annotation.eventId) + 1;
+    const section = element('section');
+    section.append(element('h3', `Authored annotation · Step ${step}`), element('p', annotation.note),
+      element('p', `Hypothetical alternative — not an event: ${annotation.alternative}`)); notes.append(section);
+  }
+}
+document.querySelector('#examples-load').addEventListener('click', () => {
+  if (panelClosed || practice || playback || exampleLoading) return;
+  exampleLoading = true; exampleRequest = new AbortController(); renderPractice();
+  document.querySelector('#examples-status').textContent = 'Loading the locally packaged example library…';
+  loadingExamples = (async () => {
+    try {
+      const response = await fetch('examples.json', { signal: AbortSignal.any([exampleRequest.signal, AbortSignal.timeout(10000)]) });
+      if (!response.ok) throw new Error('Examples unavailable.');
+      const library = parseExampleLibrary(await response.text());
+      if (panelClosed) return;
+      exampleLibrary = library;
+      const select = document.querySelector('#examples-select'); select.replaceChildren(...library.map(example => {
+        const option = element('option', example.title); option.value = example.id; return option;
+      }));
+      select.value = library[0].id;
+      document.querySelector('#examples-status').textContent = `${library.length} synthetic demonstrations ready. Choose one, then use the playback Previous / Next controls.`;
+    } catch {
+      if (panelClosed) return;
+      exampleLibrary = undefined; document.querySelector('#examples-select').replaceChildren();
+      document.querySelector('#examples-status').textContent = 'Example library unavailable: packaged data is missing, malformed or outside supported bounds. Live capture is unaffected. You can retry loading.';
+    } finally { exampleLoading = false; exampleRequest = undefined; if (!panelClosed) renderPractice(); }
+  })();
+});
+document.querySelector('#examples-open').addEventListener('click', () => {
+  if (panelClosed || practice || playback || exampleLoading || !lastSnapshot) return;
+  const example = exampleLibrary?.find(example => example.id === document.querySelector('#examples-select').value);
+  if (!example) return;
+  saveLiveView(); activeExample = example; startPlayback(example.snapshot);
+});
 function pausePlayback() { if (playback?.state?.playing) playback.pause(); }
 function renderPlayback() {
   playbackControl('controls').hidden = !playback;
@@ -1883,24 +1956,28 @@ function renderPlayback() {
   playbackControl('status').textContent = !state.valid ? 'Playback unavailable: retained event identities are missing or ambiguous. Return to live to inspect the available records.'
     : !state.total ? 'No retained events in this snapshot. Return to live for current activity.'
       : `${state.playing ? 'Playing' : 'Paused'} · Showing events through ${state.count} of ${state.total}. ${state.count === state.total ? 'End of snapshot. Use Previous to revisit earlier evidence.' : 'Later snapshot events remain hidden.'}`;
-  playbackControl('scope').textContent = `Playback is a fixed, memory-only window of ${state.total} events (maximum 300), in recorded order. ${snapshot.omitted || 0} older events omitted. History at capture: ${snapshot.history || 'unknown'}. Original source identities and evidence gaps are preserved; chronology is not causality.`;
+  playbackControl('scope').textContent = activeExample
+    ? `Synthetic demonstration: ${activeExample.title}. ${state.total} authored events, shown in invented order. These are not recorded current-chat events; chronology is not causality.`
+    : `Playback is a fixed, memory-only window of ${state.total} events (maximum 300), in recorded order. ${snapshot.omitted || 0} older events omitted. History at capture: ${snapshot.history || 'unknown'}. Original source identities and evidence gaps are preserved; chronology is not causality.`;
   playbackControl('motion').textContent = state.reducedMotion ? 'Reduced motion is on: use manual Previous / Next. Automatic playback is unavailable.'
     : 'Play advances one recorded event every 2 seconds, not at the original execution speed. Previous / Next pause playback.';
+  renderExampleNotes();
 }
 function updatePlayback(state) {
-  if (panelClosed || !playback) return;
+  if (panelClosed || !playback || state !== playback.state) return;
   if (state.count < (lastSnapshot?.entries.length || 0)) closePracticeInspectors();
   lastSnapshot = state.snapshot; render(lastSnapshot); renderPlayback();
 }
-playbackControl('start').addEventListener('click', () => {
+function startPlayback(snapshot) {
   if (panelClosed || practice || playback || !lastSnapshot) return;
   follow.checked = false; playbackControl('follow').checked = false;
   closePracticeInspectors(); activityCount = createActivityCounter(liveSnapshot || lastSnapshot);
-  playback = createPlayback(lastSnapshot, { onChange: updatePlayback, reducedMotion: motionPreference.matches });
+  playback = createPlayback(snapshot, { onChange: updatePlayback, reducedMotion: motionPreference.matches });
   capabilityView.suspend(true); instructionView.suspend(true);
   updatePlayback(playback.state); renderPractice();
   document.querySelector('#playback').open = true; playbackControl('next').focus({ preventScroll: true });
-});
+}
+playbackControl('start').addEventListener('click', () => startPlayback(lastSnapshot));
 for (const direction of ['previous', 'next']) playbackControl(direction).addEventListener('click', () => {
   if (panelClosed || !playback || !playback.state.valid
     || (direction === 'previous' ? playback.state.count <= 1 : playback.state.count >= playback.state.total)) return;
@@ -1914,17 +1991,25 @@ playbackControl('exit').addEventListener('click', () => {
   if (panelClosed || !playback) return;
   const resume = playbackControl('follow').checked;
   playback.close(); playback = undefined; activityCount = undefined; closePracticeInspectors();
+  const wasExample = Boolean(activeExample); activeExample = undefined;
+  if (wasExample) restoreLiveView();
+  renderExampleNotes();
   capabilityView.suspend(false); instructionView.suspend(false);
   lastSnapshot = liveSnapshot || lastSnapshot; render(lastSnapshot); renderPractice(); renderPlayback();
   playbackControl('scope').textContent = ''; playbackControl('motion').textContent = '';
   playbackControl('status').textContent = `Returned to the current live view. Follow live is ${resume ? 'on' : 'paused'}.`;
-  follow.checked = resume; following.onChange(); playbackControl('start').focus({ preventScroll: true });
+  follow.checked = resume; following.onChange();
+  if (savedLiveView && !resume) document.scrollingElement.scrollTop = savedLiveView.scroll;
+  savedLiveView = undefined;
+  (wasExample ? document.querySelector('#examples-open') : playbackControl('start')).focus({ preventScroll: true });
 });
 function changeMotion(event) { if (!panelClosed) playback?.setReducedMotion(event.matches); }
 motionPreference.addEventListener('change', changeMotion);
 document.querySelector('#playback').addEventListener('toggle', () => { if (!document.querySelector('#playback').open) pausePlayback(); });
 window.addEventListener('pagehide', () => {
   panelClosed = true;
+  exampleRequest?.abort(); exampleRequest = undefined; exampleLibrary = undefined; activeExample = undefined; savedLiveView = undefined;
+  document.querySelector('#examples-select').replaceChildren(); document.querySelector('#examples-notes').replaceChildren();
   playback?.close(); playback = undefined; activityCount = undefined;
   motionPreference.removeEventListener('change', changeMotion);
   practiceGeneration++; practice = undefined; liveSnapshot = undefined; lastSnapshot = undefined;
@@ -1941,6 +2026,6 @@ window.addEventListener('pagehide', () => {
   for (const node of repeatedRows.values()) { node.rows.clear(); node.item.remove(); }
   repeatedRows.clear(); repetition = undefined;
 });
-renderPractice(); renderPlayback();
+renderPractice(); renderPlayback(); renderExampleNotes();
 renderObserverScope();
 void poller.refresh();

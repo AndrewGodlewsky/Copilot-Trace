@@ -3,6 +3,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
+import { parseExampleLibrary } from '../com.github.copilot/extensions/trace/web/examples.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const json = async file => JSON.parse(await readFile(join(root, file), 'utf8'));
@@ -49,6 +50,8 @@ const skill = await readFile(join(root, 'skills/trace/SKILL.md'), 'utf8');
 assert.match(skill, /^---\r?\nname: trace\r?\n/);
 assert.match(skill, /open_canvas/);
 for (const asset of ['index.html', 'style.css', 'app.mjs', 'presentation.mjs', 'host-output.mjs', 'glossary.mjs', 'footer.mjs', 'diagnostics.mjs', 'polling.mjs', 'follow.mjs', 'capabilities.mjs', 'instructions.mjs']) await readFile(join(root, 'com.github.copilot/extensions/trace/web', asset));
+const examples = parseExampleLibrary(await readFile(join(root, 'com.github.copilot/extensions/trace/web/examples.json'), 'utf8'));
+assert.deepEqual(examples.map(example => example.id), ['exploration', 'bug-fix', 'recovery'], 'Ship all three validated synthetic lessons.');
 async function syntax(folder) {
   for (const entry of await readdir(folder, { withFileTypes: true })) {
     const path = join(folder, entry.name);

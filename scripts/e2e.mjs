@@ -8,6 +8,7 @@ import { actionStages, agentLanes, compactionAttempts, delegationHandoffs, hookI
 import { compareCapabilities } from '../com.github.copilot/extensions/trace/web/capabilities.mjs';
 import { instructionSources } from '../com.github.copilot/extensions/trace/web/instructions.mjs';
 import { armLivePrediction, classifyPredictionEvent, resolveLivePrediction } from '../com.github.copilot/extensions/trace/web/learning.mjs';
+import { parseExampleLibrary } from '../com.github.copilot/extensions/trace/web/examples.mjs';
 
 const sdkDirectory = process.env.COPILOT_SDK_DIR;
 const cli = process.env.COPILOT_CLI_PATH;
@@ -214,7 +215,20 @@ try {
   assert.match(await page.text(), /<title>Trace<\/title>/);
   assert.equal((await fetch(first.url + 'app.mjs')).status, 200);
   assert.equal((await fetch(first.url + 'presentation.mjs')).status, 200);
-  for (const asset of ['footer.mjs', 'diagnostics.mjs', 'polling.mjs', 'follow.mjs', 'capabilities.mjs', 'host-output.mjs', 'instructions.mjs', 'learning.mjs']) assert.equal((await fetch(first.url + asset)).status, 200);
+  for (const asset of ['footer.mjs', 'diagnostics.mjs', 'polling.mjs', 'follow.mjs', 'capabilities.mjs', 'host-output.mjs', 'instructions.mjs', 'learning.mjs', 'examples.mjs']) assert.equal((await fetch(first.url + asset)).status, 200);
+  const exampleResponse = await fetch(first.url + 'examples.json');
+  assert.equal(exampleResponse.status, 200);
+  const examples = parseExampleLibrary(await exampleResponse.text());
+  assert.deepEqual(examples.map(example => example.id), ['exploration', 'bug-fix', 'recovery']);
+  for (const example of examples) {
+    assert.equal(example.kind, 'synthetic');
+    assert.ok(example.lesson && example.provenance && example.annotations.length);
+    assert.equal(example.snapshot.liveReceipt, null, 'Demonstrations have no live receipt cursor.');
+    assert.ok(Object.isFrozen(example.snapshot.entries));
+    assert.ok(example.snapshot.entries.every(entry => entry.id.startsWith(`synthetic:${example.id}:`)
+      && entry.observation === undefined && JSON.parse(entry.evidence).id === entry.id));
+    assert.ok(example.annotations.every(annotation => example.snapshot.entries.some(entry => entry.id === annotation.eventId)));
+  }
   const metadata = await (await fetch(first.url + 'metadata')).json();
   assert.equal(metadata.version, JSON.parse(await readFile(join(root, 'plugin.json'), 'utf8')).version);
   assert.equal(metadata.releases[0].version, metadata.version);
@@ -224,6 +238,8 @@ try {
   const history = await until(() => fetch(first.url + 'events').then(r => r.json()),
     value => value.history !== 'loading', 'history load');
   assert.equal(history.history, 'ready');
+  assert.equal(history.entries.some(entry => entry.id.startsWith('synthetic:')), false,
+    'Reading packaged demonstrations cannot add them to the attached live snapshot.');
   assert.ok(Number.isSafeInteger(history.liveReceipt) && history.liveReceipt >= 0);
   assert.deepEqual(history.entries.find(entry => entry.id === historical.eventId)?.observation,
     { source: 'history', receipt: null }, 'Hydrated history cannot acquire a new live prediction receipt.');
