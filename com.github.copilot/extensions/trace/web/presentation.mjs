@@ -112,13 +112,29 @@ export function describeHookGroup(entries) {
   return { kind: 'Hook', title: 'Hooks', subtitle, tone: failures ? 'error' : 'host' };
 }
 
+function actionTitle(entry) {
+  if (entry.type !== 'tool.execution_start' || entry.truncated
+    || typeof entry.evidence !== 'string' || entry.evidence.length > 12000) return '';
+  let data;
+  try { data = JSON.parse(entry.evidence)?.data; } catch { return ''; }
+  const args = data?.arguments;
+  if (data?.toolName !== entry.toolName || !args || typeof args !== 'object' || Array.isArray(args)) return '';
+  let title = '';
+  if (entry.toolName === 'view' && typeof args.path === 'string' && args.path.length) title = `View ${args.path}`;
+  if (entry.toolName === 'grep' && typeof args.pattern === 'string' && args.pattern.length) title = `Search for pattern “${args.pattern}”`;
+  if (title.length <= 180) return title;
+  let prefix = title.slice(0, 179);
+  if (/[\uD800-\uDBFF]$/.test(prefix)) prefix = prefix.slice(0, -1);
+  return prefix + '…';
+}
+
 export function describeStep(entry) {
   const type = entry.type;
   if (type === 'user.message') return { kind: 'You', title: entry.preview || 'User message', subtitle: 'Message sent', tone: 'user' };
   if (entry.category === 'tool') {
     const subtitle = type === 'tool.execution_start' ? 'Started'
       : entry.success === false ? 'Failed' : entry.success === true ? 'Completed' : 'Result recorded';
-    return { kind: 'Tool', title: entry.toolName || 'Tool name unavailable', subtitle, tone: entry.success === false ? 'error' : 'tool' };
+    return { kind: 'Tool', title: actionTitle(entry) || entry.toolName || 'Tool name unavailable', subtitle, tone: entry.success === false ? 'error' : 'tool' };
   }
   if (entry.category === 'skill') {
     const triggers = { 'user-invoked': 'Invoked by you', 'agent-invoked': 'Invoked by agent', 'context-load': 'Loaded into context' };

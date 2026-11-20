@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.11",
+    "summary": "Show plain-language titles for recognized view and search requests while keeping original evidence and result status available."
+  },
+  {
     "version": "0.1.10",
     "summary": "Move Statistics into a quiet, always-visible bottom bar with a compact turn and tool count. Open it as an upward overlay drawer while keeping the timeline in place."
   },
