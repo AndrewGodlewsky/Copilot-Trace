@@ -127,22 +127,41 @@ function renderStatistics(snapshot) {
 function row(entry) {
   const actor = describeActor(entry);
   const node = nodeShell(describeStep(entry), actor);
-  const timeText = typeof entry.timestamp === 'string' && entry.timestamp ? entry.timestamp : 'Not recorded';
   const body = element('div', undefined, 'evidence');
-  body.append(element('h3', 'What this step means'), element('p', entry.explanation));
+  if (entry.type === 'assistant.turn_start') {
+    node.activityBox = element('div', undefined, 'activity-source');
+    node.activityBox.hidden = true;
+    node.activityLink = element('button', 'View reported activity evidence');
+    node.activityLink.type = 'button';
+    node.activityLink.addEventListener('click', () => { if (node.activityId) showBoundary(node.activityId); });
+    node.activityBox.append(element('p', 'Recorded assistant statement, not a verified reason or a summary of all work in this turn.'), node.activityLink);
+    body.append(node.activityBox);
+  }
+  node.explanation = element('p', entry.explanation);
+  body.append(element('h3', 'What this step means'), node.explanation);
   const metadata = element('dl', undefined, 'metadata');
-  for (const [label, value] of [['Recorded time', timeText], ['Actor', actor.role], ['Source', actor.source], ['Event', entry.type]]) {
-    metadata.append(element('dt', label), element('dd', value));
+  node.metadata = new Map();
+  for (const [label, value] of metadataValues(entry)) {
+    const text = element('dd', value);
+    node.metadata.set(label, text);
+    metadata.append(element('dt', label), text);
   }
   body.append(metadata);
   body.append(element('h3', 'Recorded evidence'));
-  if (entry.truncated) body.append(element('p', 'Evidence shortened to 12,000 characters. The complete event is not retained by this panel.'));
-  const pre = element('pre', entry.evidence);
-  pre.tabIndex = 0;
-  pre.setAttribute('aria-label', 'Recorded event data');
-  body.append(pre);
+  node.truncated = element('p', 'Evidence shortened to 12,000 characters. The complete event is not retained by this panel.', 'evidence-truncated');
+  node.truncated.hidden = !entry.truncated;
+  node.pre = element('pre', entry.evidence);
+  node.pre.tabIndex = 0;
+  node.pre.setAttribute('aria-label', 'Recorded event data');
+  body.append(node.truncated, node.pre);
   node.details.append(body);
   return node;
+}
+
+function metadataValues(entry) {
+  const actor = describeActor(entry);
+  const time = typeof entry.timestamp === 'string' && entry.timestamp ? entry.timestamp : 'Not recorded';
+  return [['Recorded time', time], ['Actor', actor.role], ['Source', actor.source], ['Event', entry.type]];
 }
 
 function place(parent, item, previous) {
@@ -204,7 +223,7 @@ function render(snapshot) {
   const focusedChapter = chapters.find(chapter => chapter.item.contains(focused) || chapter.ids.has(focusedId));
   const chapterView = eventOrder.value === 'chapters';
   const chronological = eventOrder.value !== 'grouped';
-  const contexts = turnContext(snapshot.entries);
+  const contexts = turnContext(snapshot.entries, snapshot);
   renderStatistics(snapshot);
   const oldGroups = groups.map(group => ({ group, ids: group.ids, open: group.details.open }));
   const retained = new Set(snapshot.entries.map(entry => entry.id));
@@ -218,6 +237,17 @@ function render(snapshot) {
     const display = describeTurn(entry, context);
     if (node.title.textContent !== display.title) node.title.textContent = display.title;
     if (node.subtitle.textContent !== display.subtitle) node.subtitle.textContent = display.subtitle;
+    node.item.dataset.activity = display.activityId ? 'reported' : '';
+    if (node.activityBox) {
+      node.activityId = display.activityId;
+      node.activityBox.hidden = !display.activityId;
+    }
+    for (const [label, value] of metadataValues(entry)) {
+      if (node.metadata.get(label).textContent !== value) node.metadata.get(label).textContent = value;
+    }
+    if (node.explanation.textContent !== (entry.explanation || '')) node.explanation.textContent = entry.explanation || '';
+    if (node.pre.textContent !== (entry.evidence || '')) node.pre.textContent = entry.evidence || '';
+    node.truncated.hidden = !entry.truncated;
     applyContext(node, context, entry);
   }
   const nextGroups = [];
@@ -294,7 +324,9 @@ function render(snapshot) {
   groups = nextGroups;
   chapters = nextChapters;
   // Moving an existing disclosure into a group must not strand keyboard focus.
-  let focusTarget = focused?.isConnected ? focused : null;
+  const focusedNode = nodes.get(focusedId);
+  let focusTarget = focusedNode?.activityLink === focused && focusedNode?.activityBox.hidden
+    ? focusedNode.summary : focused?.isConnected ? focused : null;
   if (!focusTarget && focusedGroup) {
     const group = groups.find(group => group === focusedGroup);
     focusTarget = chronological ? nodes.get(group?.ids.values().next().value)?.summary : group?.summary;

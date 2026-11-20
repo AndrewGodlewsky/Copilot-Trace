@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.15",
+    "summary": "Model turns can show recorded activity with a direct link to its evidence. Uncertain or incomplete intervals keep neutral headings."
+  },
+  {
     "version": "0.1.14",
     "summary": "Browse retained activity in request chapters, with recorded prompt previews and explicit steering, queued-input and uncertain-boundary labels."
   },

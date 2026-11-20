@@ -82,6 +82,100 @@ const walk = element => [element, ...element.children.flatMap(walk)];
 const byClass = (element, name) => walk(element).find(node => node.className.split(' ').includes(name));
 const evidenceRows = group => byClass(group, 'tool-events').children;
 
+const activityStart = { id: 'activity-start', type: 'assistant.turn_start', category: 'turn', agentId: '',
+  turnId: '0', model: 'fixture-model', timestamp: '2026-11-20T12:00:00Z', evidence: '{}' };
+function activityIntent(id, text, timestamp = '2026-11-20T12:00:01Z', extra = {}) {
+  return { id, type: 'assistant.intent', category: 'model', agentId: '', timestamp, ...extra,
+    evidence: JSON.stringify({ id, type: 'assistant.intent', timestamp,
+      ...(extra.agentId ? { agentId: extra.agentId } : {}), data: { intent: text } }) };
+}
+
+test('reported headings and their persistent source control update without resetting disclosures, focus or counts', () => {
+  const ui = fixture(appSource), later = activityIntent('later', 'Later statement');
+  ui.render([activityStart]);
+  const turnRow = ui.get('#timeline').firstElementChild;
+  turnRow.firstElementChild.open = true;
+  turnRow.firstElementChild.dispatch('toggle');
+  const evidence = walk(turnRow).find(node => node.tagName === 'pre');
+  evidence.focus();
+  const counts = ui.get('#stat-counts').textContent;
+  ui.render([activityStart, later]);
+  const button = walk(turnRow).find(node => node.tagName === 'button');
+  assert.ok(button, 'A reported turn exposes its original intent evidence.');
+  assert.equal(button.parentElement.hidden, false);
+  assert.equal(ui.get('#timeline').firstElementChild, turnRow);
+  assert.equal(turnRow.firstElementChild.open, true);
+  assert.equal(ui.document.activeElement, evidence);
+  assert.equal(ui.get('#follow').checked, false);
+  assert.equal(ui.get('#stat-counts').textContent, counts);
+  assert.equal(byClass(turnRow, 'node-title').textContent, 'Reported activity: Later statement');
+  button.focus();
+  const earlier = activityIntent('earlier "<>日本語😀', 'First statement', '2026-11-20T12:00:00.500Z');
+  ui.render([activityStart, earlier, later]);
+  assert.equal(walk(turnRow).find(node => node.tagName === 'button'), button);
+  assert.equal(ui.document.activeElement, button);
+  assert.equal(byClass(turnRow, 'node-title').textContent, 'Reported activity: First statement');
+  button.dispatch('click');
+  const sourceRow = ui.get('#timeline').children[1];
+  assert.equal(ui.get('#event-order').value, 'chronological');
+  assert.equal(sourceRow.firstElementChild.open, true);
+  assert.equal(ui.document.activeElement, sourceRow.firstElementChild.firstElementChild);
+  assert.equal(sourceRow.scrolled, true);
+  assert.equal(walk(sourceRow).find(node => node.tagName === 'pre').textContent, earlier.evidence);
+});
+
+test('activity evidence navigation works from every view and a withdrawn heading moves button focus safely', () => {
+  const recorded = activityIntent('intent', 'Inspect the source');
+  for (const mode of ['grouped', 'chapters', 'chronological']) {
+    const ui = fixture(appSource);
+    ui.render([activityStart, recorded]);
+    ui.get('#event-order').value = mode;
+    ui.get('#event-order').dispatch('change');
+    const button = walk(ui.get('#timeline')).find(node => node.tagName === 'button');
+    assert.ok(button);
+    button.focus(); button.dispatch('click');
+    const [turnRow, sourceRow] = ui.get('#timeline').children;
+    assert.equal(ui.document.activeElement, sourceRow.firstElementChild.firstElementChild);
+    assert.equal(sourceRow.firstElementChild.open, true);
+    turnRow.firstElementChild.open = true;
+    button.focus();
+    const counts = ui.get('#stat-counts').textContent;
+    ui.render([activityStart, recorded], { omitted: 1 });
+    assert.equal(button.parentElement.hidden, true);
+    assert.equal(ui.document.activeElement, turnRow.firstElementChild.firstElementChild);
+    assert.equal(turnRow.firstElementChild.open, true);
+    assert.equal(byClass(turnRow, 'node-title').textContent, 'Model turn 0');
+    assert.equal(ui.get('#stat-counts').textContent, counts);
+    assert.equal(ui.get('#follow').checked, false);
+  }
+});
+
+test('canonical history replacement refreshes intent evidence and metadata in the existing focused node', () => {
+  const ui = fixture(appSource), live = activityIntent('intent', 'Live statement', undefined, { truncated: true });
+  ui.render([activityStart, live]);
+  const row = ui.get('#timeline').children[1], details = row.firstElementChild;
+  details.open = true;
+  assert.equal(byClass(row, 'evidence-truncated').hidden, false);
+  const pre = walk(row).find(node => node.tagName === 'pre');
+  pre.focus();
+  const canonical = activityIntent('intent', 'Canonical history statement', '2026-11-20T12:00:01.500Z');
+  ui.render([activityStart, canonical]);
+  assert.equal(ui.get('#timeline').children[1], row);
+  assert.equal(details.open, true);
+  assert.equal(walk(row).find(node => node.tagName === 'pre'), pre);
+  assert.equal(pre.textContent, canonical.evidence);
+  assert.equal(ui.document.activeElement, pre);
+  assert.equal(byClass(row, 'evidence-truncated').hidden, true);
+  assert.match(byClass(row, 'metadata').textContent, /2026-11-20T12:00:01\.500Z/);
+  assert.equal(byClass(ui.get('#timeline').firstElementChild, 'node-title').textContent, 'Reported activity: Canonical history statement');
+  const otherSource = activityIntent('intent', 'Child statement', '2026-11-20T12:00:01.750Z', { agentId: 'child' });
+  ui.render([activityStart, otherSource]);
+  assert.match(byClass(row, 'metadata').textContent, /Agent child/);
+  assert.equal(pre.textContent, otherSource.evidence);
+  assert.equal(ui.document.activeElement, pre);
+  assert.equal(byClass(ui.get('#timeline').firstElementChild, 'node-title').textContent, 'Model turn 0');
+});
+
 test('tool cards retain expanded evidence and focus through completion, history and start eviction', () => {
   const ui = fixture(appSource);
   ui.render([start]);

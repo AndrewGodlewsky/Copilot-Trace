@@ -159,33 +159,50 @@ export function describeToolGroup(entries) {
 }
 
 // Temporal membership only: keep interleaved agents in their original event order.
-export function turnContext(entries) {
+export function turnContext(entries, { history = 'ready', omitted = 0 } = {}) {
   const active = new Map();
   const context = new Map();
+  const completeHistory = history === 'ready' && omitted === 0;
+  const invalidate = turn => { if (turn) turn.activitySupported = false; };
   for (const entry of entries) {
     const agent = entry.agentId ?? '';
-    if (entry.type === 'abort') { active.clear(); continue; }
+    const knownSource = typeof entry.agentId === 'string' && entry.agentId.length <= 256;
+    if (entry.type === 'abort') { active.forEach(invalidate); active.clear(); continue; }
     if (entry.type === 'user.message') {
-      if (!['steering', 'queued'].includes(entry.delivery)) active.delete(agent);
+      if (!knownSource) active.forEach(invalidate);
+      if (!['steering', 'queued'].includes(entry.delivery)) { invalidate(active.get(agent)); active.delete(agent); }
       continue;
     }
-    if (entry.agentId === null) continue;
+    if (!knownSource) {
+      if (entry.type === 'assistant.turn_start' || entry.type === 'assistant.turn_end') active.forEach(invalidate);
+      continue;
+    }
     if (entry.type === 'assistant.turn_start') {
+      const previous = active.get(agent);
+      invalidate(previous);
       active.delete(agent);
-      if (!entry.turnId) continue;
-      const turn = { id: entry.turnId, agent, model: entry.model, count: 0, ended: false };
+      if (typeof entry.turnId !== 'string' || !entry.turnId || entry.turnId.length > 256) continue;
+      const startTime = timestampMilliseconds(entry.timestamp);
+      const turn = { id: entry.turnId, agent, model: entry.model, count: 0, ended: false, startTime,
+        activitySupported: completeHistory && !previous && Number.isFinite(startTime), activity: null };
       active.set(agent, turn);
       context.set(entry.id, { role: 'start', turn });
     } else if (entry.type === 'assistant.turn_end') {
       const turn = active.get(agent);
       if (turn && entry.turnId === turn.id) {
         turn.ended = true;
+        const endTime = timestampMilliseconds(entry.timestamp);
+        if (!(endTime > (turn.activity?.time ?? turn.startTime))) invalidate(turn);
         context.set(entry.id, { role: 'end', turn });
-      }
+      } else invalidate(turn);
       active.delete(agent);
     } else if (active.has(agent) && !entry.type.startsWith('session.')) {
       const turn = active.get(agent);
       turn.count++;
+      if (!turn.activity && turn.activitySupported && entry.type === 'assistant.intent') {
+        const activity = recordedIntent(entry);
+        if (activity && activity.time > turn.startTime) turn.activity = activity;
+      }
       context.set(entry.id, { role: 'inside', turn });
     }
   }
@@ -245,12 +262,30 @@ export function describeTurn(entry, context) {
   if (context.role === 'inside') return describeStep(entry);
   const { turn, role } = context;
   const source = turn.agent ? `Agent ${turn.agent}` : 'Main chat';
+  const activity = role === 'start' && turn.activitySupported ? turn.activity : null;
   return { kind: 'Model', tone: 'model',
-    title: role === 'start' ? `Model turn ${turn.id}` : `Turn ${turn.id} complete`,
+    title: activity ? shortTitle(`Reported activity: ${activity.text}`)
+      : role === 'start' ? `Model turn ${turn.id}` : `Turn ${turn.id} complete`,
     subtitle: role === 'start'
-      ? `${turn.model ? `${turn.model} · ` : ''}${source} · ${turn.count} ${turn.count === 1 ? 'event' : 'events'} · ${turn.ended ? 'Completed' : 'End not observed'}`
+      ? `${activity ? `Model turn ${turn.id} · ` : ''}${turn.model ? `${turn.model} · ` : ''}${source} · ${turn.count} ${turn.count === 1 ? 'event' : 'events'} · ${turn.ended ? 'Completed' : 'End not observed'}`
       : `${source} · This iteration ended; more turns may follow.`,
+    ...(activity ? { activityId: activity.id } : {}),
   };
+}
+
+function recordedIntent(entry) {
+  if (entry.truncated || typeof entry.id !== 'string' || !entry.id || entry.id.length > 256
+    || typeof entry.evidence !== 'string' || entry.evidence.length > 12000) return null;
+  let event;
+  try { event = JSON.parse(entry.evidence); } catch { return null; }
+  const agent = event?.agentId === undefined ? ''
+    : typeof event.agentId === 'string' && event.agentId.length > 0 && event.agentId.length <= 256 ? event.agentId : null;
+  const data = event?.data;
+  const time = timestampMilliseconds(entry.timestamp);
+  if (event?.id !== entry.id || event?.type !== 'assistant.intent' || agent !== entry.agentId
+    || event.timestamp !== entry.timestamp || !Number.isFinite(time)
+    || !data || typeof data !== 'object' || Array.isArray(data) || typeof data.intent !== 'string' || !data.intent.trim()) return null;
+  return { id: entry.id, text: data.intent, time };
 }
 
 export function describeHookGroup(entries) {
@@ -271,6 +306,10 @@ function actionTitle(entry) {
   let title = '';
   if (entry.toolName === 'view' && typeof args.path === 'string' && args.path.length) title = `View ${args.path}`;
   if (entry.toolName === 'grep' && typeof args.pattern === 'string' && args.pattern.length) title = `Search for pattern “${args.pattern}”`;
+  return shortTitle(title);
+}
+
+function shortTitle(title) {
   if (title.length <= 180) return title;
   let prefix = title.slice(0, 179);
   if (/[\uD800-\uDBFF]$/.test(prefix)) prefix = prefix.slice(0, -1);
