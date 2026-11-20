@@ -1,3 +1,35 @@
+const actorRoles = new Map(Object.entries({
+  'user.message': 'User',
+  'assistant.turn_start': 'Assistant',
+  'assistant.turn_end': 'Assistant',
+  'assistant.intent': 'Assistant',
+  'assistant.message': 'Assistant',
+  'assistant.reasoning': 'Assistant',
+  'tool.execution_start': 'Tool',
+  'tool.execution_complete': 'Tool',
+  'hook.start': 'Configured automation',
+  'hook.end': 'Configured automation',
+  'permission.requested': 'Permission system',
+  'permission.completed': 'Permission system',
+  'skill.invoked': 'Instruction loading',
+  'subagent.started': 'Host',
+  'subagent.completed': 'Host',
+  'subagent.failed': 'Host',
+  'session.compaction_start': 'Host',
+  'session.compaction_complete': 'Host',
+  'session.error': 'Host',
+  'session.info': 'Host',
+  'session.warning': 'Host',
+  'abort': 'Host',
+}));
+
+export function describeActor(entry) {
+  const id = entry.agentId;
+  const source = typeof id !== 'string' || id.length > 256 ? 'Source unavailable'
+    : id === '' ? 'Main chat' : `Agent ${id}`;
+  return { role: actorRoles.get(entry.type) || 'Actor unknown', source };
+}
+
 export function groupSteps(entries) {
   const sections = [];
   for (const entry of entries) {

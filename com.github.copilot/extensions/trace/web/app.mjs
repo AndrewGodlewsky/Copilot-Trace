@@ -1,4 +1,4 @@
-import { describeHookGroup, describeStep, describeTurn, groupSteps, turnContext, summarize } from './presentation.mjs';
+import { describeActor, describeHookGroup, describeStep, describeTurn, groupSteps, turnContext, summarize } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -14,6 +14,8 @@ const connection = document.querySelector('#connection');
 const notice = document.querySelector('#notice');
 const empty = document.querySelector('#empty');
 const follow = document.querySelector('#follow');
+const actorLegend = document.querySelector('#actor-legend');
+actorLegend.addEventListener('toggle', () => { if (actorLegend.open) follow.checked = false; });
 const statValues = new Map();
 for (const [key, label] of [['turns', 'Model turns'], ['hooks', 'Hook calls'], ['tools', 'Tool calls'], ['skills', 'Skill loads']]) {
   const cell = element('div');
@@ -62,7 +64,7 @@ function icon(kind) {
   return wrapper;
 }
 
-function nodeShell(display) {
+function nodeShell(display, actor) {
   const item = element('li', undefined, 'step');
   item.dataset.tone = display.tone;
   item.dataset.kind = display.kind;
@@ -74,7 +76,7 @@ function nodeShell(display) {
   const context = element('span', '', 'turn-context');
   context.hidden = true;
   const copy = element('span', undefined, 'node-copy');
-  copy.append(element('span', display.kind, 'node-kind'), title, subtitle, context);
+  copy.append(element('span', actor.role, 'node-kind'), title, subtitle, context);
   const chevron = element('span', undefined, 'chevron');
   chevron.setAttribute('aria-hidden', 'true');
   summary.append(icon(display.kind), copy, chevron);
@@ -117,13 +119,14 @@ function renderStatistics(snapshot) {
 }
 
 function row(entry) {
-  const node = nodeShell(describeStep(entry));
+  const actor = describeActor(entry);
+  const node = nodeShell(describeStep(entry), actor);
   const time = new Date(entry.timestamp);
   const timeText = Number.isNaN(time.getTime()) ? 'Not recorded' : time.toLocaleString();
   const body = element('div', undefined, 'evidence');
   body.append(element('h3', 'What this step means'), element('p', entry.explanation));
   const metadata = element('dl', undefined, 'metadata');
-  for (const [label, value] of [['Time', timeText], ['Source', entry.agentId === null ? 'Source unavailable' : entry.agentId ? `Agent ${entry.agentId}` : 'Main chat'], ['Event', entry.type]]) {
+  for (const [label, value] of [['Time', timeText], ['Actor', actor.role], ['Source', actor.source], ['Event', entry.type]]) {
     metadata.append(element('dt', label), element('dd', value));
   }
   body.append(metadata);
@@ -173,7 +176,7 @@ function render(snapshot) {
     const existing = prior?.group;
     let group = existing && !nextGroups.includes(existing) ? existing : null;
     if (!group) {
-      group = nodeShell({ kind: 'Hook', title: 'Hooks', subtitle: '', tone: 'host' });
+      group = nodeShell({ kind: 'Hook', title: 'Hooks', subtitle: '', tone: 'host' }, describeActor(section.entries[0]));
       group.item.classList.add('hook-group');
       group.children = element('ol', undefined, 'hook-events');
       group.children.setAttribute('aria-label', 'Individual hook events');

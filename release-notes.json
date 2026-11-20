@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.12",
+    "summary": "Identify assistant, tool, automation and user activity with clear actor labels, keeping source identity separate and explaining the roles in the panel."
+  },
+  {
     "version": "0.1.11",
     "summary": "Show plain-language titles for recognized view and search requests while keeping original evidence and result status available. Release checks can now record an explicitly authorized deferral of manual UI review."
   },

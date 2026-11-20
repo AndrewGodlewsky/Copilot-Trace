@@ -19,9 +19,21 @@
       <p id="connection" role="status" data-state="connecting">Connecting…</p>
       <label><input id="follow" type="checkbox" checked> Follow live</label>
     </div>
-    <div class="legend" aria-label="Event colors">
-      <span class="legend-model">Model</span><span class="legend-tool">Tool</span><span class="legend-skill">Skill</span><span class="legend-host">Harness</span>
-    </div>
+    <details id="actor-legend" class="legend">
+      <summary>Actor labels and sources</summary>
+      <p>Labels describe recorded event roles, not who chose the next action.</p>
+      <dl>
+        <dt>User</dt><dd>Input in the user role. This can include host-supplied input, not only text typed by a person.</dd>
+        <dt>Assistant</dt><dd>Assistant output and model-turn markers. Reported reasoning is not a complete account of decisions.</dd>
+        <dt>Tool</dt><dd>Runtime tool execution, whether for the main chat or a subagent.</dd>
+        <dt>Configured automation</dt><dd>Hooks run at configured workflow points.</dd>
+        <dt>Permission system</dt><dd>Permission requests and recorded decisions. The label does not identify who approved.</dd>
+        <dt>Instruction loading</dt><dd>A skill was invoked or loaded. Its recorded trigger appears in the step.</dd>
+        <dt>Host</dt><dd>Session notices, interruptions and delegated-work lifecycle events.</dd>
+        <dt>Actor unknown</dt><dd>The event type has no supported actor mapping.</dd>
+      </dl>
+      <p>Open a step for its separate Source: Main chat, Agent followed by its recorded ID, or Source unavailable. Source identifies the recorded agent context, not who initiated the event. Event order does not establish cause.</p>
+    </details>
     <p id="notice" class="notice">Reading available chat history…</p>
     <div id="empty" class="empty">
       <h2>Waiting for activity</h2>

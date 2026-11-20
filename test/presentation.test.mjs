@@ -1,7 +1,65 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { describeStep, groupSteps, describeHookGroup } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
+import { describeActor, describeStep, groupSteps, describeHookGroup } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
 import { createTrace } from '../com.github.copilot/extensions/trace/trace.mjs';
+
+test('actor labels follow every supported exact event type independently of category', () => {
+  const roles = [
+    ['User', ['user.message']],
+    ['Assistant', ['assistant.turn_start', 'assistant.turn_end', 'assistant.intent', 'assistant.message', 'assistant.reasoning']],
+    ['Tool', ['tool.execution_start', 'tool.execution_complete']],
+    ['Configured automation', ['hook.start', 'hook.end']],
+    ['Permission system', ['permission.requested', 'permission.completed']],
+    ['Instruction loading', ['skill.invoked']],
+    ['Host', ['subagent.started', 'subagent.completed', 'subagent.failed', 'session.compaction_start',
+      'session.compaction_complete', 'session.error', 'session.info', 'session.warning', 'abort']],
+  ];
+  for (const [role, types] of roles) for (const type of types) {
+    assert.deepEqual(describeActor({ type, category: 'misleading', agentId: '' }),
+      { role, source: 'Main chat' }, type);
+  }
+});
+
+test('unsupported event types cannot inherit an actor from their prefix or category', () => {
+  for (const type of ['future.event', 'hook.future', 'assistant.future', 'tool.future', 'permission.future',
+    'session.future', 'toString', '__proto__', '', null, undefined]) {
+    for (const category of ['chat', 'model', 'turn', 'tool', 'host', 'skill', 'agent']) {
+      assert.deepEqual(describeActor({ type, category }),
+        { role: 'Actor unknown', source: 'Source unavailable' });
+    }
+  }
+});
+
+test('actor roles stay separate from validated source identity and preserve literal IDs', () => {
+  const tool = { type: 'tool.execution_start' };
+  assert.deepEqual(describeActor({ ...tool, agentId: '' }), { role: 'Tool', source: 'Main chat' });
+  assert.deepEqual(describeActor({ ...tool, agentId: 'child <img> 日本語😀' }),
+    { role: 'Tool', source: 'Agent child <img> 日本語😀' });
+  assert.deepEqual(describeActor({ ...tool, agentId: 'a'.repeat(256) }),
+    { role: 'Tool', source: `Agent ${'a'.repeat(256)}` });
+  for (const agentId of [undefined, null, 0, false, {}, [], 'a'.repeat(257)]) {
+    assert.deepEqual(describeActor({ ...tool, agentId }),
+      { role: 'Tool', source: 'Source unavailable' });
+  }
+});
+
+test('projected missing and invalid raw agent IDs retain their distinct source meanings', async t => {
+  const trace = createTrace({
+    on() { return () => {}; },
+    async getEvents() { return [
+      { id: 'main', type: 'user.message', data: { content: 'input', source: 'system' } },
+      { id: 'child', type: 'tool.execution_start', agentId: 'child', data: {} },
+      { id: 'bad', type: 'hook.start', agentId: [], data: {} },
+    ]; },
+  });
+  t.after(() => trace.close());
+  await trace.ready;
+  assert.deepEqual(trace.snapshot().entries.map(entry => describeActor(entry)), [
+    { role: 'User', source: 'Main chat' },
+    { role: 'Tool', source: 'Agent child' },
+    { role: 'Configured automation', source: 'Source unavailable' },
+  ]);
+});
 
 function toolStart(toolName, args) {
   return { id: 'start', type: 'tool.execution_start', category: 'tool', toolName,

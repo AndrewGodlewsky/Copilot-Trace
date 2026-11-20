@@ -32,13 +32,11 @@ p { margin: 8px 0; }
 #connection[data-state='error']::before { background: var(--error); }
 label { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; min-height: 32px; font-size: 0.857rem; }
 input { accent-color: var(--model); margin: 0; }
-.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 14px; color: var(--muted); font-size: 0.786rem; }
-.legend span { display: inline-flex; align-items: center; gap: 5px; }
-.legend span::before { content: ''; width: 7px; height: 7px; border: 1.5px solid var(--node-color); border-radius: 2px; }
-.legend-model { --node-color: var(--model); }
-.legend-tool { --node-color: var(--tool); }
-.legend-skill { --node-color: var(--skill); }
-.legend-host { --node-color: var(--host); }
+.legend { margin-top: 14px; color: var(--muted); font-size: 0.857rem; }
+.legend > summary { cursor: pointer; padding: 4px 0; width: fit-content; }
+.legend dl { margin: 12px 0; }
+.legend dt { font-weight: 600; margin-top: 8px; }
+.legend dd { margin: 0; }
 .notice { font-size: 0.857rem; color: var(--muted); margin: 12px 0 26px; }
 .statistics-body { padding: 16px 20px 24px; }
 .statistics-body p { color: var(--muted); }
@@ -77,6 +75,7 @@ input { accent-color: var(--model); margin: 0; }
 .hook-events { list-style: none; padding: 16px 12px; margin: 0; border-top: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; }
 .hook-events > .step { max-width: 100%; }
 .hook-events .node { background: var(--canvas); }
+.hook-events .node-kind { display: none; }
 .hook-events .step + .step { margin-top: 20px; }
 .hook-events .step + .step::before { height: 19px; top: -20px; }
 .node { border: 1px solid var(--node-color); border-left-width: 3px; border-radius: 9px; background: var(--surface); }
@@ -151,7 +150,7 @@ body:has(.footer-panel[open]) { overflow: hidden; }
 }
 @media (prefers-reduced-motion: reduce) { .chevron { transition: none; } }
 @media (forced-colors: active) {
-  .node, .legend span::before { border-color: CanvasText; }
+  .node { border-color: CanvasText; }
   .step + .step::before { background: CanvasText; }
   .step + .step::after, .chevron { border-color: CanvasText; }
 }
