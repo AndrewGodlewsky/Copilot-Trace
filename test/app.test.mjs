@@ -1007,6 +1007,56 @@ async function handoffFixture(result = 'Exact returned <script>café 🧪</scrip
   await trace.ready; const entries = trace.snapshot().entries; trace.close(); return entries;
 }
 
+async function recoveryFixture(count = 1, result = 'Exact later <script>日🧪</script>') {
+  const raw = Array.from({ length: count + 1 }, (_, index) => [
+    { id: `attempt-${index}-start`, type: 'tool.execution_start', data: { toolCallId: `attempt-${index}`, toolName: 'view',
+      arguments: { path: '<file>日🧪', view_range: [index + 1, index + 10] } } },
+    { id: `attempt-${index}-end`, type: 'tool.execution_complete', data: { toolCallId: `attempt-${index}`, success: index > 0,
+      ...(index ? { result: { content: result } } : { error: { message: 'Original failed <request>' } }) } },
+  ]).flat().map(entry => ({ timestamp: '2026-11-20T12:00:00Z', ...entry }));
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => raw });
+  await trace.ready; const entries = trace.snapshot().entries; trace.close(); return entries;
+}
+
+test('failure disclosure preserves literal arguments and results in a bounded optional suggestion sequence', async () => {
+  const entries = await recoveryFixture(8); const ui = fixture(appSource); ui.get('#event-order').value = 'chronological'; ui.render(entries);
+  const sections = ui.get('#timeline').querySelectorAll('.recovery'); assert.equal(sections.length, 1);
+  const section = sections[0]; assert.equal(section.tagName, 'details'); assert.equal(section.open, false);
+  assert.match(section.textContent, /Original.*reported failure.*Suggestion 1.*reported success/s);
+  assert.match(section.textContent, /5 additional.*not shown/); assert.match(section.textContent, /Provider.*unknown/);
+  assert.match(section.textContent, /not recorded retries.*does not.*prove process, tests or task success/s);
+  assert.match(section.textContent, /Original failed <request>/); assert.match(section.textContent, /Exact later <script>日🧪/);
+  assert.equal(section.querySelectorAll('.recovery-attempt').length, 4);
+  assert.equal(section.querySelectorAll('button').length, 8);
+  assert.equal(walk(section).some(node => ['script', 'a', 'img', 'code'].includes(node.tagName)), false);
+  assert.deepEqual(visibleEvidence(ui), entries.map(entry => entry.evidence));
+  section.open = true; section.dispatch('toggle'); assert.equal(ui.get('#follow').checked, false);
+});
+
+test('related-attempt refresh and view changes preserve reading state, disclosures and guarded original targets', async () => {
+  const entries = await recoveryFixture(1, '日'.repeat(5000)); const ui = fixture(appSource); ui.render(entries.slice(0, -1));
+  const section = byClass(ui.get('#timeline'), 'recovery'); assert.ok(section); reveal(section); section.open = true; section.dispatch('toggle');
+  const attempt = section.querySelectorAll('.recovery-attempt')[1]; attempt.open = true;
+  const body = byClass(attempt, 'recovery-arguments'); body.focus(); body.scrollTop = 71;
+  ui.document.scrollingElement.scrollTop = 247; ui.render(entries);
+  for (const mode of ['chronological', 'chapters', 'lanes', 'grouped']) {
+    ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change');
+    assert.equal(byClass(ui.get('#timeline'), 'recovery'), section); assert.equal(section.open, true); assert.equal(attempt.open, true);
+    assert.equal(ui.document.activeElement, body); assert.equal(body.scrollTop, 71); assert.equal(ui.document.scrollingElement.scrollTop, 247);
+    assert.equal(ui.get('#follow').checked, false);
+  }
+  const link = attempt.querySelectorAll('button').find(button => button.textContent.startsWith('Result / error'));
+  filterMode(ui, 'automation'); link.dispatch('click'); assert.equal(ui.get('#activity-filter').value, 'everything');
+  assert.equal(ui.get('#event-order').value, 'chronological'); assert.equal(ui.get('#follow').checked, false);
+  assert.deepEqual(visibleEvidence(ui), entries.map(entry => entry.evidence));
+  ui.render(await recoveryFixture(1, 'Changed same-ID result')); ui.document.scrollingElement.scrollTop = 333; ui.get('#follow').checked = true;
+  link.dispatch('click'); assert.match(ui.get('#navigation-status').textContent, /no longer retained/);
+  assert.equal(ui.document.scrollingElement.scrollTop, 333); assert.equal(ui.get('#follow').checked, true);
+  ui.render(entries.slice(1), { omitted: 1 }); assert.match(section.textContent, /Start not retained/);
+  assert.equal(section.querySelectorAll('.recovery-attempt').length, 1);
+  ui.render(entries.slice(2), { omitted: 2 }); assert.equal(section.isConnected, false); assert.equal(ui.document.activeElement.isConnected, true);
+});
+
 test('delegation disclosure connects literal handoff, child activity and separate parent result once per child', async () => {
   const entries = await handoffFixture(); const ui = fixture(appSource); ui.get('#event-order').value = 'chronological'; ui.render(entries);
   const sections = ui.get('#timeline').querySelectorAll('.delegation');

@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.34",
+    "summary": "Inspect failed operations beside clearly labeled related-attempt suggestions. Original outcomes, arguments and evidence remain separate."
+  },
+  {
     "version": "0.1.33",
     "summary": "Inspect recorded subagent handoffs, child activity and returned results. Missing links and separate-context limits stay explicit."
   },

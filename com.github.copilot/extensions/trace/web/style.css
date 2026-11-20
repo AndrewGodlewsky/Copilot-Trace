@@ -177,6 +177,10 @@ input { accent-color: var(--model); margin: 0; }
 .delegation { overflow-wrap: anywhere; }
 .delegation button { max-width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
 .delegation pre { max-height: min(22rem, 45vh); overscroll-behavior: contain; }
+.recovery { overflow-wrap: anywhere; }
+.recovery button { max-width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.recovery pre { max-height: min(18rem, 40vh); overscroll-behavior: contain; }
+.recovery-attempt { margin-block: 10px; border-left: 2px solid var(--line); padding-left: 10px; }
 .metadata { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 14px; font-size: 0.786rem; margin: 16px 0; }
 .metadata dt { color: var(--muted); }
 .metadata dd { margin: 0; overflow-wrap: anywhere; }

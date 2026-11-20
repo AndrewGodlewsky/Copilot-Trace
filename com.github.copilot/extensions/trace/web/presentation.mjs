@@ -910,6 +910,85 @@ export function toolOperations(entries) {
   return result;
 }
 
+function relatedTarget(data) {
+  if (!data || !data.arguments || typeof data.arguments !== 'object' || Array.isArray(data.arguments)) return null;
+  if (mcpFields.some(field => Object.hasOwn(data, field))) {
+    if (!validMcpMetadata(data) || !identityText(data.mcpConfigServerName)) return null;
+    return { provider: `Configured MCP server: ${data.mcpConfigServerName} · Tool: ${data.mcpToolName}`,
+      key: JSON.stringify([data.toolName, ...mcpFields.map(field => data[field] ?? null), data.arguments]),
+      rule: 'Same exact source, recorded tool name and MCP provider metadata, including configured server key and server tool name; identical serialized arguments.' };
+  }
+  if (!requestedOperation(data) || ['origin', 'overridesBuiltInTool'].some(field => Object.hasOwn(data, field))) return null;
+  const fields = { view: ['path'], create: ['path'], edit: ['path'], web_fetch: ['url'],
+    grep: ['pattern', 'paths', 'glob', 'type'], glob: ['pattern', 'paths'], powershell: ['command', 'shellId'] }[data.toolName];
+  if (!fields) return null;
+  return { provider: 'Provider / origin unknown; matching names do not establish the same implementation.',
+    key: JSON.stringify([data.toolName, 'provider-unrecorded', ...fields.map(field => data.arguments[field] ?? null)]),
+    rule: `Same exact source and recorded tool name; no MCP/provider markers on either call; identical literal ${fields.join(', ')} fields (including absence). Other supported options may differ. Provider and implementation equality remain unknown.` };
+}
+
+// Suggestions compare retained requests; the SDK does not expose a generic tool retry-of link.
+export function recoveryAttempts(entries, options = {}, observedStages = actionStages(entries, options)) {
+  const positions = new Map(entries.map((entry, index) => [entry, index])), counts = new Map();
+  for (const entry of entries) counts.set(entry.id, (counts.get(entry.id) || 0) + 1);
+  const calls = toolBuckets(entries).map(({ boundaries, start }) => {
+    const starts = boundaries.filter(entry => entry.type === 'tool.execution_start');
+    const ends = boundaries.filter(entry => entry.type === 'tool.execution_complete'), end = ends[0];
+    const source = boundaries[0].agentId, identity = toolIdentity(boundaries[0]);
+    const unique = identity !== null && (source === '' || identityText(source)) && identityText(boundaries[0].toolCallId)
+      && starts.length <= 1 && ends.length <= 1
+      && boundaries.every(entry => counts.get(entry.id) === 1 && identityText(entry.id))
+      && !(start && end && positions.get(end) < positions.get(start));
+    const startData = start && explanationData(start), endData = end && explanationData(end);
+    const data = unique && startData?.toolCallId === start?.toolCallId && identityText(startData?.toolName, 180)
+      && startData.toolName === start.toolName && (!endData || (endData.toolCallId === end.toolCallId
+        && (endData.toolName === undefined || endData.toolName === startData.toolName))) ? startData : null;
+    const validResult = unique && endData && endData.toolCallId === end.toolCallId;
+    const outcome = validResult && typeof endData.success === 'boolean' && endData.success === end.success
+      ? endData.success ? 'success' : 'failure' : 'unknown';
+    const stages = unique ? observedStages.get(boundaries[0].id) : null;
+    const decisions = (stages?.stages || []).filter(stage => stage.type === 'permission.completed'
+      && counts.get(stage.id) === 1);
+    const adverse = decisions.filter(stage => ['denied', 'cancelled'].includes(stage.outcome));
+    const linkedDecisions = decisions.slice(0, 3);
+    const links = entries.filter(entry => boundaries.includes(entry) || linkedDecisions.some(stage => stage.id === entry.id))
+      .filter(entry => counts.get(entry.id) === 1 && identityText(entry.id))
+      .map(entry => ({ entry, label: entry.type === 'tool.execution_start' ? 'Arguments'
+        : entry.type === 'tool.execution_complete' ? 'Result / error' : 'Permission decision' }));
+    const notes = [];
+    if (decisions.length > linkedDecisions.length) notes.push(`${decisions.length - linkedDecisions.length} additional permission decisions are not linked here (limit: 3); inspect their original timeline rows.`);
+    if (!unique) notes.push('Conflicting, duplicated or unusable source/call identities; no related attempts are suggested.');
+    if (!start) notes.push('Start not retained; arguments and matching target are unavailable.');
+    else if (!data) notes.push('Complete matching arguments are unavailable or clipped; no target is inferred.');
+    if (!end) notes.push('Result not retained; outcome unknown, not necessarily still running.');
+    else if (!validResult) notes.push('Result evidence is incomplete, clipped or conflicting; outcome and result body are unknown.');
+    const target = data && relatedTarget(data);
+    if (!target) notes.push('Matching rule unavailable for this request or provider metadata; no suggestions are made.');
+    const result = validResult ? Object.fromEntries(['result', 'error'].filter(field => Object.hasOwn(endData, field))
+      .map(field => [field, endData[field]])) : null;
+    const anchor = end || entries.find(entry => entry.id === adverse[0]?.id) || start || boundaries[0];
+    return { id: (start || boundaries[0]).id, identity: identity ?? `unlinked:${boundaries[0].id}`, anchorId: anchor.id, anchorPosition: positions.get(anchor),
+      startPosition: positions.get(start), source, toolName: data?.toolName || start?.toolName || 'Unknown tool',
+      provider: target?.provider || 'Provider identity unavailable for matching.',
+      arguments: data && Object.hasOwn(data, 'arguments') ? JSON.stringify(data.arguments, null, 2) : null,
+      result: result && Object.keys(result).length ? JSON.stringify(result, null, 2) : null,
+      outcome, permission: (stages?.stages || []).some(stage => stage.type === 'permission.completed' && counts.get(stage.id) !== 1)
+        ? 'Permission unknown' : stages?.permission || 'Permission unknown', notes, links, target,
+      failed: outcome === 'failure' || adverse.length > 0 };
+  });
+  return calls.filter(call => call.failed).map(original => {
+    const matches = original.target ? calls.filter(call => call !== original && call.target
+      && call.source === original.source && call.target.key === original.target.key
+      && call.startPosition > original.anchorPosition) : [];
+    return { id: original.identity, anchorId: original.anchorId, original, candidates: matches.slice(0, 3), omittedCandidates: Math.max(0, matches.length - 3),
+      rule: original.target?.rule || 'No supported matching rule for this retained request.',
+      notes: ['Related-attempt suggestions are not recorded retries or proof of recovery. No generic tool retry-of relationship is available in the inspected SDK.',
+        'Only retained data is compared; missing attempts and results cannot be reconstructed. A later reported success does not change the earlier failure or prove process, tests or task success.',
+        ...(options.history && options.history !== 'ready' ? ['Earlier history is unavailable or still loading.'] : []),
+        ...(options.omitted ? ['Older events were omitted from the retained window.'] : [])] };
+  });
+}
+
 const retrievalNames = new Set(['view', 'grep', 'glob', 'web_fetch']);
 
 function requestedExtent(data) {

@@ -1,4 +1,4 @@
-import { describeActor, explainStep, skillInstructions, compactionAttempts, delegationHandoffs, guidanceComparison, retrievalLedger, toolExtents, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, observerScope, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
+import { describeActor, explainStep, skillInstructions, compactionAttempts, delegationHandoffs, recoveryAttempts, guidanceComparison, retrievalLedger, toolExtents, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, observerScope, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -40,6 +40,7 @@ for (const [key, label] of [['turns', 'Model turns'], ['hooks', 'Hook pipelines'
 }
 const nodes = new Map();
 const delegationViews = new Map();
+const recoveryViews = new Map();
 let groups = [];
 let chapters = [];
 let lanes = [];
@@ -602,6 +603,67 @@ function renderDelegation(node, handoff) {
   for (const [id, button] of view.buttons) if (!ids.has(id)) { button.remove(); view.buttons.delete(id); }
 }
 
+function renderRecovery(node, recovery) {
+  let view = recoveryViews.get(recovery.id);
+  if (!view) {
+    const details = element('details', undefined, 'recovery'), rule = element('p'), limits = element('p'), count = element('p');
+    const list = element('div');
+    details.append(element('summary', 'Failure and related-attempt suggestions'), rule, limits, count, list);
+    details.addEventListener('toggle', () => { if (details.open) follow.checked = false; });
+    view = { details, rule, limits, count, list, attempts: new Map() }; recoveryViews.set(recovery.id, view);
+  }
+  if (view.details.parentElement !== node.body) node.body.insertBefore(view.details, node.recordedEvidence);
+  for (const [target, text] of [[view.rule, `Matching rule: ${recovery.rule}`], [view.limits, recovery.notes.join(' ')],
+    [view.count, recovery.candidates.length ? `Showing ${recovery.candidates.length} later related-attempt suggestion${recovery.candidates.length === 1 ? '' : 's'}.`
+      + (recovery.omittedCandidates ? ` ${recovery.omittedCandidates} additional matching retained calls are not shown (limit: 3); their original timeline rows remain available.` : '')
+      : 'No later retained call matches this rule. This does not prove that no retry or recovery occurred.']]) {
+    if (target.textContent !== text) target.textContent = text;
+  }
+  const ids = new Set(); let previous;
+  for (const [index, attempt] of [recovery.original, ...recovery.candidates].entries()) {
+    const id = index === 0 ? 'original' : attempt.id; ids.add(id);
+    let row = view.attempts.get(id);
+    if (!row) {
+      const details = element('details', undefined, 'recovery-attempt'), summary = element('summary'), identity = element('p');
+      const status = element('p'), notes = element('p'), args = element('pre', '', 'recovery-arguments'), result = element('pre', '', 'recovery-result');
+      for (const [body, label] of [[args, 'Retained argument values as JSON'], [result, 'Retained result and error values as JSON']]) {
+        body.tabIndex = 0; body.setAttribute('aria-label', label);
+      }
+      const links = element('div', undefined, 'boundary-links'); links.setAttribute('role', 'group');
+      links.setAttribute('aria-label', 'Original attempt evidence in recorded event order');
+      details.append(summary, identity, status, notes, element('h4', 'Retained arguments (JSON)'), args,
+        element('h4', 'Retained result / error (JSON)'), result, links);
+      details.addEventListener('toggle', () => { if (details.open) follow.checked = false; });
+      row = { details, summary, identity, status, notes, args, result, links, buttons: new Map() }; view.attempts.set(id, row);
+    }
+    const outcome = attempt.outcome === 'unknown' ? 'Tool outcome unknown' : `Tool result: reported ${attempt.outcome}`;
+    for (const [target, text] of [[row.summary, `${index === 0 ? 'Original operation' : `Suggestion ${index}`} · ${attempt.toolName} · ${outcome}`],
+      [row.identity, `${describeActor({ agentId: attempt.source }).source} · ${attempt.provider}`],
+      [row.status, `${outcome}. ${attempt.permission}.`], [row.notes, attempt.notes.join(' ')],
+      [row.args, attempt.arguments ?? 'Arguments unavailable.'], [row.result, attempt.result ?? 'Result / error body unavailable.']]) {
+      if (target.textContent !== text) target.textContent = text;
+    }
+    const linkIds = new Set(); let previousLink;
+    for (const { entry, label } of attempt.links) {
+      if (!retainedExample(lastSnapshot.entries, entry)) continue;
+      linkIds.add(entry.id); let button = row.buttons.get(entry.id);
+      if (button && !retainedExample([entry], button.entry)) { button.remove(); button = null; }
+      if (!button) {
+        button = element('button'); button.type = 'button'; button.entry = Object.freeze({ ...entry });
+        button.addEventListener('click', () => showBoundary(entry.id,
+          'Showing the related-attempt disclosure’s original retained evidence. Follow live is paused.', button.entry));
+        row.buttons.set(entry.id, button);
+      }
+      const labelText = `${label} · ${entry.type} · ${entry.timestamp || 'Time unavailable'}`;
+      if (button.textContent !== labelText) button.textContent = labelText;
+      previousLink = place(row.links, button, previousLink);
+    }
+    for (const [linkId, button] of row.buttons) if (!linkIds.has(linkId)) { button.remove(); row.buttons.delete(linkId); }
+    previous = place(view.list, row.details, previous);
+  }
+  for (const [id, row] of view.attempts) if (!ids.has(id)) { row.details.remove(); view.attempts.delete(id); }
+}
+
 function renderHookInvocation(owner, call) {
   if (!owner.hook) {
     owner.hook = element('details', undefined, 'hook-invocation');
@@ -968,6 +1030,10 @@ function render(snapshot) {
   const chronological = eventOrder.value !== 'grouped';
   const contexts = turnContext(snapshot.entries, snapshot);
   const stages = actionStages(snapshot.entries, snapshot);
+  const recoveries = recoveryAttempts(snapshot.entries, snapshot, stages);
+  const recoveryByEvent = new Map(recoveries.map(recovery => [recovery.anchorId, recovery]));
+  const recoveryIds = new Set(recoveries.map(recovery => recovery.id));
+  for (const [id, view] of recoveryViews) if (!recoveryIds.has(id)) { view.details.remove(); recoveryViews.delete(id); }
   const provenance = toolProvenance(snapshot.entries);
   const operations = toolOperations(snapshot.entries);
   const extents = toolExtents(snapshot.entries, snapshot);
@@ -995,6 +1061,7 @@ function render(snapshot) {
     node.entry = entry;
     renderExtent(node, extents.get(entry.id));
     renderCompaction(node, compactionByEvent.get(entry.id));
+    if (recoveryByEvent.has(entry.id)) renderRecovery(node, recoveryByEvent.get(entry.id));
     if (delegationByEvent.has(entry.id)) renderDelegation(node, delegationByEvent.get(entry.id));
     if (node.glossary) {
       const concept = conceptForEntry(entry);
