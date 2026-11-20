@@ -1,4 +1,4 @@
-import { describeActor, describeHookGroup, describeStep, describeTurn, groupSteps, turnContext, summarize } from './presentation.mjs';
+import { describeActor, describeHookGroup, describeToolGroup, describeStep, describeTurn, groupSteps, turnContext, summarize } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -14,6 +14,7 @@ const connection = document.querySelector('#connection');
 const notice = document.querySelector('#notice');
 const empty = document.querySelector('#empty');
 const follow = document.querySelector('#follow');
+const eventOrder = document.querySelector('#event-order');
 const actorLegend = document.querySelector('#actor-legend');
 actorLegend.addEventListener('toggle', () => { if (actorLegend.open) follow.checked = false; });
 const statValues = new Map();
@@ -26,9 +27,13 @@ for (const [key, label] of [['turns', 'Model turns'], ['hooks', 'Hook calls'], [
   statValues.set(key, value);
 }
 const nodes = new Map();
-let hookGroups = [];
+let groups = [];
 let etag;
 let lastSnapshot;
+eventOrder.addEventListener('change', () => {
+  follow.checked = false;
+  if (lastSnapshot) render(lastSnapshot);
+});
 
 function setConnection(message, state) {
   if (connection.textContent !== message) connection.textContent = message;
@@ -86,7 +91,7 @@ function nodeShell(display, actor) {
     if (details.open) follow.checked = false;
   });
   item.append(details);
-  return { item, details, title, subtitle, context };
+  return { item, details, summary, title, subtitle, context };
 }
 
 function applyContext(node, context, entry) {
@@ -104,7 +109,7 @@ function renderStatistics(snapshot) {
     : `Retained: ${stats.turns} ${stats.turns === 1 ? 'turn' : 'turns'} · ${stats.tools} ${stats.tools === 1 ? 'tool call' : 'tool calls'}`;
   const peek = document.querySelector('#statistics-peek');
   if (peek.textContent !== preview) peek.textContent = preview;
-  document.querySelector('#stat-scope').textContent = `${snapshot.entries.length} retained events only; not whole-chat totals. Paired starts and ends count once by recorded ID, including calls with only one boundary available.${snapshot.history !== 'ready' ? ' History is incomplete or unavailable.' : ''}${snapshot.omitted ? ' Older events have been omitted.' : ''}`;
+  document.querySelector('#stat-scope').textContent = `${snapshot.entries.length} retained events only; not whole-chat totals. Tool and hook calls count once per exact source and call ID, including partial calls. Tool cards with conflicting boundaries count once; their outcome is unknown.${snapshot.history !== 'ready' ? ' History is incomplete or unavailable.' : ''}${snapshot.omitted ? ' Older events have been omitted.' : ''}`;
   const unlinked = document.querySelector('#stat-unlinked');
   unlinked.hidden = !stats.unlinked;
   unlinked.textContent = `${stats.unlinked} turn, hook or tool events lack usable IDs and are excluded from those totals.`;
@@ -121,12 +126,11 @@ function renderStatistics(snapshot) {
 function row(entry) {
   const actor = describeActor(entry);
   const node = nodeShell(describeStep(entry), actor);
-  const time = new Date(entry.timestamp);
-  const timeText = Number.isNaN(time.getTime()) ? 'Not recorded' : time.toLocaleString();
+  const timeText = typeof entry.timestamp === 'string' && entry.timestamp ? entry.timestamp : 'Not recorded';
   const body = element('div', undefined, 'evidence');
   body.append(element('h3', 'What this step means'), element('p', entry.explanation));
   const metadata = element('dl', undefined, 'metadata');
-  for (const [label, value] of [['Time', timeText], ['Actor', actor.role], ['Source', actor.source], ['Event', entry.type]]) {
+  for (const [label, value] of [['Recorded time', timeText], ['Actor', actor.role], ['Source', actor.source], ['Event', entry.type]]) {
     metadata.append(element('dt', label), element('dd', value));
   }
   body.append(metadata);
@@ -146,11 +150,25 @@ function place(parent, item, previous) {
   return item;
 }
 
+function showBoundary(id) {
+  follow.checked = false;
+  eventOrder.value = 'chronological';
+  render(lastSnapshot);
+  const node = nodes.get(id);
+  if (!node) return;
+  node.details.open = true;
+  node.summary.focus({ preventScroll: true });
+  node.item.scrollIntoView({ block: 'center' });
+}
+
 function render(snapshot) {
   const focused = document.activeElement;
+  const focusedId = [...nodes].find(([, node]) => node.item.contains(focused))?.[0];
+  const focusedGroup = groups.find(group => group.item.contains(focused) || group.ids.has(focusedId));
+  const chronological = eventOrder.value === 'chronological';
   const contexts = turnContext(snapshot.entries);
   renderStatistics(snapshot);
-  const oldGroups = hookGroups.map(group => ({ group, ids: group.ids, open: group.details.open }));
+  const oldGroups = groups.map(group => ({ group, ids: group.ids, open: group.details.open }));
   const retained = new Set(snapshot.entries.map(entry => entry.id));
   for (const [id, node] of nodes) {
     if (!retained.has(id)) { node.item.remove(); nodes.delete(id); }
@@ -164,49 +182,83 @@ function render(snapshot) {
     if (node.subtitle.textContent !== display.subtitle) node.subtitle.textContent = display.subtitle;
     applyContext(node, context, entry);
   }
-  let previous;
   const nextGroups = [];
-  for (const section of groupSteps(snapshot.entries)) {
-    if (section.kind === 'event') {
-      previous = place(timeline, nodes.get(section.entries[0].id).item, previous);
-      continue;
-    }
+  const sections = groupSteps(snapshot.entries);
+  for (const section of sections) {
+    if (section.kind === 'event') continue;
     // Reuse overlapping groups when history arrives or the oldest event ages out.
-    const prior = oldGroups.find(old => section.entries.some(entry => old.ids.has(entry.id)));
+    const prior = oldGroups.find(old => old.group.kind === section.kind
+      && (old.group.id === section.id || section.entries.some(entry => old.ids.has(entry.id))));
     const existing = prior?.group;
     let group = existing && !nextGroups.includes(existing) ? existing : null;
+    const tool = section.kind === 'tool';
+    const display = tool ? describeToolGroup(section.entries) : describeHookGroup(section.entries);
     if (!group) {
-      group = nodeShell({ kind: 'Hook', title: 'Hooks', subtitle: '', tone: 'host' }, describeActor(section.entries[0]));
-      group.item.classList.add('hook-group');
-      group.children = element('ol', undefined, 'hook-events');
-      group.children.setAttribute('aria-label', 'Individual hook events');
+      group = nodeShell(display, describeActor(section.entries[0]));
+      group.kind = section.kind;
+      group.item.classList.add(tool ? 'tool-group' : 'hook-group');
+      if (tool) {
+        group.links = element('div', undefined, 'boundary-links');
+        group.links.setAttribute('role', 'group');
+        group.links.setAttribute('aria-label', 'Tool boundaries in recorded event order');
+        group.buttons = new Map();
+        group.details.append(element('p', 'Positioned at the first retained boundary. View each boundary in event order to inspect intervening activity.', 'group-note'), group.links);
+      }
+      group.children = element('ol', undefined, tool ? 'tool-events' : 'hook-events');
+      group.children.setAttribute('aria-label', tool ? 'Original tool boundary events' : 'Individual hook events');
       group.details.append(group.children);
       group.details.open = Boolean(prior?.open || section.entries.some(entry => nodes.get(entry.id).details.open));
     }
-    const display = describeHookGroup(section.entries);
+    group.id = section.id;
+    if (group.title.textContent !== display.title) group.title.textContent = display.title;
     if (group.subtitle.textContent !== display.subtitle) group.subtitle.textContent = display.subtitle;
     group.item.dataset.tone = display.tone;
-    applyContext(group, contexts.get(section.entries[0].id));
+    applyContext(group, tool ? null : contexts.get(section.entries[0].id));
     group.ids = new Set(section.entries.map(entry => entry.id));
+    if (tool) {
+      let previousButton;
+      for (const entry of section.entries) {
+        let button = group.buttons.get(entry.id);
+        if (!button) {
+          button = element('button', entry.type === 'tool.execution_start' ? 'Start in event order' : 'Result in event order');
+          button.type = 'button';
+          button.addEventListener('click', () => showBoundary(entry.id));
+          group.buttons.set(entry.id, button);
+        }
+        previousButton = place(group.links, button, previousButton);
+      }
+      for (const [id, button] of group.buttons) if (!group.ids.has(id)) { button.remove(); group.buttons.delete(id); }
+    }
     let child;
-    for (const entry of section.entries) {
+    for (const entry of chronological ? [] : section.entries) {
       const node = nodes.get(entry.id);
-      applyContext(node, null);
+      if (!tool) applyContext(node, null);
       child = place(group.children, node.item, child);
     }
-    const wanted = new Set(section.entries.map(entry => nodes.get(entry.id).item));
-    for (const element of [...group.children.children]) if (!wanted.has(element)) element.remove();
-    previous = place(timeline, group.item, previous);
+    section.group = group;
     nextGroups.push(group);
   }
-  for (const group of hookGroups) if (!nextGroups.includes(group)) group.item.remove();
-  hookGroups = nextGroups;
+  let previous;
+  for (const section of chronological ? groupSteps(snapshot.entries, true) : sections) {
+    previous = place(timeline, section.group?.item || nodes.get(section.entries[0].id).item, previous);
+  }
+  for (const group of groups) if (chronological || !nextGroups.includes(group)) group.item.remove();
+  for (const group of nextGroups) {
+    const wanted = new Set([...group.ids].map(id => nodes.get(id).item));
+    for (const item of [...group.children.children]) if (!wanted.has(item)) item.remove();
+  }
+  groups = nextGroups;
   // Moving an existing disclosure into a group must not strand keyboard focus.
-  if (focused?.isConnected && document.activeElement !== focused) {
+  let focusTarget = focused?.isConnected ? focused : null;
+  if (!focusTarget && focusedGroup) {
+    const group = groups.find(group => group === focusedGroup);
+    focusTarget = chronological ? nodes.get(group?.ids.values().next().value)?.summary : group?.summary;
+  }
+  if (focusTarget && document.activeElement !== focusTarget) {
     follow.checked = false;
-    let ancestor = focused.parentElement?.closest('details');
+    let ancestor = focusTarget.parentElement?.closest('details');
     while (ancestor) { ancestor.open = true; ancestor = ancestor.parentElement?.closest('details'); }
-    focused.focus({ preventScroll: true });
+    focusTarget.focus({ preventScroll: true });
   }
   empty.hidden = snapshot.entries.length > 0;
   const messages = {
@@ -217,7 +269,7 @@ function render(snapshot) {
   };
   notice.textContent = messages[snapshot.history] ?? 'History status unavailable.';
   if (snapshot.omitted) notice.textContent += ' Older events were omitted; showing the most recent supported events.';
-  setConnection(snapshot.history === 'unsupported' ? 'Events unavailable' : `Connected · ${snapshot.entries.length} steps`,
+  setConnection(snapshot.history === 'unsupported' ? 'Events unavailable' : `Connected · ${snapshot.entries.length} events`,
     snapshot.history === 'unsupported' ? 'error' : 'connected');
 }
 
@@ -248,7 +300,7 @@ const poller = createPoller({
       etag = response.headers.get('etag');
       render(lastSnapshot);
     } else if (response.status === 304 && lastSnapshot) {
-      setConnection(lastSnapshot.history === 'unsupported' ? 'Events unavailable' : `Connected · ${lastSnapshot.entries.length} steps`,
+      setConnection(lastSnapshot.history === 'unsupported' ? 'Events unavailable' : `Connected · ${lastSnapshot.entries.length} events`,
         lastSnapshot.history === 'unsupported' ? 'error' : 'connected');
     } else {
       if (feedState !== 'disconnected') diagnostics.record('disconnected', { status: response.status });

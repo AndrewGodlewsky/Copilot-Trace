@@ -37,6 +37,10 @@ input { accent-color: var(--model); margin: 0; }
 .legend dl { margin: 12px 0; }
 .legend dt { font-weight: 600; margin-top: 8px; }
 .legend dd { margin: 0; }
+.order-control { margin-top: 12px; color: var(--muted); font-size: .857rem; }
+.order-control label { flex-wrap: wrap; }
+.order-control select { max-width: 100%; }
+.order-control p { margin: 6px 0; }
 .notice { font-size: 0.857rem; color: var(--muted); margin: 12px 0 26px; }
 .statistics-body { padding: 16px 20px 24px; }
 .statistics-body p { color: var(--muted); }
@@ -72,12 +76,16 @@ input { accent-color: var(--model); margin: 0; }
 .step[data-turn='end'] > .node > summary .node-title { font-size: .857rem; font-weight: 500; }
 .step[data-turn='end'] > .node > summary .node-subtitle { font-size: .786rem; }
 .turn-context { display: block; color: var(--model); font-size: .714rem; margin-top: 5px; }
-.hook-events { list-style: none; padding: 16px 12px; margin: 0; border-top: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; }
-.hook-events > .step { max-width: 100%; }
-.hook-events .node { background: var(--canvas); }
-.hook-events .node-kind { display: none; }
-.hook-events .step + .step { margin-top: 20px; }
-.hook-events .step + .step::before { height: 19px; top: -20px; }
+.hook-events, .tool-events { list-style: none; padding: 16px 12px; margin: 0; border-top: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; }
+.hook-events > .step, .tool-events > .step { max-width: 100%; }
+.hook-events .node, .tool-events .node { background: var(--canvas); }
+.hook-events .node-kind, .tool-events .node-kind { display: none; }
+.hook-events .step + .step, .tool-events .step + .step { margin-top: 20px; }
+.hook-events .step + .step::before, .tool-events .step + .step::before { height: 19px; top: -20px; }
+.tool-group > .node > summary .node-subtitle { display: block; overflow: visible; }
+.group-note { margin: 0; padding: 12px 14px 6px; color: var(--muted); font-size: .857rem; }
+.boundary-links { display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 14px 12px; }
+.boundary-links button { font-size: .857rem; }
 .node { border: 1px solid var(--node-color); border-left-width: 3px; border-radius: 9px; background: var(--surface); }
 .node > summary { display: flex; align-items: center; gap: 12px; padding: 12px 14px; cursor: pointer; list-style: none; border-radius: 8px; }
 .node > summary::-webkit-details-marker { display: none; }

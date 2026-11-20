@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.13",
+    "summary": "Follow each tool call from its recorded start to its result in one expandable card, with honest partial states, timing and access to chronological events."
+  },
+  {
     "version": "0.1.12",
     "summary": "Identify assistant, tool, automation and user activity with clear actor labels, keeping source identity separate and explaining the roles in the panel."
   },

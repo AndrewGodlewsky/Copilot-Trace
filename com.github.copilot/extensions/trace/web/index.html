@@ -19,6 +19,15 @@
       <p id="connection" role="status" data-state="connecting">Connecting…</p>
       <label><input id="follow" type="checkbox" checked> Follow live</label>
     </div>
+    <div class="order-control">
+      <label for="event-order">View
+        <select id="event-order" aria-describedby="order-help">
+          <option value="grouped">Grouped tool calls</option>
+          <option value="chronological">Chronological events</option>
+        </select>
+      </label>
+      <p id="order-help">Tool cards sit at their first retained boundary, with later results inside. Use Chronological events or a card’s boundary buttons to see intervening activity. Event order uses recorded timestamps; ties keep history/arrival order, and missing or unparseable times appear last.</p>
+    </div>
     <details id="actor-legend" class="legend">
       <summary>Actor labels and sources</summary>
       <p>Labels describe recorded event roles, not who chose the next action.</p>
@@ -41,10 +50,11 @@
     </div>
     <ol id="timeline" aria-label="Recorded chat activity"></ol>
     <footer>
-      <p>Arrows show event order, not cause.</p>
+      <p>Arrows follow the selected view’s ordering, not cause. Grouped cards can contain later events.</p>
       <details class="about">
         <summary>About this view</summary>
-        <p>A model turn is one iteration of the agent loop, not an entire user request. Its heading and closing marker share a recorded turn ID. Indented events were recorded between those markers for the same agent; this shows timing, not why an action happened. Tools can also run outside these markers. Missing boundaries are left ungrouped.</p>
+        <p>A model turn is one iteration of the agent loop, not an entire user request. Its heading and closing marker share a recorded turn ID. Indented events were recorded between those markers for the same agent; this shows timing, not why an action happened. Tool cards can span turns; their individual boundary events show their own turn context.</p>
+        <p>Tool boundaries share a card only with the exact same usable source-agent and call IDs. Missing boundaries remain partial: a missing completion does not mean a tool is still running. Conflicting boundaries keep their evidence but have no combined outcome. Elapsed time requires one start, one result and valid timestamps in that order; it measures the recorded interval, not model thinking or billable time.</p>
         <p>Recorded evidence only, with up to 300 recent supported events. Long evidence is shortened. Some host activity and earlier streaming updates may be unavailable. Trace keeps its copy of chat content in memory and makes no model calls.</p>
       </details>
       <dialog id="statistics-panel" class="footer-panel statistics-drawer" aria-labelledby="statistics-title">

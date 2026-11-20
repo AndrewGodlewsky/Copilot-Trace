@@ -30,18 +30,68 @@ export function describeActor(entry) {
   return { role: actorRoles.get(entry.type) || 'Actor unknown', source };
 }
 
-export function groupSteps(entries) {
+function toolIdentity(entry) {
+  return typeof entry.agentId === 'string' && entry.agentId.length <= 256
+    && typeof entry.toolCallId === 'string' && entry.toolCallId.length > 0 && entry.toolCallId.length <= 256
+    ? JSON.stringify([entry.agentId, entry.toolCallId]) : null;
+}
+
+export function groupSteps(entries, chronological = false) {
+  if (chronological) return entries.map(entry => ({ id: `event:${entry.id}`, kind: 'event', entries: [entry] }));
   const sections = [];
-  for (const entry of entries) {
+  const tools = new Map();
+  for (const [index, entry] of entries.entries()) {
+    if (entry.type === 'tool.execution_start' || entry.type === 'tool.execution_complete') {
+      const key = toolIdentity(entry);
+      if (key !== null && tools.has(key)) tools.get(key).entries.push(entry);
+      else {
+        const section = { id: key === null ? `unlinked-tool:${entry.id}` : `tool:${key}`, kind: 'tool', entries: [entry] };
+        sections.push(section);
+        if (key !== null) tools.set(key, section);
+      }
+      continue;
+    }
     const hook = entry.type === 'hook.start' || entry.type === 'hook.end';
     const previous = sections.at(-1);
-    if (hook && entry.agentId !== null && previous?.kind === 'hooks' && previous.entries[0].agentId !== null && (previous.entries[0].agentId || '') === (entry.agentId || '')) {
+    if (hook && entry.agentId !== null && previous?.kind === 'hooks' && previous.entries.at(-1) === entries[index - 1]
+      && previous.entries[0].agentId !== null && (previous.entries[0].agentId || '') === (entry.agentId || '')) {
       previous.entries.push(entry);
     } else {
       sections.push({ id: `${hook ? 'hooks' : 'event'}:${entry.id}`, kind: hook ? 'hooks' : 'event', entries: [entry] });
     }
   }
   return sections;
+}
+
+function timestampMilliseconds(value) {
+  if (typeof value !== 'string') return NaN;
+  const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(value);
+  if (!parts) return NaN;
+  const [year, month, day, hour, minute, second, offsetHour, offsetMinute] = parts.slice(1).map(part => Number(part || 0));
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (month < 1 || month > 12 || day < 1 || day > days[month - 1]
+    || hour > 23 || minute > 59 || second > 59 || offsetHour > 23 || offsetMinute > 59) return NaN;
+  return Date.parse(value);
+}
+
+export function describeToolGroup(entries) {
+  const starts = entries.filter(entry => entry.type === 'tool.execution_start');
+  const ends = entries.filter(entry => entry.type === 'tool.execution_complete');
+  const conflicting = starts.length > 1 || ends.length > 1;
+  const linked = toolIdentity(entries[0]) !== null;
+  const start = starts[0], end = ends[0];
+  const source = describeActor(entries[0]).source;
+  let status = conflicting ? 'Conflicting boundaries · Outcome unknown'
+    : end ? end.success === false ? 'Failed' : end.success === true ? 'Completed' : 'Result recorded'
+      : 'Completion not observed';
+  if (!start) status += ' · Start unavailable';
+  if (!linked) status += ' · IDs unavailable; not paired';
+  const elapsed = linked && !conflicting && start && end
+    ? timestampMilliseconds(end.timestamp) - timestampMilliseconds(start.timestamp) : NaN;
+  const timing = Number.isFinite(elapsed) && elapsed >= 0 ? `${elapsed / 1000} s elapsed` : 'Elapsed unknown';
+  return { kind: 'Tool', title: conflicting ? 'Tool call with conflicting boundaries' : describeStep(start || end).title,
+    subtitle: `${source} · ${status} · ${timing}`, tone: !conflicting && end?.success === false ? 'error' : 'tool' };
 }
 
 // Temporal membership only: keep interleaved agents in their original event order.
@@ -97,8 +147,8 @@ export function summarize(entries) {
     if (['hook.start', 'hook.end'].includes(entry.type)) { calls = hooks; id = entry.hookInvocationId; }
     if (['tool.execution_start', 'tool.execution_complete'].includes(entry.type)) { calls = tools; id = entry.toolCallId; }
     if (calls) {
-      if (!id || entry.agentId === null) { unlinked++; continue; }
-      const key = JSON.stringify([entry.agentId || '', id]);
+      const key = calls === tools ? toolIdentity(entry) : !id || entry.agentId === null ? null : JSON.stringify([entry.agentId || '', id]);
+      if (key === null) { unlinked++; continue; }
       if (!calls.has(key) || !calls.get(key)) calls.set(key, entry.displayName || '');
     }
     if (entry.type === 'skill.invoked') {
