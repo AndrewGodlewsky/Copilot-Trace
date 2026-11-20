@@ -4,7 +4,7 @@ import { createPoller } from './polling.mjs';
 import { predictionCategories, freezeLearningSnapshot, armLivePrediction, resolveLivePrediction, createReplayPractice, chooseReplayPrediction, createPlayback, createActivityCounter, createSurpriseBookmarks } from './learning.mjs';
 import { parseExampleLibrary } from './examples.mjs';
 import { initFooter } from './footer.mjs';
-import { createFollow } from './follow.mjs';
+import { createFollow, createLivePresentation } from './follow.mjs';
 import { initCapabilities } from './capabilities.mjs';
 import { initInstructionSources } from './instructions.mjs';
 import { vocabulary, conceptForEntry, glossaryExample, retainedExample } from './glossary.mjs';
@@ -1846,7 +1846,11 @@ function reconcileLanes(snapshot, visible) {
   return next;
 }
 
-function render(snapshot) {
+function render(snapshot, liveFrame = false) {
+  if (!liveFrame) {
+    const pending = livePresentation.cancel();
+    if (pending && !practice && !playback && !activeExample) snapshot = lastSnapshot = pending;
+  }
   updateTimeUsage();
   updateSurprises();
   updateGlossary();
@@ -2080,7 +2084,14 @@ function render(snapshot) {
 }
 
 const following = createFollow(follow, () => document.scrollingElement);
-follow.addEventListener('change', () => { if (practice || playback) follow.checked = false; following.onChange(); });
+const livePresentation = createLivePresentation({ following,
+  canAnimate: () => !panelClosed && !practice && !playback && !activeExample && follow.checked && !motionPreference.matches,
+  render(snapshot) { lastSnapshot = snapshot; render(snapshot, true); },
+});
+follow.addEventListener('change', () => {
+  if (practice || playback) follow.checked = false;
+  following.onChange(); livePresentation.finish();
+});
 window.addEventListener('scroll', following.onScroll, { passive: true });
 window.addEventListener('resize', following.sync);
 // Reserve the dock's actual height, including wrapped controls and status messages.
@@ -2104,13 +2115,14 @@ const poller = createPoller({
     if (response.status === 200) {
       const snapshot = await response.json();
       if (panelClosed) return false;
+      const previous = liveSnapshot;
       liveSnapshot = snapshot;
       surprises.sync(snapshot.entries);
       lastFeedReceipt = Date.now(); unchangedFeed = false;
       etag = response.headers.get('etag');
       if (feedState !== 'connected') diagnostics.record('connected');
       feedState = 'connected';
-      if (!practice && !playback) { lastSnapshot = snapshot; render(lastSnapshot); }
+      if (!practice && !playback) livePresentation.present(snapshot, previous);
       else if (practice?.attempt?.status === 'waiting') {
         const attempt = resolveLivePrediction(practice.attempt, snapshot);
         if (attempt !== practice.attempt) {
@@ -2386,11 +2398,16 @@ playbackControl('exit').addEventListener('click', () => {
   savedLiveView = undefined;
   (wasExample ? document.querySelector('#examples-open') : playbackControl('start')).focus({ preventScroll: true });
 });
-function changeMotion(event) { if (!panelClosed) playback?.setReducedMotion(event.matches); }
+function changeMotion(event) {
+  if (panelClosed) return;
+  playback?.setReducedMotion(event.matches);
+  if (event.matches) livePresentation.finish();
+}
 motionPreference.addEventListener('change', changeMotion);
 document.querySelector('#playback').addEventListener('toggle', () => { if (!document.querySelector('#playback').open) pausePlayback(); });
 window.addEventListener('pagehide', () => {
   panelClosed = true;
+  livePresentation.close();
   clearTimeUsage();
   surprises.close(); clearSurpriseView();
   surprisesButton.textContent = 'Surprises';

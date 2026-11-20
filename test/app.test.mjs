@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import * as presentation from '../com.github.copilot/extensions/trace/web/presentation.mjs';
-import { createFollow } from '../com.github.copilot/extensions/trace/web/follow.mjs';
+import { createFollow, createLivePresentation } from '../com.github.copilot/extensions/trace/web/follow.mjs';
 import { createTrace } from '../com.github.copilot/extensions/trace/trace.mjs';
 import * as capabilities from '../com.github.copilot/extensions/trace/web/capabilities.mjs';
 import * as instructions from '../com.github.copilot/extensions/trace/web/instructions.mjs';
@@ -193,6 +193,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   const diagnostics = createDiagnostics(), fetches = [], storageCalls = [];
   const storage = { setItem(...args) { storageCalls.push(args); }, getItem() { return null; }, removeItem() {}, clear() {} };
   const playbackTimers = new Map(), playbackCallbacks = []; let playbackTimerId = 0, motionListener;
+  const liveFrames = new Map(), liveCallbacks = []; let liveTime = 0, liveFrameId = 0;
   const motion = { matches: false, addEventListener(name, listener) { motionListener = listener; }, removeEventListener() { motionListener = undefined; } };
   const context = vm.createContext({ ...presentation, ...learning, ...examples, TextEncoder,
     createPlayback: (snapshot, options) => learning.createPlayback(snapshot, { ...options,
@@ -204,6 +205,9 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     ResizeObserver: class { observe() {} disconnect() {} }, createDiagnostics: () => diagnostics,
     localStorage: storage, sessionStorage: storage,
     createFollow,
+    createLivePresentation: options => createLivePresentation({ ...options, now: () => liveTime,
+      requestFrame(callback) { liveCallbacks.push(callback); liveFrames.set(++liveFrameId, callback); return liveFrameId; },
+      cancelFrame(id) { liveFrames.delete(id); } }),
     initCapabilities: options => capabilities.initCapabilities({ ...options, document, load: inventoryLoad }),
     initInstructionSources: options => instructions.initInstructionSources({ ...options, document, load: instructionLoad }),
     fetch: (url, options) => { fetches.push({ url, options }); return url === 'examples.json' && exampleLoad ? exampleLoad(url, options) : feedLoad(url, options); }, AbortSignal, AbortController, Date: clock,
@@ -213,6 +217,8 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   vm.runInContext(source.replace(/^import .*;\r?\n/gm, ''), context);
   return { document, diagnostics, fetches, storageCalls, get: selector => selectors.get(selector),
     playbackTimers, playbackCallbacks,
+    liveFrames, liveCallbacks,
+    frameAt(time) { liveTime = time; const pending = [...liveFrames.values()]; liveFrames.clear(); for (const callback of pending) callback(); },
     tickPlayback() { const [id, callback] = playbackTimers.entries().next().value; playbackTimers.delete(id); callback(); },
     reduceMotion(matches) { motion.matches = matches; motionListener?.({ matches }); },
     closePage() { for (const listener of windowEvents.get('pagehide') || []) listener(); },
@@ -3894,6 +3900,128 @@ test('repeated deliberate jumps use the current snapshot while live arrival stay
 function selectRecap(ui, value = 'range') {
   ui.get('#recap-button').dispatch('click'); ui.get('#recap-range').value = value; ui.get('#recap-range').dispatch('change');
 }
+
+test('live poll bursts progress in every arrangement and a view change settles the latest snapshot even after 304', async t => {
+  for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    const data = await predictionFixture(); t.after(() => data.trace.close());
+    let status = 200;
+    const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot(), status));
+    await ui.refreshFeed();
+    ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change');
+    ui.get('#follow').checked = true; ui.get('#follow').dispatch('change');
+    for (let i = 1; i <= 8; i++) data.response(`burst-${i}`);
+    await ui.refreshFeed();
+    assert.match(ui.get('#timeline').textContent, /Answer burst-2/);
+    assert.doesNotMatch(ui.get('#timeline').textContent, /Answer burst-3/);
+    ui.frameAt(60);
+    assert.match(ui.get('#timeline').textContent, /Answer burst-4/);
+    assert.doesNotMatch(ui.get('#timeline').textContent, /Answer burst-5/);
+    ui.get('#event-order').value = 'chronological'; ui.get('#event-order').dispatch('change');
+    assert.match(ui.get('#timeline').textContent, /Answer burst-8/);
+    assert.equal(ui.liveFrames.size, 0);
+    status = 304; await ui.refreshFeed(); ui.frameAt(240);
+    assert.match(ui.get('#timeline').textContent, /Answer burst-8/);
+    assert.equal(ui.get('#follow').checked, false);
+    ui.closePage();
+  }
+});
+
+test('practice and playback capture the displayed prefix and stale live frames cannot replace the frozen view', async t => {
+  for (const mode of ['prediction', 'playback']) {
+    const data = await predictionFixture(); t.after(() => data.trace.close());
+    const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot()));
+    await ui.refreshFeed();
+    for (let i = 1; i <= 8; i++) data.response(`burst-${i}`);
+    await ui.refreshFeed();
+    const stale = ui.liveCallbacks.at(-1);
+    ui.get(mode === 'prediction' ? '#prediction-live' : '#playback-start').dispatch('click');
+    const frozen = ui.get('#timeline').textContent;
+    assert.doesNotMatch(frozen, /Answer burst-8/);
+    assert.equal(ui.liveFrames.size, 0);
+    stale(); ui.frameAt(500);
+    assert.equal(ui.get('#timeline').textContent, frozen);
+    ui.get(`#${mode}-exit`).dispatch('click');
+    assert.match(ui.get('#timeline').textContent, /Answer burst-8/);
+    assert.equal(ui.liveFrames.size, 0, 'Returning to live does not replay the accumulated history.');
+    ui.closePage();
+  }
+});
+
+test('motion changes settle live arrivals and page close cancels frames before they can touch the view', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot()));
+  await ui.refreshFeed();
+  for (let i = 1; i <= 8; i++) data.response(`burst-${i}`);
+  await ui.refreshFeed();
+  assert.doesNotMatch(ui.get('#timeline').textContent, /Answer burst-8/);
+  ui.reduceMotion(true);
+  assert.match(ui.get('#timeline').textContent, /Answer burst-8/);
+  assert.equal(ui.liveFrames.size, 0);
+  ui.reduceMotion(false);
+  for (let i = 9; i <= 16; i++) data.response(`burst-${i}`);
+  await ui.refreshFeed();
+  const stale = ui.liveCallbacks.at(-1);
+  ui.closePage();
+  const closed = ui.get('#timeline').textContent;
+  assert.equal(ui.liveFrames.size, 0);
+  stale(); ui.frameAt(500);
+  assert.equal(ui.get('#timeline').textContent, closed);
+});
+
+test('inspecting a burst keeps the same focused evidence and reading position while settling the live tail', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot()));
+  await ui.refreshFeed();
+  for (let i = 1; i <= 8; i++) data.response(`burst-${i}`);
+  await ui.refreshFeed();
+  const evidence = ui.get('#timeline').querySelectorAll('pre').find(node => node.textContent.includes('Answer burst-1'));
+  const disclosure = evidence.closest('details');
+  disclosure.open = true; disclosure.dispatch('toggle'); evidence.focus();
+  ui.document.scrollingElement.scrollTop = 350;
+  ui.frameAt(60);
+  assert.match(ui.get('#timeline').textContent, /Answer burst-8/);
+  assert.equal(ui.document.activeElement, evidence);
+  assert.equal(disclosure.open, true);
+  assert.equal(ui.document.scrollingElement.scrollTop, 350);
+  assert.equal(ui.get('#follow').checked, false);
+  assert.equal(ui.liveFrames.size, 0);
+  ui.closePage();
+});
+
+test('explicitly resuming Follow during a burst wins over a queued upward scroll event', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot()));
+  await ui.refreshFeed();
+  for (let i = 1; i <= 8; i++) data.response(`burst-${i}`);
+  await ui.refreshFeed();
+  ui.document.scrollingElement.scrollTop = 350;
+  ui.get('#follow').checked = true; ui.get('#follow').dispatch('change');
+  assert.equal(ui.get('#follow').checked, true);
+  assert.equal(ui.document.scrollingElement.scrollTop, 800);
+  assert.match(ui.get('#timeline').textContent, /Answer burst-8/);
+  assert.equal(ui.liveFrames.size, 0);
+  ui.closePage();
+});
+
+test('opening a synthetic example during a burst cancels live presentation and returning shows the latest live data', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot()), undefined, Date, async () => exampleResponse(exampleText));
+  await ui.refreshFeed();
+  ui.get('#examples-load').dispatch('click'); await ui.settleExamples();
+  for (let i = 1; i <= 8; i++) data.response(`burst-${i}`);
+  await ui.refreshFeed();
+  const stale = ui.liveCallbacks.at(-1);
+  ui.get('#examples-open').dispatch('click');
+  const example = ui.get('#timeline').textContent;
+  assert.doesNotMatch(example, /Answer burst-/);
+  assert.equal(ui.liveFrames.size, 0);
+  stale(); ui.frameAt(500);
+  assert.equal(ui.get('#timeline').textContent, example);
+  ui.get('#playback-exit').dispatch('click');
+  assert.match(ui.get('#timeline').textContent, /Answer burst-8/);
+  assert.equal(ui.liveFrames.size, 0);
+  ui.closePage();
+});
 
 const surpriseActions = ui => ui.get('#timeline').querySelectorAll('.surprise-mark');
 const surpriseOriginal = ui => ui.get('#surprises-list').querySelector('button');
