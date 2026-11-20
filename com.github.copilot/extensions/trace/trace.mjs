@@ -9,6 +9,7 @@ const definitions = new Map(Object.entries({
   'assistant.intent': ['model', 'Reported activity', 'This is the activity description reported by the assistant, not an independently verified reason for a decision.'],
   'assistant.message': ['model', 'Assistant message', 'The host recorded an assistant response. It may also contain tool requests.'],
   'assistant.reasoning': ['model', 'Reported reasoning', 'This is reasoning text exposed by the host. It is not a complete account of internal decisions.'],
+  'assistant.usage': ['host', 'Reported model usage', 'The host reported usage for one model call. Live receipts cover only this observation window; missing usage is unavailable, not zero. Token measures are not billing amounts.'],
   'tool.execution_start': ['tool', 'Tool started', 'The runtime recorded the start of a tool invocation. Its arguments describe the requested operation; this event alone does not prove the operation executed or explain why it was selected.'],
   'tool.execution_complete': ['tool', 'Tool completed', 'The runtime recorded a tool result. The tool-call ID links it to a matching start when available.'],
   'skill.invoked': ['skill', 'Skill loaded', 'A skill supplies instructions or context to the agent.'],
@@ -132,6 +133,7 @@ export function createTrace(session, diagnostics = { record() {} }) {
         omitted = 0;
         const historyIds = new Set();
         for (const event of past) {
+          if (event?.type === 'assistant.usage') continue;
           const entry = project(event);
           if (entry) { historyIds.add(entry.id); insert(entry, 'history'); }
         }

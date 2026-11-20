@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.49",
+    "summary": "Inspect observed operation time and host-reported token receipts, with overlap, missing evidence and accounting limits made explicit."
+  },
+  {
     "version": "0.1.48",
     "summary": "Mark surprising events and revisit their original evidence from a compact list. Marks stay in memory, with clear limits and unavailable evidence states."
   },

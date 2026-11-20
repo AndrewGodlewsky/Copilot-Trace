@@ -10,7 +10,7 @@ import { initInstructionSources } from './instructions.mjs';
 import { vocabulary, conceptForEntry, glossaryExample, retainedExample } from './glossary.mjs';
 import { validationClaims, validationChecks, validationOverview, linkValidationClaim, retainedValidationLink, observedActivity, repeatedActivity, argumentComparisonCalls, retainedArgumentCall, compareToolArguments } from './presentation.mjs';
 import { plausibleActions, retainedPlausibleScenario } from './presentation.mjs';
-import { observedRecap, retainedRecapEntry } from './presentation.mjs';
+import { observedRecap, retainedRecapEntry, observedTimeAndUsage } from './presentation.mjs';
 
 const diagnostics = createDiagnostics();
 diagnostics.record('panel_started');
@@ -419,6 +419,99 @@ function clearRecap() {
   recapRange.value = '';
 }
 recapPanel.addEventListener('close', () => { if (!recapPanel.open) clearRecap(); });
+
+const timeUsage = document.querySelector('#time-usage'), timeUsageReport = document.querySelector('#time-usage-report');
+let timeUsageCapture, timeUsageLinks = [];
+timeUsage.addEventListener('toggle', () => {
+  if (!timeUsage.open) { clearTimeUsage(); return; }
+  if (panelClosed) return;
+  // Native close/reopen toggles can coalesce into a single open notification.
+  clearTimeUsage(false);
+  pausePlayback(); follow.checked = false;
+  const snapshot = freezeLearningSnapshot(lastSnapshot || { entries: [], history: 'unknown', omitted: 0 });
+  timeUsageCapture = snapshot;
+  const report = observedTimeAndUsage(snapshot.entries, snapshot), { timing, usage } = report;
+  const context = activeExample ? 'Synthetic demonstration observations.' : practice || playback
+    ? 'Displayed practice/playback prefix only.' : 'Recorded chat observations.';
+  document.querySelector('#time-usage-scope').textContent = `${context} Frozen capture of ${snapshot.entries.length} retained events across filters. Later arrivals and hidden future events are excluded. Close and reopen this disclosure to refresh.`;
+  const milliseconds = value => value === null ? 'Unavailable' : `${value} ms`;
+  const window = timeUsageSection(`Wall span: ${milliseconds(timing.window?.wallMs ?? null)}`, timing.window?.entries || []);
+  window.append(element('p', timing.window ? `${new Date(timing.window.startMs).toISOString()} through ${new Date(timing.window.endMs).toISOString()}.`
+    : 'No valid matching retained timestamp window.'));
+  timeUsageReport.append(element('p', `Summed operation intervals: ${milliseconds(timing.sumMs)}. Union-covered time: ${milliseconds(timing.coveredMs)}. Unaccounted time: ${milliseconds(timing.unaccountedMs)}.`));
+  const intervals = timeUsageSection(`${timing.intervals.length} paired operation intervals · contributors to sum and union`, []);
+  intervals.append(element('p', 'The union counts overlap once. The sum counts each listed tool and delegated-agent interval, including overlap between a parent task and its child. A missing sum is unavailable or exceeds safe arithmetic. No pair is not a measured zero.'));
+  for (const row of timing.intervals) {
+    const item = element('details'); item.append(element('summary', `${row.kind === 'tool' ? 'Tool' : 'Delegated agent'} · ${describeActor(row.start).source} · ${row.start.toolCallId} · ${row.elapsedMs} ms`));
+    timeUsageSources(item, row.entries); intervals.append(item);
+  }
+  const gaps = timeUsageSection(timing.unaccountedMs === null ? 'Unaccounted timestamp gaps unavailable' : `${timing.gaps.length} unaccounted timestamp gaps`, []);
+  gaps.append(element('p', 'Derived from the wall-window boundaries and paired intervals above. Gaps are unaccounted observations, not idle time or private thinking time. Without valid pairs, coverage and gaps remain unavailable.'));
+  for (const gap of timing.gaps) gaps.append(element('p', `${new Date(gap.startMs).toISOString()} → ${new Date(gap.endMs).toISOString()}: ${gap.elapsedMs} ms`));
+  const excluded = timeUsageSection(`${timing.excluded.length} excluded operation groups · ${timing.windowExcluded.length} records excluded from the timestamp window`, []);
+  for (const row of [...timing.excluded, ...timing.windowExcluded]) {
+    const item = element('details'); item.append(element('summary', row.reason)); timeUsageSources(item, row.entries); excluded.append(item);
+  }
+  timeUsageReport.append(element('h3', 'Host-reported tokens'), element('p', usage.receipts.length
+    ? `${usage.receipts.length} unique retained live receipts. Provider/model/source groups below are separate; there is no all-provider total.`
+    : 'Usage unavailable: no valid retained live receipts. Historical ephemeral usage is not backfilled; missing usage is not zero.'));
+  const labels = { inputTokens: 'Input', outputTokens: 'Output', cacheReadTokens: 'Cache read', cacheWriteTokens: 'Cache write', reasoningTokens: 'Reasoning (part of output)' };
+  for (const group of usage.groups) {
+    const section = timeUsageSection(`${group.model} · ${describeActor(group).source} · ${group.receipts.length} receipt${group.receipts.length === 1 ? '' : 's'}`, []);
+    section.append(element('p', group.provider ? `Exact provider: ${group.provider.label} · ${group.provider.kind} · ${group.provider.id}`
+      : 'Exact provider unavailable. This receipt is kept separate; a provider family does not identify an endpoint.'),
+    element('p', `Provider family: ${group.providerFamily ?? 'Unavailable'}. Accounting source: ${group.sourceSessionId}. Model: ${group.model}.`));
+    for (const [field, measure] of Object.entries(group.measures)) section.append(element('p', `${labels[field]}: ${measure.value === null ? 'Unavailable' : `${measure.value} tokens`}`
+      + ` · ${measure.status} · ${measure.reported} reported, ${measure.missing} missing.`));
+    for (const receipt of group.receipts) {
+      const item = element('details'); item.append(element('summary', `Accounting sequence ${receipt.accounting.sequence} · ${receipt.accounting.usageId}`));
+      timeUsageSources(item, receipt.entries); section.append(item);
+    }
+  }
+  const usageLimits = timeUsageSection(`${usage.excluded.length} excluded usage groups · ${usage.duplicates.length} repeated receipt groups counted once`, []);
+  for (const row of [...usage.excluded, ...usage.duplicates]) {
+    const item = element('details'); item.append(element('summary', row.reason)); timeUsageSources(item, row.entries); usageLimits.append(item);
+  }
+  const limits = timeUsageSection('Scope and calculation rules', []);
+  for (const note of report.notes) limits.append(element('p', note));
+  updateTimeUsage();
+});
+function timeUsageSection(title, entries) {
+  const section = element('details'); section.append(element('summary', title));
+  timeUsageSources(section, entries); timeUsageReport.append(section); return section;
+}
+function timeUsageSources(container, entries) {
+  const capture = timeUsageCapture;
+  for (const entry of entries) {
+    const label = `${entry.type} · ${describeActor(entry).source} · ${entry.id}`;
+    const button = element('button', `Open original · ${label}`); button.type = 'button';
+    const link = { button, entry, label, expired: false }; timeUsageLinks.push(link); container.append(button);
+    button.addEventListener('click', () => {
+      if (panelClosed || !timeUsage.open || timeUsageCapture !== capture) return;
+      updateTimeUsage();
+      if (link.expired || !retainedRecapEntry(lastSnapshot?.entries || [], entry)) return;
+      footerPanels.closePanel('statistics-panel', { restoreFocus: false });
+      showBoundary(entry.id, 'Showing an original time or usage record. Follow live is paused.', entry);
+    });
+  }
+}
+function updateTimeUsage() {
+  if (!timeUsageCapture) return;
+  for (const link of timeUsageLinks) {
+    link.expired ||= !retainedRecapEntry(lastSnapshot?.entries || [], link.entry);
+    link.button.setAttribute('aria-disabled', String(link.expired));
+    if (link.expired) link.button.textContent = `Original unavailable · ${link.label}`;
+  }
+  document.querySelector('#time-usage-status').textContent = timeUsageLinks.some(link => link.expired)
+    ? 'Some original records changed or left this view. Those links are unavailable; frozen calculations are unchanged.'
+    : 'Original links open exact retained records. Calculations stay frozen until this disclosure is reopened.';
+}
+function clearTimeUsage(close = true) {
+  timeUsageCapture = undefined; timeUsageLinks = [];
+  if (close) timeUsage.open = false;
+  timeUsageReport.replaceChildren(); document.querySelector('#time-usage-status').textContent = '';
+  document.querySelector('#time-usage-scope').textContent = 'Open to capture the displayed retained window.';
+}
 function protectedEvidenceNotice(entry) {
   if (entry.protectedContentOmitted === true) return 'Protected content was omitted by Trace. This retained raw event is incomplete; omitted values cannot be recovered from this panel.';
   return Object.hasOwn(entry, 'protectedContentOmitted') && typeof entry.protectedContentOmitted !== 'boolean'
@@ -1754,6 +1847,7 @@ function reconcileLanes(snapshot, visible) {
 }
 
 function render(snapshot) {
+  updateTimeUsage();
   updateSurprises();
   updateGlossary();
   updateArgumentComparison();
@@ -2062,6 +2156,7 @@ const exampleContexts = ['statistics-panel', 'glossary-panel', 'arguments-panel'
 
 const prediction = id => document.querySelector(`#prediction-${id}`);
 function closePracticeInspectors() {
+  clearTimeUsage();
   clearPlausibleActions();
   for (const panel of document.querySelectorAll('.footer-panel')) footerPanels.closePanel(panel.id, { restoreFocus: false });
   clearArgumentComparison(); glossaryTarget = undefined; guidanceExamples = [];
@@ -2296,6 +2391,7 @@ motionPreference.addEventListener('change', changeMotion);
 document.querySelector('#playback').addEventListener('toggle', () => { if (!document.querySelector('#playback').open) pausePlayback(); });
 window.addEventListener('pagehide', () => {
   panelClosed = true;
+  clearTimeUsage();
   surprises.close(); clearSurpriseView();
   surprisesButton.textContent = 'Surprises';
   clearPlausibleActions();

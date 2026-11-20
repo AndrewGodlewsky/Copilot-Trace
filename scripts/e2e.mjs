@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
-import { actionStages, agentLanes, compactionAttempts, delegationHandoffs, hookInvocations, linkValidationClaim, observedActivity, permissionScope, retainedValidationLink, retrievalLedger, skillInstructions, toolExtents, toolProvenance, summarize, validationChecks, validationClaims, validationOverview } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
+import { actionStages, agentLanes, compactionAttempts, delegationHandoffs, hookInvocations, linkValidationClaim, observedActivity, observedTimeAndUsage, permissionScope, retainedValidationLink, retrievalLedger, skillInstructions, toolExtents, toolProvenance, summarize, validationChecks, validationClaims, validationOverview } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
 import { compareCapabilities } from '../com.github.copilot/extensions/trace/web/capabilities.mjs';
 import { instructionSources } from '../com.github.copilot/extensions/trace/web/instructions.mjs';
 import { armLivePrediction, classifyPredictionEvent, resolveLivePrediction } from '../com.github.copilot/extensions/trace/web/learning.mjs';
@@ -158,6 +158,8 @@ const fixture = createServer(async (req, res) => {
       }
       await agentResponses;
     }
+    const usage = { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120,
+      prompt_tokens_details: { cached_tokens: 40 }, completion_tokens_details: { reasoning_tokens: 5 } };
     if (body.stream) {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const first = message.tool_calls ? { ...message, tool_calls: message.tool_calls.map((tool, index) => ({ index, ...tool })) } : message;
@@ -165,11 +167,13 @@ const fixture = createServer(async (req, res) => {
         res.write('data: ' + JSON.stringify({ id: `fixture-${number}`, object: 'chat.completion.chunk',
           created: 1, model: 'fixture', choices: [{ index: 0, delta, finish_reason }] }) + '\n\n');
       }
+      res.write('data: ' + JSON.stringify({ id: `fixture-${number}`, object: 'chat.completion.chunk',
+        created: 1, model: 'fixture', choices: [], usage }) + '\n\n');
       res.end('data: [DONE]\n\n');
     } else {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ id: `fixture-${number}`, object: 'chat.completion', model: 'fixture',
-        choices: [{ index: 0, message, finish_reason: reason }] }));
+        choices: [{ index: 0, message, finish_reason: reason }], usage }));
     }
   } catch (error) {
     fixtureError = error;
@@ -336,6 +340,8 @@ try {
   const agentEvents = [];
   const stopAgentEvents = session.on(event => agentEvents.push(event));
   const agentPanel = await session.rpc.canvas.open(input);
+  await until(() => fetch(agentPanel.url + 'events').then(response => response.json()),
+    value => value.history === 'ready', 'agent observer ready before fixed usage responses');
   assert.equal(requests, 3, 'Opening the agent fixture canvas must not trigger inference.');
   inspectPendingAgents = async () => {
     const pendingSnapshot = await until(() => fetch(agentPanel.url + 'events').then(response => response.json()),
@@ -365,11 +371,73 @@ try {
   if (fixtureError) throw fixtureError;
   const agentSnapshot = await until(() => fetch(agentPanel.url + 'events').then(r => r.json()),
     value => value.history === 'ready' && value.entries.filter(entry => entry.type === 'subagent.completed').length === 2
-      && agentEvents.filter(event => ['subagent.started', 'subagent.completed', 'assistant.turn_start', 'tool.execution_start', 'tool.execution_complete'].includes(event.type))
-        .every(event => value.entries.some(entry => entry.id === event.id)), 'agent lifecycle and result projection');
+      && agentEvents.filter(event => event.type === 'assistant.usage').length === 4
+      && agentEvents.filter(event => ['subagent.started', 'subagent.completed', 'assistant.turn_start', 'tool.execution_start', 'tool.execution_complete', 'assistant.usage'].includes(event.type))
+        .every(event => value.entries.some(entry => entry.id === event.id)), 'agent lifecycle, results and four usage receipts projected');
   stopAgentEvents();
   assert.equal(requests, 7, 'Only three input and four delegation fixture responses are permitted.');
   assert.equal(agentEvents.some(event => event.type === 'session.error'), false);
+  const rawUsage = agentEvents.filter(event => event.type === 'assistant.usage');
+  assert.equal(rawUsage.length, 4);
+  const usageFields = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens'];
+  const expectedUsage = [100, 20, 40, 0, 5];
+  for (const raw of rawUsage) {
+    assert.equal(raw.ephemeral, true);
+    assert.deepEqual(usageFields.map(field => raw.data[field]), expectedUsage);
+    assert.equal(raw.data.aiCreditsStatus, 'unavailable');
+    const entry = agentSnapshot.entries.find(item => item.id === raw.id);
+    assert.equal(entry.type, 'assistant.usage');
+    assert.equal(entry.agentId, raw.agentId ?? '');
+    assert.equal(entry.timestamp, raw.timestamp);
+    assert.deepEqual(JSON.parse(entry.evidence).data, raw.data,
+      'Joined Trace keeps the exact bounded host receipt, including accounting and token units.');
+    assert.equal(entry.observation.source, 'live');
+    assert.ok(Number.isSafeInteger(entry.observation.receipt) && entry.observation.receipt > 0);
+    assert.equal(classifyPredictionEvent(entry), null, 'Usage consumes observation continuity without becoming a predicted action.');
+  }
+  const usageBreakdown = observedTimeAndUsage(agentSnapshot.entries, agentSnapshot);
+  assert.equal(usageBreakdown.usage.receipts.length, 4);
+  assert.equal(usageBreakdown.usage.excluded.length, 0);
+  assert.equal(usageBreakdown.usage.duplicates.length, 0);
+  for (const receipt of usageBreakdown.usage.receipts) {
+    const raw = rawUsage.find(event => event.id === receipt.entry.id);
+    assert.ok(raw);
+    assert.deepEqual(receipt.accounting, raw.data.accounting);
+    assert.equal(receipt.agentId, raw.agentId ?? '');
+    assert.equal(receipt.model, 'fixture');
+    assert.equal(receipt.provider, null, 'The fixture supplies no exact provider reference.');
+    assert.equal(receipt.providerFamily, 'other');
+    assert.deepEqual(usageFields.map(field => receipt.values[field]), expectedUsage);
+  }
+  assert.equal(usageBreakdown.usage.groups.length, 4,
+    'An unknown exact provider must not silently merge independent receipts into a provider total.');
+  for (const group of usageBreakdown.usage.groups) {
+    assert.equal(group.receipts.length, 1);
+    for (const [index, field] of usageFields.entries()) {
+      assert.equal(group.measures[field].value, expectedUsage[index]);
+      assert.equal(group.measures[field].reported, 1);
+      assert.equal(group.measures[field].missing, 0);
+    }
+  }
+  const accountingSources = new Map();
+  for (const receipt of usageBreakdown.usage.receipts) {
+    const list = accountingSources.get(receipt.accounting.sourceSessionId) ?? [];
+    list.push(receipt);
+    accountingSources.set(receipt.accounting.sourceSessionId, list);
+  }
+  assert.equal(accountingSources.size, 3);
+  const mainReceipts = usageBreakdown.usage.receipts.filter(receipt => receipt.agentId === '');
+  assert.equal(mainReceipts.length, 2);
+  assert.deepEqual(mainReceipts.map(receipt => receipt.accounting.sequence).sort(), [1, 2]);
+  assert.equal(new Set(mainReceipts.map(receipt => receipt.accounting.sourceSessionId)).size, 1);
+  const childReceipts = usageBreakdown.usage.receipts.filter(receipt => receipt.agentId !== '');
+  assert.equal(new Set(childReceipts.map(receipt => receipt.agentId)).size, 2);
+  assert.ok(childReceipts.every(receipt => receipt.accounting.sequence === 1
+    && receipt.accounting.sourceSessionId !== receipt.agentId));
+  const sumFixtureReceipts = (receipts, field) => receipts.reduce((sum, receipt) => sum + receipt.values[field], 0);
+  assert.deepEqual(usageFields.map(field => sumFixtureReceipts(mainReceipts, field)), [200, 40, 80, 0, 10]);
+  assert.deepEqual(usageFields.map(field => sumFixtureReceipts(usageBreakdown.usage.receipts, field)), [400, 80, 160, 0, 20],
+    'Only this fixture knows the four receipts use one owned provider; no parent/child aggregate is added.');
   const starts = agentEvents.filter(event => event.type === 'subagent.started');
   const ends = agentEvents.filter(event => event.type === 'subagent.completed');
   assert.equal(starts.length, 2);
@@ -384,6 +452,47 @@ try {
     assert.ok(agentEvents.some(event => event.type === 'assistant.turn_start' && event.agentId === start.agentId && event.data.parentToolCallId === start.data.toolCallId));
   }
   assert.ok(Math.max(...starts.map(event => Date.parse(event.timestamp))) < Math.min(...ends.map(event => Date.parse(event.timestamp))), 'Held synthetic responses produce observed overlapping lifecycles.');
+  const timeBreakdown = usageBreakdown.timing;
+  const expectedIntervals = [
+    ...agentEvents.filter(event => event.type === 'tool.execution_start').map(start => ({ kind: 'tool', start,
+      end: agentEvents.find(event => event.type === 'tool.execution_complete' && event.agentId === start.agentId
+        && event.data.toolCallId === start.data.toolCallId) })),
+    ...starts.map(start => ({ kind: 'agent', start, end: ends.find(event => event.agentId === start.agentId) })),
+  ];
+  assert.equal(expectedIntervals.length, 4);
+  assert.equal(timeBreakdown.intervals.length, 4);
+  for (const expected of expectedIntervals) {
+    assert.ok(expected.end);
+    const interval = timeBreakdown.intervals.find(item => item.start.id === expected.start.id);
+    assert.ok(interval);
+    assert.equal(interval.kind, expected.kind);
+    assert.equal(interval.end.id, expected.end.id);
+    assert.equal(interval.startMs, Date.parse(expected.start.timestamp));
+    assert.equal(interval.endMs, Date.parse(expected.end.timestamp));
+    assert.equal(interval.elapsedMs, Date.parse(expected.end.timestamp) - Date.parse(expected.start.timestamp));
+    assert.deepEqual(interval.entries.map(entry => entry.id), [expected.start.id, expected.end.id]);
+  }
+  const actualTimes = agentSnapshot.entries.map(entry => Date.parse(entry.timestamp));
+  assert.ok(actualTimes.every(Number.isFinite));
+  assert.equal(timeBreakdown.window.startMs, Math.min(...actualTimes));
+  assert.equal(timeBreakdown.window.endMs, Math.max(...actualTimes));
+  assert.equal(timeBreakdown.window.wallMs, Math.max(...actualTimes) - Math.min(...actualTimes));
+  assert.equal(timeBreakdown.sumMs, expectedIntervals.reduce((sum, interval) =>
+    sum + Date.parse(interval.end.timestamp) - Date.parse(interval.start.timestamp), 0));
+  const mergedIntervals = [];
+  for (const interval of expectedIntervals.map(item => [Date.parse(item.start.timestamp), Date.parse(item.end.timestamp)])
+    .sort((left, right) => left[0] - right[0])) {
+    const previous = mergedIntervals.at(-1);
+    if (previous && interval[0] <= previous[1]) previous[1] = Math.max(previous[1], interval[1]);
+    else mergedIntervals.push(interval.slice());
+  }
+  const coveredMs = mergedIntervals.reduce((sum, interval) => sum + interval[1] - interval[0], 0);
+  assert.equal(timeBreakdown.coveredMs, coveredMs);
+  assert.ok(timeBreakdown.sumMs > coveredMs, 'Concurrent/nested intervals cannot be presented as additional wall time.');
+  assert.equal(timeBreakdown.unaccountedMs, timeBreakdown.window.wallMs - coveredMs);
+  assert.equal(timeBreakdown.gaps.reduce((sum, gap) => sum + gap.elapsedMs, 0), timeBreakdown.unaccountedMs);
+  assert.ok(timeBreakdown.gaps.every(gap => gap.startMs >= timeBreakdown.window.startMs
+    && gap.endMs <= timeBreakdown.window.endMs && gap.elapsedMs === gap.endMs - gap.startMs));
   for (const raw of agentEvents.filter(event => ['subagent.started', 'subagent.completed', 'assistant.turn_start', 'tool.execution_start', 'tool.execution_complete'].includes(event.type))) {
     const projected = agentSnapshot.entries.find(entry => entry.id === raw.id);
     assert.ok(projected, 'Attached Trace retains actual agent and delegation records.');
@@ -428,6 +537,16 @@ try {
   }
   await session.rpc.canvas.close({ instanceId: input.instanceId });
   await until(() => fetch(agentPanel.url).then(() => false, () => true), Boolean, 'agent fixture server shutdown');
+  const usageReopened = await session.rpc.canvas.open(input);
+  const usageHistory = await until(() => fetch(usageReopened.url + 'events').then(response => response.json()),
+    value => value.history === 'ready', 'post-inference usage history scope');
+  assert.equal(usageHistory.entries.some(entry => entry.type === 'assistant.usage'), false,
+    'Ephemeral usage cannot be reconstructed by reopening Trace after inference.');
+  assert.equal(observedTimeAndUsage(usageHistory.entries, usageHistory).usage.receipts.length, 0);
+  assert.equal((await session.getEvents()).some(event => event.type === 'assistant.usage'), false);
+  assert.equal(requests, 7, 'Reopening and inspecting accounting do not request another model response.');
+  await session.rpc.canvas.close({ instanceId: input.instanceId });
+  await until(() => fetch(usageReopened.url).then(() => false, () => true), Boolean, 'post-usage reopened server shutdown');
   await session.disconnect();
 
   // Native invocation starts precede permission evaluation, including when the operation is denied.
@@ -1188,7 +1307,7 @@ try {
   await session.disconnect();
   assert.equal(requests, 22, 'Only the twenty-two expected local synthetic responses are permitted.');
   assert.equal(expired, false);
-  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping/nested agent handoffs and returns, approved/denied action boundaries, distinct MCP provenance, hook pipelines, historical skill instructions, read-only capability comparison, retrieval ledger, host-shortened preview, current instruction sources versus recorded loads, compaction summaries, validation claims and overview versus process exit verified with twenty-two fixed local responses across eight disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
+  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping/nested agent handoffs and returns, observed time versus overlapping intervals, exact live token receipts and parent/child accounting without historical backfill, approved/denied action boundaries, distinct MCP provenance, hook pipelines, historical skill instructions, read-only capability comparison, retrieval ledger, host-shortened preview, current instruction sources versus recorded loads, compaction summaries, validation claims and overview versus process exit verified with twenty-two fixed local responses across eight disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
 } finally {
   clearTimeout(timer);
   releaseFirst();

@@ -9,6 +9,7 @@ const actorRoles = new Map(Object.entries({
   'assistant.intent': 'Assistant',
   'assistant.message': 'Assistant',
   'assistant.reasoning': 'Assistant',
+  'assistant.usage': 'Host accounting',
   'tool.execution_start': 'Tool',
   'tool.execution_complete': 'Tool',
   'hook.start': 'Hook system',
@@ -81,6 +82,9 @@ const stepLessons = new Map(Object.entries({
   'assistant.reasoning': ['The host recorded exposed reasoning text.',
     'This is text the host exposed as reasoning, not a complete view of the model’s internal process.',
     'Unrecorded internal decisions and independently verified reasons remain unknown.'],
+  'assistant.usage': ['The host reported usage for one model call.',
+    'This live receipt covers reported token measures in the retained observation window. Earlier ephemeral usage history is not backfilled.',
+    'Missing measures are unavailable, not zero. This receipt is not a complete chat usage or billing total; token measures do not establish a monetary charge.'],
   'tool.execution_start': ['The runtime recorded a tool invocation starting.',
     'Arguments describe a requested operation. This start does not prove the operation executed; permission may still be required.',
     'The result and reason for choosing this tool are not established here. A missing result does not mean it is still running.'],
@@ -671,6 +675,158 @@ export function describeToolGroup(entries, operation = toolOperations(entries).g
 
 const identityText = (value, limit = 256) => typeof value === 'string' && value.trim().length > 0 && value.length <= limit;
 const mcpFields = ['mcpConfigServerName', 'mcpServerName', 'mcpToolName', 'mcpServerDisplayName', 'mcpConfigSource', 'mcpTransport'];
+
+const usageFields = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens'];
+const safeCount = value => Number.isSafeInteger(value) && value >= 0;
+const safeSum = values => {
+  let total = 0;
+  for (const value of values) { if (!safeCount(value) || !safeCount(total + value)) return null; total += value; }
+  return total;
+};
+const usageProvider = provider => provider && typeof provider === 'object' && !Array.isArray(provider)
+  && identityText(provider.id) && identityText(provider.label) && ['copilot', 'loki'].includes(provider.kind)
+  ? { id: provider.id, kind: provider.kind, label: provider.label } : null;
+
+// Inputs are exactly the caller's retained capture; no current clock or session metrics are consulted.
+export function observedTimeAndUsage(entries, { history = 'ready', omitted = 0 } = {}) {
+  const ids = new Map(), records = new Map(), positions = new Map();
+  for (const [index, entry] of entries.entries()) { ids.set(entry.id, (ids.get(entry.id) || 0) + 1); positions.set(entry, index); }
+  for (const entry of entries) records.set(entry, identityText(entry.id) && ids.get(entry.id) === 1
+    && (entry.agentId === '' || identityText(entry.agentId)) ? explanationData(entry) : null);
+  const timing = { window: null, intervals: [], sumMs: null, coveredMs: null, unaccountedMs: null, gaps: [], excluded: [], windowExcluded: [] };
+  const timed = [];
+  for (const entry of entries) {
+    const time = timestampMilliseconds(entry.timestamp);
+    if (records.get(entry) && Number.isSafeInteger(time)) timed.push({ entry, time });
+    else timing.windowExcluded.push({ entries: [entry], reason: 'Window timestamp or matching source evidence unavailable.' });
+  }
+  if (timed.length) {
+    const ordered = [...timed].sort((a, b) => a.time - b.time), first = ordered[0], last = ordered.at(-1);
+    const wallMs = last.time - first.time;
+    if (safeCount(wallMs)) timing.window = { startMs: first.time, endMs: last.time, wallMs,
+      entries: [...new Set([first.entry, last.entry])] };
+  }
+  const buckets = new Map();
+  for (const entry of entries) {
+    const kind = ['tool.execution_start', 'tool.execution_complete'].includes(entry.type) ? 'tool'
+      : ['subagent.started', 'subagent.completed', 'subagent.failed'].includes(entry.type) ? 'agent' : null;
+    if (!kind) continue;
+    const key = JSON.stringify([kind, entry.agentId, entry.toolCallId]);
+    if (!buckets.has(key)) buckets.set(key, { kind, entries: [] });
+    buckets.get(key).entries.push(entry);
+  }
+  for (const bucket of buckets.values()) {
+    const boundaries = bucket.entries, starts = boundaries.filter(entry => ['tool.execution_start', 'subagent.started'].includes(entry.type));
+    const ends = boundaries.filter(entry => !starts.includes(entry)), start = starts[0], end = ends[0];
+    const exclude = reason => timing.excluded.push({ entries: boundaries, reason });
+    if (starts.length !== 1 || ends.length !== 1) { exclude('Exactly one start and one end are required; boundaries are missing or ambiguous.'); continue; }
+    const startData = records.get(start), endData = records.get(end);
+    if (!startData || !endData || !identityText(start.toolCallId) || startData.toolCallId !== start.toolCallId
+      || endData.toolCallId !== end.toolCallId || (bucket.kind === 'agent' && !identityText(start.agentId))) {
+      exclude('Source, invocation ID or complete matching raw evidence unavailable.'); continue;
+    }
+    const fields = bucket.kind === 'tool' ? ['toolName', ...mcpFields] : ['agentName', 'agentType', 'executionMode'];
+    const contradiction = fields.some(field => (startData[field] !== undefined && !identityText(startData[field]))
+      || (endData[field] !== undefined && (!identityText(endData[field]) || (startData[field] !== undefined && endData[field] !== startData[field]))));
+    if (contradiction || (bucket.kind === 'tool' && (!identityText(startData.toolName, 180) || startData.toolName !== start.toolName
+      || (end.toolName !== '' && end.toolName !== start.toolName)
+      || [startData, endData].some(data => ['origin', 'overridesBuiltInTool'].some(field => Object.hasOwn(data, field)))
+      || (mcpFields.some(field => startData[field] !== undefined) && !validMcpMetadata(startData))
+      || mcpFields.some(field => endData[field] !== undefined && endData[field] !== startData[field])))) {
+      exclude('Tool, agent or provider boundary metadata is invalid or contradictory.'); continue;
+    }
+    const startMs = timestampMilliseconds(start.timestamp), endMs = timestampMilliseconds(end.timestamp), elapsedMs = endMs - startMs;
+    if (!Number.isSafeInteger(startMs) || !Number.isSafeInteger(endMs) || !safeCount(elapsedMs) || positions.get(end) < positions.get(start)) {
+      exclude('Boundary timestamps are missing, invalid or reversed.'); continue;
+    }
+    timing.intervals.push({ kind: bucket.kind, start, end, startMs, endMs, elapsedMs, entries: [start, end] });
+  }
+  if (timing.intervals.length) {
+    timing.sumMs = safeSum(timing.intervals.map(row => row.elapsedMs));
+    const union = [];
+    for (const interval of [...timing.intervals].sort((a, b) => a.startMs - b.startMs)) {
+      const last = union.at(-1);
+      if (last && interval.startMs <= last.endMs) last.endMs = Math.max(last.endMs, interval.endMs);
+      else union.push({ startMs: interval.startMs, endMs: interval.endMs });
+    }
+    timing.coveredMs = safeSum(union.map(row => row.endMs - row.startMs));
+    if (timing.window && timing.coveredMs !== null) {
+      timing.unaccountedMs = timing.window.wallMs - timing.coveredMs;
+      let cursor = timing.window.startMs;
+      for (const interval of union) {
+        if (cursor < interval.startMs) timing.gaps.push({ startMs: cursor, endMs: interval.startMs, elapsedMs: interval.startMs - cursor });
+        cursor = interval.endMs;
+      }
+      if (cursor < timing.window.endMs) timing.gaps.push({ startMs: cursor, endMs: timing.window.endMs, elapsedMs: timing.window.endMs - cursor });
+    }
+  }
+  const usage = { receipts: [], groups: [], excluded: [], duplicates: [] }, candidates = [], identities = new Map();
+  for (const entry of entries.filter(entry => entry.type === 'assistant.usage')) {
+    const data = explanationData(entry), accounting = data?.accounting;
+    const validAccounting = accounting && typeof accounting === 'object' && !Array.isArray(accounting)
+      && identityText(accounting.sourceSessionId) && identityText(accounting.usageId) && safeCount(accounting.sequence);
+    const provider = usageProvider(data?.provider);
+    const valid = records.get(entry) && entry.observation?.source === 'live' && validAccounting && identityText(data.model, 180)
+      && data.model === entry.model && (data.provider === undefined || provider)
+      && (data.modelProvider === undefined || identityText(data.modelProvider))
+      && usageFields.every(field => data[field] === undefined || safeCount(data[field]))
+      && !(data.reasoningTokens !== undefined && data.outputTokens !== undefined && data.reasoningTokens > data.outputTokens);
+    const receipt = valid ? { entry, entries: [entry], accounting: { sourceSessionId: accounting.sourceSessionId, sequence: accounting.sequence, usageId: accounting.usageId },
+      agentId: entry.agentId, model: data.model, provider, providerFamily: data.modelProvider ?? null,
+      values: Object.fromEntries(usageFields.map(field => [field, data[field] ?? null])) } : null;
+    const signature = receipt && JSON.stringify([receipt.accounting, receipt.agentId, receipt.model, provider, receipt.providerFamily, receipt.values]);
+    const candidate = { entry, receipt, signature, keys: [] }; candidates.push(candidate);
+    if (identityText(accounting?.sourceSessionId)) {
+      if (safeCount(accounting.sequence)) candidate.keys.push(JSON.stringify(['sequence', accounting.sourceSessionId, accounting.sequence]));
+      if (identityText(accounting.usageId)) candidate.keys.push(JSON.stringify(['usageId', accounting.sourceSessionId, accounting.usageId]));
+    }
+    for (const key of candidate.keys) { if (!identities.has(key)) identities.set(key, []); identities.get(key).push(candidate); }
+  }
+  const visited = new Set();
+  for (const candidate of candidates) {
+    if (visited.has(candidate)) continue;
+    const component = [], pending = [candidate];
+    while (pending.length) {
+      const item = pending.pop(); if (visited.has(item)) continue;
+      visited.add(item); component.push(item);
+      for (const key of item.keys) pending.push(...identities.get(key).filter(other => !visited.has(other)));
+    }
+    if (component.some(item => !item.receipt || item.signature !== candidate.signature)) {
+      usage.excluded.push({ entries: component.map(item => item.entry), reason: component.length > 1
+        ? 'Conflicting accounting identity chain or invalid consumed fields; all connected receipts excluded.'
+        : 'Live receipt source, accounting, model, provider or token fields unavailable or invalid.' });
+      continue;
+    }
+    candidate.receipt.entries = component.map(item => item.entry);
+    usage.receipts.push(candidate.receipt);
+    if (component.length > 1) usage.duplicates.push({ entries: component.map(item => item.entry), reason: 'Identical interpreted receipt repeated; counted once.' });
+  }
+  const groups = new Map();
+  for (const receipt of usage.receipts) {
+    const key = JSON.stringify([receipt.accounting.sourceSessionId, receipt.agentId, receipt.model, receipt.provider, receipt.providerFamily,
+      receipt.provider ? null : receipt.accounting.usageId]);
+    if (!groups.has(key)) groups.set(key, { sourceSessionId: receipt.accounting.sourceSessionId, agentId: receipt.agentId,
+      model: receipt.model, provider: receipt.provider, providerFamily: receipt.providerFamily, receipts: [], entries: [], measures: {} });
+    const group = groups.get(key); group.receipts.push(receipt); group.entries.push(...receipt.entries);
+  }
+  for (const group of groups.values()) {
+    for (const field of usageFields) {
+      const values = group.receipts.map(receipt => receipt.values[field]).filter(value => value !== null), reported = values.length;
+      const missing = group.receipts.length - reported, value = reported ? safeSum(values) : null;
+      group.measures[field] = { value, reported, missing, status: !reported ? 'unavailable' : value === null ? 'overflow' : missing ? 'partial' : 'complete' };
+    }
+    usage.groups.push(group);
+  }
+  return { timing, usage, notes: [
+    'Frozen displayed retained window only, across filters. Timing supports unique tool start/completion and delegated-agent start/completion/failure pairs. Other activity is not timed. At most 300 retained records are available.',
+    'Wall span uses the earliest and latest valid matching retained timestamps. Summed operation intervals can exceed wall span because tools and agents overlap. Covered time is their union; unaccounted gaps are its complement inside this window, not idle or thinking time. These measures do not establish compute time, causality or productivity.',
+    'Usage covers retained live assistant.usage receipts only. Earlier ephemeral receipts are not backfilled from history. Missing fields are unavailable; partial sums include only reported values. Exact accounting sources and envelope agents are different identities. Unknown exact providers keep receipts separate, even when provider families match.',
+    'All usage measures are host-reported tokens. Cache read/write remain separate provider-specific measures; no universal subtraction from input is assumed. Reasoning tokens are already part of output, never extra output. No combined token, credit or monetary total is calculated.',
+    'Session metrics, checkpoints, shutdown totals and subagent totalTokens overlap receipts and are not added. API duration and reported agent durationMs are not added to boundary intervals. Other host fields remain uninterpreted raw evidence.',
+    ...(history !== 'ready' ? ['Earlier history is unavailable or loading.'] : []),
+    ...(omitted ? [`${omitted} older records were omitted before this capture; timing and usage are partial.`] : []),
+  ] };
+}
 
 // Link retained records, never reconstruct a child transcript or infer a causal tree.
 export function delegationHandoffs(entries, { history = 'ready', omitted = 0 } = {}) {

@@ -251,6 +251,12 @@ body:has(.footer-panel[open]) { overflow: hidden; }
 .observed-activity > summary { cursor: pointer; padding: 6px 0; color: var(--model); font-weight: 600; }
 .observed-activity li { margin-block: 12px; }
 .observed-activity button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+
+.time-usage { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 10px; overflow-wrap: anywhere; }
+.time-usage summary { cursor: pointer; padding: 6px 0; color: var(--model); }
+.time-usage > summary { font-weight: 600; }
+#time-usage-report details { margin-block: 8px; }
+#time-usage-report button { display: block; max-width: 100%; margin-block: 6px; white-space: normal; overflow-wrap: anywhere; }
 #observed-list { max-height: min(28rem, 50vh); overflow: auto; overscroll-behavior: contain; padding: 0 4px 0 22px; }
 .repeated-activity { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 10px; overflow-wrap: anywhere; }
 .repeated-activity summary { cursor: pointer; padding: 6px 0; color: var(--model); }

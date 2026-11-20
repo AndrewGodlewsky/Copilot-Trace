@@ -1,6 +1,6 @@
 # Trace
 
-Current version: **0.1.48**
+Current version: **0.1.49**
 
 A GitHub Copilot desktop plugin for understanding the activity inside your current chat. `/trace` opens a live timeline with turn markers and expandable recorded evidence. This is an initial proof of concept: explanations describe what events mean; they do not infer why the model made a decision.
 
@@ -13,6 +13,8 @@ Every completed iteration now includes a patch version bump, release notes, inde
 Open `/trace` beside a chat, then continue chatting. Available history appears first and new events arrive about once per second. Compact, color-coded nodes form a vertical flow; connecting arrows show event order only. Collapsed nodes show message excerpts, recorded model/tool names and short states. Timestamps, event types and evidence stay inside the expandable details. Consecutive hook events from the same agent share a **Hooks** section: expand it for invocation summaries and the original boundaries in recorded order. Pipeline counts are separate from event counts; one invocation can include multiple callbacks or no configured handler. Open an event to inspect its recorded inputs, results and identifiers. Opening a step or scrolling upward away from the bottom turns off **Follow live**, so incoming events do not pull you away. Checking it again jumps to the bottom of the entire plugin, including the footer, and resumes following. Scrolling back down manually does not re-enable it.
 
 Open **Statistics** in the persistent bottom bar for model turns, hook pipelines, tool calls and skill loads, plus hook and skill names. The bar shows a small retained turn/tool count while you scroll. Statistics opens upward as an overlay drawer; Close or Escape returns focus to its button. Opening it pauses Follow live. Counts cover retained events only, pair boundaries by agent and recorded ID, and include invocations with only one boundary available. Events without usable IDs are reported separately. These are not whole-chat totals.
+
+The optional time and usage breakdown distinguishes observed wall time, overlapping operation durations and intervals without supported timing evidence. Host-reported token receipts retain their source and model scope, with original evidence, deduplication and explicit missing or excluded data. Usage observed while Trace is open is not backfilled from history or presented as a billing total. Cache and reasoning measures are not added to input/output totals; monetary estimates remain unavailable. See [time and usage](docs/time-and-usage.md).
 
 A **Model turn** heading marks one iteration of the agent loop. Activity recorded for the same agent before its matching end is indented, followed by a compact **Turn complete** marker. One user request may involve many turns. Missing boundaries stay explicit, tools can run outside turns, and interleaved agents keep their chronological order. Expand either boundary for the original evidence; indentation shows timing, not causal ownership.
 

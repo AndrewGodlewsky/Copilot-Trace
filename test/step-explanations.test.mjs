@@ -60,6 +60,24 @@ test('tool invocation, recorded success, failure and unavailable result remain d
   }
 });
 
+test('live usage explains one reported call, retained coverage and unavailable nonbilling amounts', async t => {
+  let emit;
+  const trace = createTrace({ on(listener) { emit = listener; return () => {}; }, getEvents: async () => [] });
+  t.after(() => trace.close()); await trace.ready;
+  emit({ id: 'usage', type: 'assistant.usage', timestamp: '2026-11-20T12:00:00Z', data: {
+    model: 'fixture', accounting: { sourceSessionId: 'source', sequence: 1, usageId: 'usage' },
+    inputTokens: 100, outputTokens: 20, cost: 0, aiCreditsStatus: 'unavailable',
+  } });
+  const entry = trace.snapshot().entries[0], explanation = presentation.explainStep(entry);
+  assert.match(explanation.happened, /host.*usage.*one model call/i);
+  assert.match(explanation.means, /live.*retained/i);
+  assert.match(explanation.means, /history.*not.*backfilled/i);
+  assert.match(explanation.unknown, /missing.*unavailable.*not zero/i);
+  assert.match(explanation.unknown, /billing|charge/i);
+  assert.doesNotMatch(explanation.happened + explanation.means + explanation.general, /unrecognized|explanation unavailable/i);
+  assert.equal(explanation.general, entry.explanation);
+});
+
 test('assistant statements are reported text and never independently verified reasons', async () => {
   for (const type of ['assistant.intent', 'assistant.message', 'assistant.reasoning']) {
     const explanation = presentation.explainStep(await observed(type, { content: 'I know why <script>日本語😀', intent: 'I know why' }));

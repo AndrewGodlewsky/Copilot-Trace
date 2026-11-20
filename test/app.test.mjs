@@ -113,6 +113,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     '#validation-overview', '#validation-summary', '#validation-scope', '#validation-list',
     '#repeated-activity', '#repeated-summary', '#repeated-scope', '#repeated-list',
     '#observed-activity', '#observed-summary', '#observed-time', '#observed-feed', '#observed-scope', '#observed-list',
+    '#time-usage', '#time-usage-scope', '#time-usage-report', '#time-usage-status',
     '#instruction-sources', '#instruction-refresh', '#instruction-status', '#instruction-scope', '#instruction-window', '#instruction-current', '#instruction-loads',
     '#instruction-inspector', '#instruction-title', '#instruction-detail', '#instruction-body', '#instruction-original', '#instruction-selection-status',
     '#statistics-panel', '#statistics-button', '#evidence-scope', '#scope-summary', '#scope-view', '#stat-evidence-scope', '#stat-scope-summary']) {
@@ -128,6 +129,9 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   selectors.get('#plausible-summary').tagName = 'summary';
   for (const id of ['summary', 'scope', 'list']) plausible.append(selectors.get(`#plausible-${id}`));
   const statistics = selectors.get('#statistics-panel');
+  const timeUsage = selectors.get('#time-usage'); timeUsage.tagName = 'details'; statistics.append(timeUsage);
+  timeUsage.append(new Element('summary'));
+  for (const id of ['scope', 'report', 'status']) timeUsage.append(selectors.get(`#time-usage-${id}`));
   const surprisesPanel = selectors.get('#surprises-panel'); surprisesPanel.tagName = 'dialog'; surprisesPanel.className = 'footer-panel';
   const surprisesClose = new Element('button'); surprisesClose.textContent = 'Close'; surprisesClose.dataset.closePanel = ''; surprisesPanel.append(surprisesClose);
   for (const id of ['scope', 'count', 'list', 'clear', 'status']) surprisesPanel.append(selectors.get(`#surprises-${id}`));
@@ -234,6 +238,85 @@ const exampleResponse = text => ({ ok: true, text: async () => text });
 
 function openPlausible(ui) { const disclosure = ui.get('#plausible-actions'); disclosure.open = true; disclosure.dispatch('toggle'); }
 function closePlausible(ui) { const disclosure = ui.get('#plausible-actions'); disclosure.open = false; disclosure.dispatch('toggle'); }
+function openTimeUsage(ui) { const disclosure = ui.get('#time-usage'); disclosure.open = true; disclosure.dispatch('toggle'); }
+
+test('time and usage freezes the displayed capture, preserves focus and scroll, and guards original links', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close()); emitRead(data);
+  data.emit('usage-one', 'assistant.usage', { model: 'literal <script> 日本語', accounting: { sourceSessionId: 'account', sequence: 1, usageId: 'receipt' }, inputTokens: 100, outputTokens: 20, cacheReadTokens: 40 });
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot())); await ui.refreshFeed();
+  assert.equal(ui.get('#time-usage-report').children.length, 0);
+  ui.get('#statistics-button').dispatch('click'); openTimeUsage(ui);
+  const report = ui.get('#time-usage-report');
+  assert.match(report.textContent, /Wall span.*Summed operation intervals.*Union-covered time.*Unaccounted time/s);
+  assert.match(report.textContent, /Input: 100 tokens.*Output: 20 tokens.*Cache read: 40 tokens/s);
+  assert.match(report.textContent, /literal <script> 日本語.*Exact provider unavailable/s);
+  assert.equal(ui.get('#follow').checked, false);
+  const original = report.querySelectorAll('button').find(button => /usage-one/.test(button.textContent)); assert.ok(original);
+  original.focus(); ui.get('#statistics-panel').scrollTop = 150; ui.document.scrollingElement.scrollTop = 200;
+  const frozen = report.textContent;
+  data.emit('usage-two', 'assistant.usage', { model: 'LATER-MODEL', accounting: { sourceSessionId: 'account', sequence: 2, usageId: 'later' }, inputTokens: 900 });
+  await ui.refreshFeed();
+  assert.equal(report.textContent, frozen); assert.equal(ui.document.activeElement, original);
+  assert.equal(ui.get('#statistics-panel').scrollTop, 150); assert.equal(ui.document.scrollingElement.scrollTop, 200);
+  original.dispatch('click'); assert.equal(ui.get('#statistics-panel').open, false);
+  assert.equal(ui.get('#event-order').value, 'chronological'); assert.equal(ui.get('#follow').checked, false);
+  const before = ui.document.scrollingElement.scrollTop;
+  ui.render(data.trace.snapshot().entries.filter(entry => entry.id !== 'usage-one'));
+  ui.get('#follow').checked = true; original.dispatch('click');
+  assert.equal(ui.get('#follow').checked, true); assert.equal(ui.document.scrollingElement.scrollTop, before);
+  assert.equal(original.attributes['aria-disabled'], 'true');
+  ui.closePage(); original.dispatch('click'); assert.equal(report.children.length, 0);
+});
+
+test('time and usage clears between Learning contexts and excludes future playback or live receipts', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  data.emit('first', 'user.message', { content: 'Start' });
+  data.emit('future-usage', 'assistant.usage', { model: 'FUTURE-MODEL', accounting: { sourceSessionId: 'source', sequence: 1, usageId: 'future' }, inputTokens: 100 });
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot())); await ui.refreshFeed(); openTimeUsage(ui);
+  const stale = ui.get('#time-usage-report').querySelectorAll('button').find(button => /future-usage/.test(button.textContent));
+  ui.get('#playback-start').dispatch('click');
+  assert.equal(ui.get('#time-usage').open, false); assert.equal(ui.get('#time-usage-report').children.length, 0);
+  openTimeUsage(ui); assert.doesNotMatch(ui.get('#time-usage-report').textContent, /FUTURE-MODEL/);
+  assert.match(ui.get('#time-usage-scope').textContent, /Displayed practice\/playback prefix/);
+  data.emit('new-live', 'assistant.usage', { model: 'NEW-LIVE-MODEL', accounting: { sourceSessionId: 'source', sequence: 2, usageId: 'new' }, inputTokens: 200 });
+  await ui.refreshFeed(); assert.doesNotMatch(ui.get('#time-usage-report').textContent, /FUTURE-MODEL|NEW-LIVE-MODEL/);
+  stale.dispatch('click'); assert.equal(ui.get('#playback-controls').hidden, false);
+  ui.get('#time-usage').open = false; ui.get('#time-usage').dispatch('toggle');
+  ui.get('#playback-next').dispatch('click'); ui.get('#playback-next').dispatch('click'); openTimeUsage(ui);
+  assert.match(ui.get('#time-usage-report').textContent, /FUTURE-MODEL/); assert.doesNotMatch(ui.get('#time-usage-report').textContent, /NEW-LIVE-MODEL/);
+});
+
+test('time and usage excludes hidden live predictions and labels synthetic example prefixes', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot()), undefined, Date, async () => exampleResponse(exampleText));
+  await ui.refreshFeed(); ui.get('#prediction-live').dispatch('click');
+  data.emit('hidden-usage', 'assistant.usage', { model: 'HIDDEN-LIVE', accounting: { sourceSessionId: 'source', sequence: 1, usageId: 'hidden' }, inputTokens: 100 });
+  await ui.refreshFeed(); openTimeUsage(ui);
+  assert.doesNotMatch(ui.get('#time-usage-report').textContent, /HIDDEN-LIVE/);
+  ui.get('#prediction-exit').dispatch('click'); openTimeUsage(ui);
+  assert.match(ui.get('#time-usage-report').textContent, /HIDDEN-LIVE/);
+  const liveButton = ui.get('#time-usage-report').querySelectorAll('button').find(button => /hidden-usage/.test(button.textContent));
+  ui.get('#examples-load').dispatch('click'); await ui.settleExamples(); ui.get('#examples-open').dispatch('click'); openTimeUsage(ui);
+  assert.match(ui.get('#time-usage-scope').textContent, /Synthetic demonstration/);
+  assert.doesNotMatch(ui.get('#time-usage-report').textContent, /HIDDEN-LIVE/);
+  ui.document.scrollingElement.scrollTop = 150; liveButton.dispatch('click');
+  assert.equal(ui.document.scrollingElement.scrollTop, 150); ui.closePage();
+});
+
+test('time and usage refreshes when native close and reopen toggle tasks coalesce', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  const receipt = (id, sequence, model) => data.emit(id, 'assistant.usage', { model,
+    accounting: { sourceSessionId: 'source', sequence, usageId: id }, inputTokens: 100 });
+  receipt('old', 1, 'OLD-MODEL');
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot())); await ui.refreshFeed(); openTimeUsage(ui);
+  const oldButton = ui.get('#time-usage-report').querySelectorAll('button').find(button => /old/.test(button.textContent));
+  receipt('new', 2, 'NEW-MODEL'); await ui.refreshFeed();
+  assert.doesNotMatch(ui.get('#time-usage-report').textContent, /NEW-MODEL/);
+  ui.get('#time-usage').open = false; ui.get('#time-usage').open = true; ui.get('#time-usage').dispatch('toggle');
+  assert.match(ui.get('#time-usage-report').textContent, /NEW-MODEL/);
+  ui.get('#follow').checked = true; ui.document.scrollingElement.scrollTop = 190; oldButton.dispatch('click');
+  assert.equal(ui.get('#follow').checked, true); assert.equal(ui.document.scrollingElement.scrollTop, 190); ui.closePage();
+});
 function emitRead(data, id = 'read', success = true) {
   data.emit(`${id}-start`, 'tool.execution_start', { toolCallId: id, toolName: 'view', arguments: { path: '日本語🧪<script>' } });
   data.emit(`${id}-end`, 'tool.execution_complete', { toolCallId: id, success, result: { content: 'Literal 日本語🧪<script>' } });
