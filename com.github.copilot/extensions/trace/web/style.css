@@ -308,6 +308,14 @@ body:has(.footer-panel[open]) { overflow: hidden; }
 }
 /* Practice shares the pane's ordinary flow, including short and narrow layouts. */
 .prediction, .playback { margin-block: 1rem; padding: .8rem; border: 1px solid var(--line); border-radius: .4rem; }
+.plausible-actions { margin-block: 1rem; padding: .8rem; border: 1px solid var(--line); border-radius: .4rem; overflow-wrap: anywhere; }
+.plausible-actions > summary { cursor: pointer; }
+.plausible-actions button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.plausible-actions button[aria-disabled='true'] { opacity: .65; cursor: default; }
+#plausible-list { max-height: min(32rem, 60vh); overflow: auto; overscroll-behavior: contain; }
+.plausible-scenario { border-top: 1px solid var(--line); padding-block: .75rem; }
+.plausible-scenario h3, .plausible-scenario h4 { margin-block: .5rem; font-size: 1rem; }
+.plausible-scenario ul { padding-left: 1.25rem; }
 .prediction summary, .playback summary { cursor: pointer; }
 .prediction-actions, .playback-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-block: .6rem; }
 #prediction-controls, #playback-controls { display: grid; gap: .6rem; }

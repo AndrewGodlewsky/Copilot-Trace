@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.45",
+    "summary": "Explore plausible next actions for supported observations, with conditions and evidence links. These optional teaching scenarios stay separate from recorded activity."
+  },
+  {
     "version": "0.1.44",
     "summary": "Explore three synthetic examples of repository exploration, a bug fix and recovery after failure. Step through each demonstration while keeping live activity separate."
   },

@@ -96,6 +96,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     '#playback', '#playback-start', '#playback-controls', '#playback-previous', '#playback-next', '#playback-play',
     '#playback-exit', '#playback-follow', '#playback-status', '#playback-scope', '#playback-motion', '#learning-activity',
     '#examples', '#examples-load', '#examples-select', '#examples-open', '#examples-status', '#examples-notes', '#example-banner',
+    '#plausible-actions', '#plausible-summary', '#plausible-scope', '#plausible-list',
     '#stat-scope', '#stat-hooks', '#stat-skills', '#statistics-peek', '#footer-dock', '#event-order',
     '#activity-filter', '#reset-filter', '#filter-status', '#filter-empty', '#lane-help',
     '#event-target', '#jump-event', '#navigation-status', '#capabilities', '#capability-refresh', '#capability-status',
@@ -115,6 +116,9 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     element.id = selector.slice(1); selectors.set(selector, element); document.body.append(element);
   }
   const glossary = selectors.get('#glossary-panel');
+  const plausible = selectors.get('#plausible-actions'); plausible.tagName = 'details';
+  selectors.get('#plausible-summary').tagName = 'summary';
+  for (const id of ['summary', 'scope', 'list']) plausible.append(selectors.get(`#plausible-${id}`));
   const statistics = selectors.get('#statistics-panel');
   const argumentsPanel = selectors.get('#arguments-panel'); argumentsPanel.tagName = 'dialog'; argumentsPanel.className = 'footer-panel';
   const argumentsClose = new Element('button'); argumentsClose.textContent = 'Close'; argumentsClose.dataset.closePanel = ''; argumentsPanel.append(argumentsClose);
@@ -207,6 +211,116 @@ const feedResponse = (snapshot, status = 200) => ({ status, headers: { get: () =
 
 const exampleText = await readFile(new URL('../com.github.copilot/extensions/trace/web/examples.json', import.meta.url), 'utf8');
 const exampleResponse = text => ({ ok: true, text: async () => text });
+
+function openPlausible(ui) { const disclosure = ui.get('#plausible-actions'); disclosure.open = true; disclosure.dispatch('toggle'); }
+function closePlausible(ui) { const disclosure = ui.get('#plausible-actions'); disclosure.open = false; disclosure.dispatch('toggle'); }
+function emitRead(data, id = 'read', success = true) {
+  data.emit(`${id}-start`, 'tool.execution_start', { toolCallId: id, toolName: 'view', arguments: { path: '日本語🧪<script>' } });
+  data.emit(`${id}-end`, 'tool.execution_complete', { toolCallId: id, success, result: { content: 'Literal 日本語🧪<script>' } });
+}
+
+test('plausible actions are opt-in, separate authored choices, preserve reading during arrivals and navigate literal evidence', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close()); emitRead(data);
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot())); await ui.refreshFeed();
+  const list = ui.get('#plausible-list'); assert.equal(list.children.length, 0);
+  const before = JSON.stringify(data.trace.snapshot().entries), counts = ui.get('#stat-counts').textContent;
+  ui.get('#follow').checked = true; openPlausible(ui);
+  assert.equal(ui.get('#follow').checked, false); assert.match(list.textContent, /Recorded observation.*returned data.*Authored alternatives/s);
+  assert.match(list.textContent, /If the data.*If the returned data/s);
+  assert.equal(ui.get('#stat-counts').textContent, counts); assert.equal(JSON.stringify(data.trace.snapshot().entries), before);
+  const row = list.children[0], buttons = row.querySelectorAll('button'), source = buttons.find(button => /Original result/.test(button.textContent));
+  source.focus(); list.scrollTop = 60; ui.document.scrollingElement.scrollTop = 200;
+  const text = list.textContent; emitRead(data, 'later'); await ui.refreshFeed();
+  assert.equal(list.children[0], row); assert.equal(list.textContent, text);
+  assert.equal(ui.document.activeElement, source); assert.equal(list.scrollTop, 60); assert.equal(ui.document.scrollingElement.scrollTop, 200);
+  assert.equal(list.attributes['aria-live'], undefined); assert.equal(row.querySelector('p').attributes.role, undefined);
+  buttons.find(button => /Glossary/.test(button.textContent)).dispatch('click');
+  assert.equal(ui.get('#glossary-panel').open, true); assert.match(ui.get('#glossary-example').textContent, /tool.execution_start/);
+  ui.get('#glossary-panel').close(); source.dispatch('click');
+  assert.match(ui.get('#timeline').textContent, /Literal 日本語🧪<script>/); assert.equal(ui.get('#event-order').value, 'chronological');
+  assert.ok(walk(ui.get('#timeline')).some(node => node.scrolled));
+  closePlausible(ui); assert.equal(list.children.length, 0);
+  source.dispatch('click'); assert.equal(list.children.length, 0);
+});
+
+test('plausible permission gap settles without rewriting choices or stealing focus, and stale controls cannot jump', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  data.emit('request', 'permission.requested', { requestId: 'permission', permissionRequest: { kind: 'shell', toolCallId: 'call' } });
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot())); await ui.refreshFeed(); openPlausible(ui);
+  const list = ui.get('#plausible-list'), row = list.children[0], source = row.querySelector('button');
+  assert.match(row.textContent, /current waiting and approval are unknown/i); source.focus(); ui.document.scrollingElement.scrollTop = 250;
+  data.emit('decision', 'permission.completed', { requestId: 'permission', result: { kind: 'approved' } }); await ui.refreshFeed();
+  assert.equal(list.children[0], row); assert.equal(ui.document.activeElement, source);
+  assert.match(row.textContent, /changed, settled or left/i); assert.equal(source.attributes['aria-disabled'], 'true');
+  for (const button of row.querySelectorAll('button')) button.dispatch('click');
+  assert.equal(ui.get('#glossary-panel').open, false); assert.equal(ui.document.scrollingElement.scrollTop, 250);
+  closePlausible(ui); openPlausible(ui); assert.match(list.textContent, /General guidance/);
+});
+
+test('plausible source guards reject replaced, ambiguous and evicted records and page-close callbacks', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close()); emitRead(data);
+  const entries = data.trace.snapshot().entries;
+  for (const change of [records => records.slice(0, 1), records => [...records, { ...records[1], id: 'another-start' }],
+    records => records.map(entry => entry.id === 'read-end' ? { ...entry, evidence: '{}' } : entry)]) {
+    const ui = fixture(appSource); ui.render(entries); openPlausible(ui);
+    const row = ui.get('#plausible-list').children[0], buttons = row.querySelectorAll('button');
+    buttons[0].focus(); ui.document.scrollingElement.scrollTop = 240; ui.render(change(entries));
+    for (const button of buttons) button.dispatch('click');
+    assert.equal(ui.document.scrollingElement.scrollTop, 240); assert.equal(ui.get('#glossary-panel').open, false);
+    assert.match(row.textContent, /unavailable/i); ui.closePage();
+  }
+  const ui = fixture(appSource); ui.render(entries); openPlausible(ui); const buttons = ui.get('#plausible-list').querySelectorAll('button');
+  ui.closePage(); for (const button of buttons) button.dispatch('click');
+  assert.equal(ui.get('#plausible-list').children.length, 0); assert.equal(ui.get('#glossary-panel').open, false);
+});
+
+test('plausible teaching only sees playback and practice prefixes and inspection pauses automatic playback', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close()); emitRead(data); data.response('future');
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot())); await ui.refreshFeed();
+  openPlausible(ui); const old = ui.get('#plausible-list').querySelector('button');
+  ui.get('#playback-start').dispatch('click'); assert.equal(ui.get('#plausible-actions').open, false); old.dispatch('click');
+  openPlausible(ui); assert.match(ui.get('#plausible-list').textContent, /General guidance/);
+  assert.equal(ui.get('#plausible-list').querySelectorAll('button').length, 1);
+  ui.get('#playback-next').dispatch('click'); closePlausible(ui); openPlausible(ui);
+  assert.match(ui.get('#plausible-list').textContent, /General guidance/);
+  ui.get('#playback-next').dispatch('click'); closePlausible(ui); ui.get('#playback-play').dispatch('click');
+  assert.equal(ui.playbackTimers.size, 1); openPlausible(ui); assert.equal(ui.playbackTimers.size, 0);
+  assert.match(ui.get('#plausible-list').textContent, /returned data/);
+  const futureControl = ui.get('#plausible-list').querySelector('button'); ui.get('#playback-previous').dispatch('click');
+  futureControl.dispatch('click'); assert.equal(ui.get('#plausible-list').children.length, 0);
+  assert.doesNotMatch(ui.get('#timeline').textContent, /Literal 日本語/);
+  ui.get('#playback-exit').dispatch('click'); ui.get('#prediction-replay').dispatch('click'); openPlausible(ui);
+  assert.match(ui.get('#plausible-list').textContent, /General guidance/); assert.doesNotMatch(ui.get('#plausible-list').textContent, /returned data/);
+  ui.closePage();
+});
+
+test('plausible alternatives keep synthetic prefixes separate from live evidence and ignore detached same-ID controls', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close()); emitRead(data);
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot()), undefined, Date, async () => exampleResponse(exampleText));
+  await ui.refreshFeed(); openPlausible(ui); const liveButton = ui.get('#plausible-list').querySelector('button');
+  ui.get('#examples-load').dispatch('click'); await ui.settleExamples(); ui.get('#examples-open').dispatch('click');
+  liveButton.dispatch('click'); openPlausible(ui);
+  assert.match(ui.get('#plausible-scope').textContent, /Synthetic demonstration observations/);
+  assert.match(ui.get('#plausible-list').textContent, /General guidance/);
+  assert.doesNotMatch(ui.get('#timeline').textContent, /Literal 日本語/);
+  const exampleButton = ui.get('#plausible-list').querySelector('button');
+  ui.get('#playback-exit').dispatch('click'); ui.document.scrollingElement.scrollTop = 230; exampleButton.dispatch('click');
+  assert.equal(ui.get('#glossary-panel').open, false); assert.equal(ui.document.scrollingElement.scrollTop, 230);
+  openPlausible(ui); assert.match(ui.get('#plausible-scope').textContent, /Recorded chat observations/);
+  assert.match(ui.get('#plausible-list').textContent, /returned data/); ui.closePage();
+});
+
+test('plausible teaching does not expose live arrivals hidden by an active prediction window', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot())); await ui.refreshFeed();
+  ui.get('#prediction-live').dispatch('click'); emitRead(data, 'hidden'); await ui.refreshFeed(); openPlausible(ui);
+  assert.match(ui.get('#plausible-list').textContent, /General guidance/);
+  ui.get('#plausible-list').querySelector('button').dispatch('click');
+  assert.equal(ui.get('#glossary-source').hidden, true);
+  assert.doesNotMatch(ui.get('#timeline').textContent, /Literal 日本語/);
+  ui.get('#glossary-panel').close(); ui.get('#prediction-exit').dispatch('click'); openPlausible(ui);
+  assert.match(ui.get('#plausible-list').textContent, /returned data/); ui.closePage();
+});
 
 test('synthetic lessons reveal only their prefix, label all viewers and preserve live capture, reading settings and marks on return', async t => {
   const data = await predictionFixture(); t.after(() => data.trace.close()); data.response('live answer');

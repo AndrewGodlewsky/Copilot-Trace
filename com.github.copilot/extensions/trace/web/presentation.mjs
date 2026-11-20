@@ -1,4 +1,4 @@
-import { vocabulary, conceptForEntry, glossaryExample } from './glossary.mjs';
+import { vocabulary, conceptForEntry, glossaryExample, retainedExample } from './glossary.mjs';
 import { retainedHostOutput } from './host-output.mjs';
 export { vocabulary, conceptForEntry, glossaryExample, retainedExample } from './glossary.mjs';
 
@@ -1721,6 +1721,80 @@ export function observedActivity(entries, { history = 'ready', omitted = 0, now 
   notes: ['Retained boundaries do not establish that work is currently running or waiting. Absence of an item does not establish inactivity or success.',
     'Missing, late or omitted records can leave an outcome unknown. Trace cannot diagnose thinking, failure or completion from silence.',
     ...(history !== 'ready' ? ['History is incomplete or unavailable.'] : []), ...(omitted ? ['Older events were omitted.'] : [])] };
+}
+
+const actionLessons = {
+  failure: { title: 'A recorded failure', concept: 'tool', options: [
+    { action: 'Inspect the reported failure and the original request.', when: 'If the error or typed exit leaves the cause unclear, compare the literal result with the requested operation.' },
+    { action: 'Gather a missing prerequisite or clarify the scope.', when: 'If inspection identifies missing information or an unmet prerequisite, resolve that gap before considering another authorized attempt.' },
+  ] },
+  retrieval: { title: 'A successful retrieval report', concept: 'tool', options: [
+    { action: 'Compare the returned information with the question.', when: 'If the data addresses the requested scope, identify which parts support an answer and which remain unverified.' },
+    { action: 'Seek a more relevant source or clarify the question.', when: 'If the returned data is irrelevant, incomplete or conflicting, name that gap before considering another authorized retrieval.' },
+  ] },
+  permission: { title: 'A permission evidence gap', concept: 'permission', options: [
+    { action: 'Inspect the request and check the host’s current permission state.', when: 'If the operation is still needed, establish its current state and requested scope before treating it as authorized.' },
+    { action: 'Explain the missing decision and consider an authorized alternative.', when: 'If permission cannot be established, clarify the limitation or use an already authorized approach; never infer approval from silence.' },
+  ] },
+  check: { title: 'A completed check process', concept: 'tool', options: [
+    { action: 'Report the command and its bounded result.', when: 'If this check answers a requested validation question, describe its exact scope and the observed exit without claiming overall correctness.' },
+    { action: 'Identify a remaining validation gap.', when: 'If requirements extend beyond this command’s coverage, name the missing evidence before considering another authorized check.' },
+  ] },
+};
+const generalActions = {
+  title: 'General guidance', concept: 'tool', observation: 'A supported scenario is unknown in this displayed window.',
+  limit: 'Missing or unsupported evidence cannot establish a personalized next action.', evidence: [], options: [
+    { action: 'Inspect the available evidence and its limits.', when: 'If a retained event is relevant, separate what it records from what remains unknown.' },
+    { action: 'Clarify the question or missing information.', when: 'If the available evidence cannot answer the question, describe the gap before choosing any authorized action.' },
+  ],
+};
+
+function actionScenarios(retained) {
+  const entries = retained.slice(-300), positions = new Map(entries.map((entry, index) => [entry, index])), scenarios = [];
+  const complete = entry => retainedExample(entries, entry) && identityText(entry.id)
+    && (entry.agentId === '' || identityText(entry.agentId)) && entry.truncated === false
+    && (!Object.hasOwn(entry, 'protectedContentOmitted') || entry.protectedContentOmitted === false);
+  const add = (kind, evidence, observation, limit) => scenarios.push({ kind, id: `${kind}:${evidence[0].id}`,
+    ...actionLessons[kind], evidence, observation, limit });
+  const outcomes = toolOutcomes(entries), checks = validationChecks(entries);
+  for (const { boundaries, start, data } of toolBuckets(entries)) {
+    const result = boundaries.find(entry => entry.type === 'tool.execution_complete'), end = result && explanationData(result);
+    if (!data || !result || !boundaries.every(entry => complete(entry) && identityText(entry.toolCallId)) || positions.get(start) >= positions.get(result)
+      || typeof end?.success !== 'boolean' || end.success !== result.success
+      || [...mcpFields, 'origin', 'overridesBuiltInTool'].some(field => Object.hasOwn(end, field)
+        && (!Object.hasOwn(data, field) || end[field] !== data[field]))
+      || [data, end].some(record => ['ownerAgentId', 'ownerSessionId'].some(field => Object.hasOwn(record, field)))) continue;
+    const outcome = outcomes.get(result.id), shell = outcome?.kind === 'process' ? validationExit(end) : null;
+    const evidence = [start, result];
+    if (end.success === false || (shell && shell.exitCode !== 0)) {
+      add('failure', evidence, `The tool protocol reports ${end.success ? 'success' : 'failure'}.${shell ? ` Typed process exit ${shell.exitCode} describes this command only.` : ''}`,
+        'The cause, current need for another attempt and overall task outcome remain unknown. A later success does not erase this recorded failure.');
+    } else if (outcome?.kind === 'read') {
+      add('retrieval', evidence, 'A supported read request has a matching tool-success report with returned data.',
+        'Relevance, usefulness and sufficiency remain unknown. Returned data does not prove overall task correctness.');
+    } else if (shell && checks.some(check => check.start === start && check.result === result && check.exitCode === shell.exitCode)) {
+      add('check', evidence, `A supported validation command has a matching typed process exit ${shell.exitCode} and a tool-success report.`,
+        'Assertion counts and coverage remain unknown. Exit zero does not prove tests or the overall task correct.');
+    }
+  }
+  for (const item of observedActivity(entries).items) if (item.kind === 'permission' && item.links.every(complete)) {
+    add('permission', item.links, 'A retained permission request has no matching recorded decision.',
+      'It may be old or incomplete; current waiting and approval are unknown. A request does not prove execution.');
+  }
+  return scenarios.sort((a, b) => positions.get(a.evidence.at(-1)) - positions.get(b.evidence.at(-1)));
+}
+
+export function plausibleActions(entries, { history = 'ready', omitted = 0 } = {}) {
+  const scenarios = actionScenarios(entries), selected = scenarios.slice(-3);
+  return { scenarios: selected, omittedScenarios: Math.max(0, scenarios.length - selected.length), general: generalActions,
+    scope: `Up to three latest supported observations from at most 300 displayed retained events, selected when opened. ${Math.max(0, scenarios.length - selected.length)} other supported observations not shown. These are separate observations, not a combined plan or a complete current action set; overlapping activity does not establish which action comes next. ${omitted} older events omitted.`
+      + (history !== 'ready' ? ' Earlier history is unavailable or loading.' : '') };
+}
+
+export function retainedPlausibleScenario(entries, scenario) {
+  return scenario.evidence.every(entry => retainedExample(entries, entry)) && actionScenarios(entries).some(current =>
+    current.id === scenario.id && current.evidence.length === scenario.evidence.length
+      && scenario.evidence.every(entry => retainedExample(current.evidence, entry)));
 }
 
 // Temporal membership only: keep interleaved agents in their original event order.

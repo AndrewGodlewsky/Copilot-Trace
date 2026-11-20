@@ -9,6 +9,7 @@ import { initCapabilities } from './capabilities.mjs';
 import { initInstructionSources } from './instructions.mjs';
 import { vocabulary, conceptForEntry, glossaryExample, retainedExample } from './glossary.mjs';
 import { validationClaims, validationChecks, validationOverview, linkValidationClaim, retainedValidationLink, observedActivity, repeatedActivity, argumentComparisonCalls, retainedArgumentCall, compareToolArguments } from './presentation.mjs';
+import { plausibleActions, retainedPlausibleScenario } from './presentation.mjs';
 
 const diagnostics = createDiagnostics();
 diagnostics.record('panel_started');
@@ -64,6 +65,64 @@ let lastSnapshot;
 let liveSnapshot, practice, playback, activityCount, armingPrediction, practiceGeneration = 0;
 let exampleLibrary, activeExample, savedLiveView, loadingExamples, exampleLoading = false, exampleRequest;
 let feedState;
+const plausibleDisclosure = document.querySelector('#plausible-actions'), plausibleList = document.querySelector('#plausible-list');
+let plausibleViews = [];
+plausibleDisclosure.addEventListener('toggle', () => {
+  if (!plausibleDisclosure.open || panelClosed) { clearPlausibleActions(); return; }
+  follow.checked = false; pausePlayback();
+  const snapshot = freezeLearningSnapshot(lastSnapshot || { entries: [], history: 'unknown' });
+  const lesson = plausibleActions(snapshot.entries, snapshot);
+  document.querySelector('#plausible-scope').textContent = (activeExample ? 'Synthetic demonstration observations. '
+    : practice || playback ? 'Displayed practice/playback prefix only. ' : 'Recorded chat observations. ') + lesson.scope
+    + ' Choices stay fixed while open; close and reopen to select current evidence.';
+  plausibleList.replaceChildren();
+  plausibleViews = (lesson.scenarios.length ? lesson.scenarios : [lesson.general]).map(scenario => {
+    const row = element('section', '', 'plausible-scenario'), status = element('p'), buttons = [];
+    const view = { scenario, row, status, buttons, expired: false };
+    row.append(element('h3', scenario.title), element('h4', scenario.kind ? 'Recorded observation' : 'Available evidence'),
+      element('p', scenario.observation), element('p', scenario.limit));
+    if (scenario.kind) row.append(element('p', `${describeActor(scenario.evidence[0]).source} · ${scenario.evidence[0].timestamp || 'Time unavailable'}`));
+    row.append(element('h4', 'Authored alternatives · Conditions, not instructions'));
+    const options = element('ul');
+    for (const option of scenario.options) {
+      const item = element('li'); item.append(element('strong', option.action), element('p', option.when)); options.append(item);
+    }
+    row.append(options);
+    const links = element('div', '', 'boundary-links');
+    const guard = button => {
+      if (panelClosed || !plausibleDisclosure.open || !plausibleViews.includes(view) || !button.isConnected) return false;
+      updatePlausibleActions(); return !view.expired;
+    };
+    for (const entry of scenario.evidence) {
+      const label = entry.type === 'tool.execution_start' ? 'Original request' : entry.type === 'tool.execution_complete' ? 'Original result' : 'Original boundary';
+      const button = element('button', `${label} · ${entry.type}`); button.type = 'button';
+      button.addEventListener('click', () => {
+        if (guard(button)) showBoundary(entry.id, 'Showing the teaching scenario’s original retained evidence. Follow live is paused.', entry);
+      });
+      buttons.push(button); links.append(button);
+    }
+    const glossary = element('button', `Glossary · ${vocabulary[scenario.concept].label}`); glossary.type = 'button';
+    glossary.addEventListener('click', () => { if (guard(glossary)) openGlossary(scenario.concept, scenario.evidence[0], glossary); });
+    buttons.push(glossary); links.append(glossary); row.append(links, status); plausibleList.append(row);
+    return view;
+  });
+  updatePlausibleActions();
+});
+function updatePlausibleActions() {
+  if (!plausibleDisclosure.open || panelClosed) return;
+  for (const view of plausibleViews) {
+    if (view.scenario.kind && !view.expired && !retainedPlausibleScenario(lastSnapshot?.entries || [], view.scenario)) view.expired = true;
+    const message = view.expired ? 'Evidence unavailable: this observation changed, settled or left the displayed window. The authored lesson stays as selected; close and reopen for current evidence. Reading position unchanged.'
+      : view.scenario.kind ? 'Recorded observation when opened; its current relevance is unknown.' : 'General authored guidance; no supported observation was selected.';
+    if (view.status.textContent !== message) view.status.textContent = message;
+    for (const button of view.buttons) button.setAttribute('aria-disabled', String(view.expired));
+  }
+}
+function clearPlausibleActions() {
+  if (plausibleList.contains(document.activeElement)) document.querySelector('#plausible-summary').focus({ preventScroll: true });
+  plausibleViews = []; plausibleDisclosure.open = false; plausibleList.replaceChildren();
+  document.querySelector('#plausible-scope').textContent = '';
+}
 const argumentsButton = document.querySelector('#arguments-button'), argumentsPanel = document.querySelector('#arguments-panel');
 const argumentSelects = ['first', 'second'].map(side => document.querySelector(`#arguments-${side}`));
 const argumentDetails = ['first', 'second'].map(side => document.querySelector(`#arguments-${side}-detail`));
@@ -1476,6 +1535,7 @@ function reconcileLanes(snapshot, visible) {
 function render(snapshot) {
   updateGlossary();
   updateArgumentComparison();
+  updatePlausibleActions();
   const focused = document.activeElement;
   const focusedId = [...nodes].find(([, node]) => node.item.contains(focused))?.[0];
   const focusedGroup = groups.find(group => group.item.contains(focused) || group.ids.has(focusedId));
@@ -1777,6 +1837,7 @@ const exampleContexts = ['statistics-panel', 'glossary-panel', 'arguments-panel'
 
 const prediction = id => document.querySelector(`#prediction-${id}`);
 function closePracticeInspectors() {
+  clearPlausibleActions();
   for (const panel of document.querySelectorAll('.footer-panel')) footerPanels.closePanel(panel.id, { restoreFocus: false });
   clearArgumentComparison(); glossaryTarget = undefined; guidanceExamples = [];
   for (const id of ['glossary-example', 'glossary-status', 'guidance-examples']) document.querySelector(`#${id}`).textContent = '';
@@ -2008,6 +2069,7 @@ motionPreference.addEventListener('change', changeMotion);
 document.querySelector('#playback').addEventListener('toggle', () => { if (!document.querySelector('#playback').open) pausePlayback(); });
 window.addEventListener('pagehide', () => {
   panelClosed = true;
+  clearPlausibleActions();
   exampleRequest?.abort(); exampleRequest = undefined; exampleLibrary = undefined; activeExample = undefined; savedLiveView = undefined;
   document.querySelector('#examples-select').replaceChildren(); document.querySelector('#examples-notes').replaceChildren();
   playback?.close(); playback = undefined; activityCount = undefined;
