@@ -161,8 +161,10 @@ input { accent-color: var(--model); margin: 0; }
 .evidence p { color: var(--muted); font-size: 0.929rem; }
 .evidence h4 { font-size: 0.857rem; font-weight: 600; margin: 12px 0 4px; }
 .evidence h4 + p { margin: 0 0 10px; }
-.evidence > details { margin-top: 14px; }
-.evidence > details > summary { cursor: pointer; font-size: 0.857rem; padding: 6px 0; }
+.evidence > details, .skill-instructions > details { margin-top: 14px; }
+.evidence > details > summary, .skill-instructions > details > summary { cursor: pointer; font-size: 0.857rem; padding: 6px 0; }
+.skill-instructions .metadata dd { white-space: pre-wrap; }
+.skill-preview { max-height: min(10rem, 35vh); }
 .metadata { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 14px; font-size: 0.786rem; margin: 16px 0; }
 .metadata dt { color: var(--muted); }
 .metadata dd { margin: 0; overflow-wrap: anywhere; }

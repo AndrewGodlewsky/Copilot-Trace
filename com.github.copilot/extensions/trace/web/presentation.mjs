@@ -85,7 +85,7 @@ const stepLessons = new Map(Object.entries({
     'A tool result does not establish that the user’s task is correct or complete. Missing boundaries leave the call record partial.'],
   'skill.invoked': ['The host recorded a skill being loaded.',
     'A skill supplies instructions or context. The recorded trigger is unavailable or unrecognized.',
-    'Loading does not prove the instructions were followed or identify which instruction caused the choice.'],
+    'Loading does not prove the instructions were followed or that a referenced script or command ran. The selection reason remains unknown; skill metadata does not establish tool approval.'],
   'subagent.started': ['The host recorded a delegated agent starting.',
     'Delegation gives another agent a piece of work; the event records its start.',
     'The outcome is not established here. A missing outcome does not mean the agent is still running.'],
@@ -139,6 +139,44 @@ function explanationData(entry) {
     && (event.timestamp ?? '') === entry.timestamp && data && typeof data === 'object' && !Array.isArray(data) ? data : null;
 }
 
+function skillData(entry) {
+  const data = explanationData(entry);
+  return data && shortTitle(typeof data.name === 'string' ? data.name : '') === entry.displayName
+    && shortTitle(typeof data.trigger === 'string' ? data.trigger : '', 80) === entry.trigger ? data : null;
+}
+
+const skillTriggers = new Map(Object.entries({
+  'user-invoked': 'The host attributes this load to an explicit user action, such as a slash command or UI action.',
+  'agent-invoked': 'The host reports that the agent requested this skill.',
+  'context-load': 'The host reports loading the skill as part of another context, such as a custom agent or subagent configuration.',
+}));
+
+export function skillInstructions(entry = {}) {
+  if (entry.type !== 'skill.invoked') return null;
+  const data = skillData(entry);
+  const content = typeof data?.content === 'string' ? data.content : null;
+  const trigger = typeof data?.trigger === 'string' ? data.trigger : null;
+  let preview = content === null ? null : content.slice(0, 600);
+  if (preview?.length < content?.length && /[\uD800-\uDBFF]$/.test(preview)) preview = preview.slice(0, -1);
+  const previewTruncated = content !== null && preview.length < content.length;
+  return {
+    name: typeof data?.name === 'string' ? data.name : null,
+    trigger,
+    triggerExplanation: skillTriggers.get(trigger) || (trigger === null ? 'Trigger unknown: not recorded or unavailable in complete matching evidence.'
+      : trigger === '' ? 'Trigger unknown: the recorded field is empty.' : 'Trigger unknown: this recorded value is unrecognized.'),
+    status: content === null ? 'unavailable' : content === '' ? 'empty' : 'complete',
+    content, preview, previewTruncated,
+    arguments: typeof data?.arguments === 'string' ? data.arguments : null,
+    note: !data ? entry.truncated
+      ? 'Instructions unavailable: this panel shortened the event evidence to 12,000 characters and cannot recover the complete instruction body.'
+      : 'Instructions unavailable: complete matching event evidence is not retained.'
+      : content === null ? 'Instructions unavailable: the host did not record a text instruction body.'
+      : content === '' ? 'The host recorded an empty instruction body.'
+      : previewTruncated ? 'Preview shortened. Expand Exact retained instructions for the complete retained text.'
+      : 'Complete instruction body retained.',
+  };
+}
+
 export function explainStep(entry = {}) {
   const lesson = stepLessons.get(entry.type);
   if (!lesson) return {
@@ -157,9 +195,10 @@ export function explainStep(entry = {}) {
     means = data.cancelled ? 'The recorded cancelled field reports cancellation of the delegated work.'
       : 'The recorded cancelled field reports completion without cancellation; this is not a check of the result’s correctness.';
   }
-  if (entry.type === 'skill.invoked' && ['agent-invoked', 'user-invoked', 'context-load'].includes(data?.trigger)
-    && data.trigger === entry.trigger) {
-    means = `A skill supplies instructions or context. The recorded trigger is ${data.trigger}; this is the host’s attribution.`;
+  if (entry.type === 'skill.invoked') {
+    const skill = skillInstructions(entry);
+    means = `A skill supplies instructions or context. ${skillTriggers.has(skill.trigger)
+      ? `The recorded trigger is ${skill.trigger}. ` : ''}${skill.triggerExplanation}`;
   }
   if (entry.type === 'user.message' && ['idle', 'steering', 'queued'].includes(data?.delivery) && data.delivery === entry.delivery) {
     means = `The recorded delivery is ${data.delivery}. ` + {
@@ -874,9 +913,9 @@ function actionTitle(entry, operation) {
   return (operation || toolOperations([entry]).get(entry.id))?.title || '';
 }
 
-function shortTitle(title) {
-  if (title.length <= 180) return title;
-  let prefix = title.slice(0, 179);
+function shortTitle(title, limit = 180) {
+  if (title.length <= limit) return title;
+  let prefix = title.slice(0, limit - 1);
   if (/[\uD800-\uDBFF]$/.test(prefix)) prefix = prefix.slice(0, -1);
   return prefix + '…';
 }

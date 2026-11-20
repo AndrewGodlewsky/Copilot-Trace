@@ -1,4 +1,4 @@
-import { describeActor, explainStep, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
+import { describeActor, explainStep, skillInstructions, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -198,6 +198,7 @@ function row(entry) {
   node.explanation = element('p', lesson.general);
   general.append(element('summary', 'General definition'), node.explanation);
   body.append(general);
+  renderSkillInstructions(node, entry);
   const metadata = element('dl', undefined, 'metadata');
   node.metadata = new Map();
   for (const [label, value] of metadataValues(entry)) {
@@ -217,6 +218,49 @@ function row(entry) {
   body.append(node.recordedEvidence);
   node.details.append(body);
   return node;
+}
+
+function renderSkillInstructions(node, entry) {
+  const instructions = skillInstructions(entry);
+  if (!instructions) return;
+  if (!node.skill) {
+    const section = element('div', undefined, 'skill-instructions');
+    const metadata = element('dl', undefined, 'metadata');
+    const name = element('dd'), trigger = element('dd'), explanation = element('p'), note = element('p');
+    metadata.append(element('dt', 'Recorded name'), name, element('dt', 'Recorded trigger'), trigger);
+    const preview = element('pre', '', 'skill-preview');
+    preview.tabIndex = 0;
+    preview.setAttribute('aria-label', 'Skill instruction preview');
+    const full = element('details', undefined, 'skill-full');
+    const content = element('pre');
+    content.tabIndex = 0;
+    content.setAttribute('aria-label', 'Exact retained skill instructions');
+    full.append(element('summary', 'Exact retained instructions'), content);
+    const inputs = element('details', undefined, 'skill-arguments');
+    const inputNote = element('p'), args = element('pre');
+    args.tabIndex = 0;
+    args.setAttribute('aria-label', 'Recorded skill invocation arguments');
+    inputs.append(element('summary', 'Recorded invocation arguments'), inputNote, args);
+    for (const disclosure of [full, inputs]) disclosure.addEventListener('toggle', () => {
+      if (disclosure.open) follow.checked = false;
+    });
+    section.append(element('h3', 'Supplied skill instructions'), metadata, explanation, note, preview, full, inputs);
+    node.body.append(section);
+    node.skill = { name, trigger, explanation, note, preview, full, content, inputs, inputNote, args };
+  }
+  const skill = node.skill;
+  for (const [target, value] of [
+    [skill.name, instructions.name === '' ? 'Recorded empty name' : instructions.name ?? 'Unavailable in complete matching evidence'],
+    [skill.trigger, instructions.trigger === '' ? 'Recorded empty trigger' : instructions.trigger ?? 'Not recorded in complete matching evidence'],
+    [skill.explanation, instructions.triggerExplanation], [skill.note, instructions.note],
+    [skill.preview, instructions.preview ?? ''], [skill.content, instructions.content ?? ''],
+    [skill.args, instructions.arguments ?? ''],
+    [skill.inputNote, instructions.arguments === '' ? 'The host recorded empty invocation arguments.'
+      : 'These recorded invocation inputs are separate from the reusable instruction body.'],
+  ]) if (target.textContent !== value) target.textContent = value;
+  skill.preview.hidden = instructions.status !== 'complete';
+  skill.full.hidden = instructions.status !== 'complete';
+  skill.inputs.hidden = instructions.arguments === null;
 }
 
 function metadataValues(entry) {
@@ -628,6 +672,7 @@ function render(snapshot) {
     const lesson = explainStep(entry);
     for (const [key, paragraph] of node.lesson) if (paragraph.textContent !== lesson[key]) paragraph.textContent = lesson[key];
     if (node.explanation.textContent !== lesson.general) node.explanation.textContent = lesson.general;
+    renderSkillInstructions(node, entry);
     if (node.pre.textContent !== (entry.evidence || '')) node.pre.textContent = entry.evidence || '';
     node.truncated.hidden = !entry.truncated;
     applyContext(node, context, entry);

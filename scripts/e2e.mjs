@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
-import { actionStages, agentLanes, hookInvocations, toolProvenance, summarize } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
+import { actionStages, agentLanes, hookInvocations, skillInstructions, toolProvenance, summarize } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
 
 const sdkDirectory = process.env.COPILOT_SDK_DIR;
 const cli = process.env.COPILOT_CLI_PATH;
@@ -389,6 +389,9 @@ try {
   provenanceFixture = { tools: [], responses: 0, allowCalls: false };
   const mcpEvents = [];
   const hookCalls = [];
+  const skillBody = '# Fixture instructions\n\nKeep this exact Unicode text: café 🧪.\n\n<script>literal only</script>\n\n```text\n  preserve whitespace\n```\n';
+  let currentSkillBody = skillBody;
+  let skillReads = 0;
   const fixtureHook = type => input => {
     hookCalls.push({ type, toolName: input.toolName, toolCallId: input.toolCallId });
     return { additionalContext: 'Fixed local hook context.' };
@@ -397,7 +400,11 @@ try {
   session = await client.createSession({
     workingDirectory: project, configDirectory: home, availableTools: ['mcp:*'],
     requestExtensions: true, requestCanvasRenderer: true,
-    extensionSdkPath: sdkDirectory, pluginDirectories: [root], enableConfigDiscovery: false,
+    extensionSdkPath: sdkDirectory, pluginDirectories: [root], enableConfigDiscovery: false, enableSkills: true,
+    skillProvider: {
+      listSkills: () => [{ name: 'fixture-auto', description: 'Fixed local skill content fixture.' }],
+      readSkill(name) { assert.equal(name, 'fixture-auto'); skillReads++; return currentSkillBody; },
+    },
     hooks: { onPreToolUse: fixtureHook('preToolUse'), onPostToolUse: fixtureHook('postToolUse'),
       onUserPromptSubmitted: fixtureHook('userPromptSubmitted') },
     mcpServers: Object.fromEntries(['first', 'second'].map(name => [name, { type: 'http', url: `${fixtureBase}/mcp/${name}`, tools: ['*'] }])),
@@ -420,18 +427,48 @@ try {
   await until(() => fetch(mcpPanel.url + 'events').then(response => response.json()), value => value.history === 'ready', 'provenance observation');
   assert.equal(mcpRequests, beforeMetadata, 'Opening and observing Trace makes no additional MCP requests.');
   assert.equal(requests, 10, 'Metadata reads and Trace observation make no inference requests.');
+  assert.equal(skillReads, 0, 'Observing Trace must not read a skill body.');
+  const skillInvocation = await session.rpc.commands.invoke({ name: 'fixture-auto', input: 'exact fixture arguments 🧪' });
+  assert.equal(skillInvocation.kind, 'agent-prompt');
+  assert.ok(skillInvocation.prompt.includes('exact fixture arguments 🧪'));
+  assert.equal(requests, 10, 'Explicit skill loading does not itself invoke the fixture model.');
+  assert.equal(skillReads, 1);
+  currentSkillBody = 'Changed fixture source after invocation; this is not the historical content.';
   provenanceFixture.tools = mcpMetadata.tools;
   provenanceFixture.allowCalls = true;
-  await session.sendAndWait({ prompt: 'Synthetic local provenance fixture only.' }, 25000);
+  await session.sendAndWait({ prompt: skillInvocation.prompt }, 25000);
   if (fixtureError) throw fixtureError;
   const hookEvents = mcpEvents.filter(event => event.type === 'hook.start' || event.type === 'hook.end');
+  const skillEvents = mcpEvents.filter(event => event.type === 'skill.invoked');
   const mcpSnapshot = await until(() => fetch(mcpPanel.url + 'events').then(response => response.json()),
     value => value.entries.filter(entry => entry.type === 'tool.execution_complete').length === 2
-      && hookEvents.every(event => value.entries.some(entry => entry.id === event.id)), 'provenance and hook projection');
+      && [...hookEvents, ...skillEvents].every(event => value.entries.some(entry => entry.id === event.id)), 'provenance, hook and skill projection');
   stopMcpEvents();
   assert.equal(provenanceFixture.responses, 2);
   assert.equal(mcpMethods.filter(item => item.method === 'tools/call').length, 2);
   assert.equal(mcpEvents.some(event => event.type === 'session.error'), false);
+  assert.equal(skillReads, 1, 'The observer keeps recorded content instead of re-reading the changed source.');
+  assert.equal(skillEvents.length, 1);
+  const loadedSkill = skillEvents[0];
+  assert.equal(loadedSkill.data.name, 'fixture-auto');
+  assert.equal(loadedSkill.data.trigger, 'user-invoked');
+  assert.equal(loadedSkill.data.source, 'sdk');
+  assert.equal(loadedSkill.data.path, '');
+  assert.equal(loadedSkill.data.content, skillBody);
+  assert.equal(loadedSkill.data.arguments, undefined, 'This runtime does not expose invocation arguments in the skill event.');
+  const projectedSkill = mcpSnapshot.entries.find(entry => entry.id === loadedSkill.id);
+  assert.equal(projectedSkill.agentId, loadedSkill.agentId ?? '');
+  assert.equal(projectedSkill.timestamp, loadedSkill.timestamp);
+  assert.equal(projectedSkill.trigger, loadedSkill.data.trigger);
+  assert.deepEqual(JSON.parse(projectedSkill.evidence).data, loadedSkill.data);
+  const instructions = skillInstructions(projectedSkill);
+  assert.equal(instructions.name, loadedSkill.data.name);
+  assert.equal(instructions.trigger, loadedSkill.data.trigger);
+  assert.equal(instructions.status, 'complete');
+  assert.equal(instructions.content, skillBody);
+  assert.equal(instructions.preview, skillBody);
+  assert.equal(instructions.previewTruncated, false);
+  assert.equal(instructions.arguments, null, 'Missing arguments stay unknown, not reconstructed from the prompt.');
   assert.equal(hookCalls.filter(call => call.type === 'preToolUse').length, 2);
   assert.equal(hookCalls.filter(call => call.type === 'postToolUse').length, 2);
   assert.equal(hookCalls.filter(call => call.type === 'userPromptSubmitted').length, 1);
@@ -510,7 +547,7 @@ try {
   await session.disconnect();
   assert.equal(requests, 12, 'Only the twelve expected local synthetic responses are permitted.');
   assert.equal(expired, false);
-  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping agents, approved/denied action boundaries, distinct MCP provenance and hook pipeline evidence verified with twelve fixed local responses across five disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
+  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping agents, approved/denied action boundaries, distinct MCP provenance, hook pipelines and historical skill instructions verified with twelve fixed local responses across five disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
 } finally {
   clearTimeout(timer);
   releaseFirst();

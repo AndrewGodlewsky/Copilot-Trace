@@ -105,6 +105,110 @@ function filterMode(ui, value) {
 const byClass = (element, name) => walk(element).find(node => node.className.split(' ').includes(name));
 const evidenceRows = group => byClass(group, 'tool-events').children;
 
+async function skillFixture(content, extra = {}) {
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => [{
+    id: 'skill', type: 'skill.invoked', timestamp: '2026-11-20T12:00:00Z',
+    data: { name: 'Literal <skill> 🧪', path: '', trigger: 'context-load', content, ...extra },
+  }] });
+  await trace.ready;
+  const entry = trace.snapshot().entries[0];
+  trace.close();
+  return entry;
+}
+
+test('skill rows disclose bounded literal instructions and exact full text without interpreting markup', async () => {
+  const content = '# Instructions 🧪\n\n<script>literal</script>\n```sh\n  keep spacing\n```\n' + '日本語 '.repeat(500);
+  const entry = await skillFixture(content, { arguments: 'Exact <input> 🧪' });
+  const ui = fixture(appSource);
+  ui.render([entry, { ...start, id: 'other' }]);
+  const row = ui.get('#timeline').firstElementChild;
+  const instructions = byClass(row, 'skill-instructions');
+  assert.ok(instructions, 'A skill exposes its supplied instructions inside its event details.');
+  const full = byClass(instructions, 'skill-full');
+  const preview = byClass(instructions, 'skill-preview');
+  assert.ok(preview.textContent.length <= 600);
+  assert.ok(content.startsWith(preview.textContent));
+  assert.match(instructions.textContent, /Preview shortened/);
+  const body = walk(full).find(node => node.tagName === 'pre');
+  assert.equal(body.textContent, content);
+  assert.equal(body.tabIndex, 0);
+  assert.equal(body.attributes['aria-label'], 'Exact retained skill instructions');
+  assert.equal(byClass(instructions, 'skill-arguments').children.find(node => node.tagName === 'pre').textContent, 'Exact <input> 🧪');
+  assert.match(instructions.textContent, /Literal <skill> 🧪/);
+  assert.match(instructions.textContent, /context-load/);
+  assert.equal(walk(instructions).filter(node => ['script', 'a', 'code', 'img'].includes(node.tagName)).length, 0);
+  assert.equal(byClass(ui.get('#timeline').children[1], 'skill-instructions'), undefined);
+  assert.deepEqual(visibleEvidence(ui), [entry.evidence, JSON.stringify({ id: start.id })]);
+});
+
+test('skill disclosures preserve full text, expansion, focus and scrolling across history, views and filters', async () => {
+  const entry = await skillFixture('Instructions 🧪\n'.repeat(200));
+  const ui = fixture(appSource);
+  ui.render([entry], { history: 'loading' });
+  const row = ui.get('#timeline').firstElementChild;
+  const full = byClass(row, 'skill-full');
+  assert.ok(full, 'Exact retained content has a disclosure.');
+  row.firstElementChild.open = true;
+  full.open = true;
+  const body = walk(full).find(node => node.tagName === 'pre');
+  body.scrollTop = 90;
+  body.focus();
+  ui.get('#follow').checked = false;
+  ui.document.scrollingElement.scrollTop = 250;
+  const earlier = { id: 'prompt', type: 'user.message', category: 'chat', agentId: '',
+    delivery: 'idle', timestamp: '2026-11-20T11:59:59Z', evidence: '{}', explanation: 'Input' };
+  ui.render([earlier, entry]);
+  for (const mode of ['chronological', 'chapters', 'lanes', 'grouped']) {
+    ui.get('#event-order').value = mode;
+    ui.get('#event-order').dispatch('change');
+    assert.equal(ui.document.activeElement, body);
+    assert.equal(full.open, true);
+    assert.equal(body.scrollTop, 90);
+    assert.equal(ui.document.scrollingElement.scrollTop, 250);
+    for (const filter of ['automation', 'tools', 'problems', 'everything']) {
+      filterMode(ui, filter);
+      const expected = [earlier, entry].filter(record => presentation.matchesFilter(record, filter));
+      assert.deepEqual(visibleEvidence(ui), expected.map(record => record.evidence));
+    }
+    body.focus();
+  }
+  ui.get('#event-target').value = 'skill'; ui.get('#event-target').dispatch('change');
+  ui.get('#jump-event').dispatch('click');
+  assert.equal(ui.get('#event-order').value, 'chronological');
+  assert.equal(ui.get('#follow').checked, false);
+  assert.equal(byClass(row, 'recorded-evidence').open, true);
+  assert.equal(full.open, true);
+  body.focus();
+  ui.render([earlier], { omitted: 1 });
+  assert.equal(row.isConnected, false);
+  assert.equal(ui.document.activeElement.isConnected, true);
+  assert.equal(ui.get('#jump-event').disabled, true);
+  assert.match(ui.get('#navigation-status').textContent, /No retained skill load/);
+});
+
+test('skill body changes from available to unavailable clear stale text and safely move focused content', async () => {
+  const entry = await skillFixture('Original exact instructions');
+  const ui = fixture(appSource);
+  ui.render([entry]);
+  const row = ui.get('#timeline').firstElementChild;
+  const full = byClass(row, 'skill-full');
+  assert.ok(full, 'Exact retained content has a disclosure.');
+  row.firstElementChild.open = true;
+  full.open = true;
+  const body = walk(full).find(node => node.tagName === 'pre');
+  body.focus();
+  ui.render([{ ...entry, truncated: true }]);
+  assert.equal(body.textContent, '');
+  assert.equal(full.hidden, true);
+  assert.ok(ui.document.activeElement.isConnected);
+  assert.notEqual(ui.document.activeElement, body);
+  assert.match(byClass(row, 'skill-instructions').textContent, /shortened.*cannot recover/i);
+  const empty = await skillFixture('');
+  ui.render([empty]);
+  assert.match(byClass(row, 'skill-instructions').textContent, /recorded.*empty/i);
+  assert.equal(byClass(row, 'skill-arguments').hidden, true);
+});
+
 async function hookFixture() {
   const raw = [
     ['first-start', 'hook.start', 'first', 'postToolUse'],

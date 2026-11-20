@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.24",
+    "summary": "Skill events now preview the recorded instructions and trigger, with exact retained text available. Missing or shortened content stays explicit, and loading is distinguished from execution."
+  },
+  {
     "version": "0.1.23",
     "summary": "Hook groups now explain timing and recorded outcomes, with invocation counts and original evidence. Missing boundaries and unknown hook types remain explicit."
   },

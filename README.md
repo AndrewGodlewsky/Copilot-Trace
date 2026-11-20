@@ -1,6 +1,6 @@
 # Trace
 
-Current version: **0.1.23**
+Current version: **0.1.24**
 
 A GitHub Copilot desktop plugin for understanding the activity inside your current chat. `/trace` opens a live timeline with turn markers and expandable recorded evidence. This is an initial proof of concept: explanations describe what events mean; they do not infer why the model made a decision.
 
@@ -25,6 +25,8 @@ Tool provenance shows recorded MCP provider details when the invocation supplies
 Tool cards classify recognized requested operations as **Read**, **Search**, **Edit**, **Execute** or **External access**. Unrecognized or incomplete evidence stays **Unclassified**. Categories describe the request, including when it fails or is denied; they do not prove effects. Shell commands remain opaque execution with unknown possible effects. See [operation categories](docs/operation-categories.md) for supported contracts and fallbacks.
 
 Hook summaries explain when a documented hook type runs and distinguish reported outcomes from missing or conflicting boundaries. Only explicitly recorded output supports a context or decision description; timing does not explain why the assistant selected an operation. See [hook lifecycles](docs/hook-lifecycles.md) for grouping, counts and evidence limits.
+
+Skill details preview the instructions supplied in the recorded load event, with the exact retained text available to expand. The recorded trigger distinguishes user invocation, agent invocation and context loading; unavailable or shortened evidence stays explicit. Loading instructions does not prove that referenced scripts ran or that every instruction was followed. Trace does not read the current skill file to replace historical content. See [skill instructions](docs/skill-instructions.md).
 
 Trace keeps up to 300 recent supported events per panel in memory, with up to 12,000 UTF-16 code units of evidence per event; omissions and shortening are labeled. Token deltas, canvas bookkeeping and replay checkpoint copies are excluded. Encrypted/opaque reasoning fields are omitted. Closing the panel releases its observer and server. Trace makes no model requests, saves no transcripts and reads no project files. The host may retain its own logs; event payloads can contain sensitive chat content, file paths and tool arguments.
 
@@ -91,6 +93,8 @@ For the installation inspected during setup, use `copilot.exe` beside the `copil
 The fixture checks native SDK registration, plugin ownership, actual session history and live event delivery, opening/reopening/closing and local assets. That phase requires zero model requests. It then sends three synthetic inputs to a loopback provider with fixed local responses, checking actual delivery and interaction fields against Trace's projections. A second disposable session allows only the task tool and two configured agents with no tools; four additional fixed responses verify distinct agent identities, parent invocation links and recorded overlap. Two further disposable sessions allow only PowerShell and use three fixed responses to verify denied/approved writes to owned temporary files, action-stage links, pending-permission uncertainty and permission request differences between live delivery and history. A fifth session uses two owned loopback MCP fixtures and two fixed responses to verify distinct provider identities despite identical tool titles; metadata reads and opening Trace add no server calls or inference. All phases use a disposable Copilot home, no paid inference and no existing chat. The fixture does not operate a browser or install into your profile. Unit fixtures cover additional event and attribution cases; fixed responses do not establish real model quality or autonomous tool/skill choices.
 
 The same fifth session also registers three fixture hook types. Five callbacks produce nine recorded pipeline invocations and eighteen original boundaries; the fixture verifies exact projection, counts, batched input and exposed versus absent output. These callbacks are test-owned; Trace remains an observer.
+
+That session explicitly loads an SDK-provided fixture skill before sending its returned prompt. The fixture checks exact Unicode and literal markup, the recorded user trigger, omitted optional arguments and the original body after the fixture source changes. Trace reads no skill body itself. This shares the same twelve fixed responses across five sessions; it does not establish autonomous skill selection or instruction compliance.
 
 Manual acceptance after installation:
 
