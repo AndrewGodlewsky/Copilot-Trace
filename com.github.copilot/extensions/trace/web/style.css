@@ -267,6 +267,12 @@ body:has(.footer-panel[open]) { overflow: hidden; }
 #arguments-panel label { display: grid; gap: 6px; margin-top: 16px; }
 #arguments-panel select { width: 100%; min-width: 0; }
 #arguments-panel button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+#recap-panel { overflow-wrap: anywhere; }
+#recap-panel label { display: grid; gap: 6px; }
+#recap-range { width: 100%; min-width: 0; }
+#recap-report details { margin: 8px 0; }
+#recap-report button { display: block; max-width: 100%; margin: 6px 0; white-space: normal; overflow-wrap: anywhere; }
+#recap-report pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .argument-selection p { white-space: pre-wrap; }
 #arguments-diff { padding-left: 22px; max-height: min(30rem, 55vh); overflow: auto; overscroll-behavior: contain; }
 #arguments-diff li { border-top: 1px solid var(--line); padding-block: 12px; }

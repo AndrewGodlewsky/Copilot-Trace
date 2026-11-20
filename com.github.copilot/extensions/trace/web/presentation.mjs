@@ -1405,14 +1405,31 @@ function combinedExtent(boundaries, extents) {
 export function retrievalLedger(entries, { history = 'ready', omitted = 0 } = {}) {
   const rows = [], unclassified = [], references = new Set();
   const extents = toolExtents(entries, { history, omitted });
+  const ids = new Map(), positions = new Map(entries.map((entry, index) => [entry, index]));
+  for (const entry of entries) ids.set(entry.id, (ids.get(entry.id) || 0) + 1);
   let other = 0;
   for (const { boundaries, start, data } of toolBuckets(entries)) {
-    const operation = data && requestedOperation(data);
+    const end = boundaries.find(entry => entry.type === 'tool.execution_complete');
+    const compatible = data && (!end || positions.get(start) < positions.get(end)) && boundaries.every(entry => {
+      const record = explanationData(entry);
+      return ids.get(entry.id) === 1 && identityText(entry.id) && identityText(entry.toolCallId)
+        && (entry.agentId === '' || identityText(entry.agentId)) && entry.truncated === false
+        && (!Object.hasOwn(entry, 'protectedContentOmitted') || entry.protectedContentOmitted === false)
+        && record && ![...mcpFields, 'origin', 'overridesBuiltInTool'].some(field => Object.hasOwn(record, field));
+    });
+    const operation = compatible && requestedOperation(data);
     const links = boundaries.map(entry => ({ id: entry.id,
       label: entry.type === 'tool.execution_start' ? 'Original request evidence' : 'Original result evidence' }));
-    const explicitUnknownOrigin = data && ['origin', 'overridesBuiltInTool'].some(field => Object.hasOwn(data, field));
-    if (!operation || explicitUnknownOrigin || mcpFields.some(field => data && Object.hasOwn(data, field))) {
-      unclassified.push({ id: boundaries[0].id, links, extent: combinedExtent(boundaries, extents),
+    if (!operation) {
+      const hostShortened = boundaries.some(entry => retainedHostOutput(entry));
+      const traceClipped = boundaries.some(entry => entry.truncated === true);
+      unclassified.push({ id: boundaries[0].id, links, extent: { requested: [], requestedLimited: false,
+        coverage: 'Unknown coverage', returned: 'Returned extent unknown; complete compatible request/result evidence is unavailable.',
+        hostShortened, traceClipped,
+        badges: ['Unknown coverage', ...(hostShortened ? ['Host-shortened preview'] : []), ...(traceClipped ? ['Trace-clipped evidence'] : [])],
+        notes: ['No requested or returned resource extent is inferred from these unclassified boundaries.',
+          ...(hostShortened ? ['A boundary has a validated host-shortened output preview; this does not establish compatible retrieval.'] : []),
+          ...(traceClipped ? ['Trace clipped a boundary’s raw evidence; complete evidence cannot be recovered.'] : [])] },
         note: boundaries.some(entry => entry.truncated)
           ? 'Evidence shortened. Request and retrieval outcome are unknown; the complete event cannot be recovered.'
           : 'Retrieval status unknown. Complete, unambiguous recognized request and source evidence is unavailable.' });
@@ -1426,7 +1443,6 @@ export function retrievalLedger(entries, { history = 'ready', omitted = 0 } = {}
     const extent = combinedExtent(boundaries, extents), partial = extent.requestedLimited;
     const request = `Requested ${name}${name === 'grep' && args.output_mode === undefined ? ' · output mode not recorded' : ''}`
       + Object.entries(args).map(([key, value]) => `\n${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`).join('');
-    const end = boundaries.find(entry => entry.type === 'tool.execution_complete');
     const result = end && explanationData(end);
     const success = result && result.success === end.success ? result.success : undefined;
     const text = typeof result?.result?.content === 'string' ? result.result.content : null;
@@ -1943,6 +1959,60 @@ export function summarize(entries) {
   return { turns, hooks: hooks.size, tools: tools.size,
     skills: [...skills.values()].reduce((sum, n) => sum + n, 0),
     skillNames: [...skills], hookNames: [...hookNames], unlinked };
+}
+
+export function retainedRecapEntry(entries, expected) {
+  return Boolean(expected && identityText(expected.id) && sameValidationEntry(entries, expected));
+}
+
+// The caller freezes the selected interval; each projection uses exactly that same scope.
+export function observedRecap(entries, { history = 'ready', omitted = 0 } = {}) {
+  const stats = summarize(entries), scope = { history, omitted };
+  const turn = entry => ['assistant.turn_start', 'assistant.turn_end'].includes(entry.type);
+  const tool = entry => ['tool.execution_start', 'tool.execution_complete'].includes(entry.type);
+  const hook = entry => ['hook.start', 'hook.end'].includes(entry.type);
+  const metrics = [
+    ['turns', 'Model turns', entry => turn(entry) && entry.turnId && entry.agentId !== null],
+    ['tools', 'Tool calls', entry => tool(entry) && toolIdentity(entry) !== null],
+    ['hooks', 'Hook pipelines', entry => hook(entry) && hookIdentity(entry) !== null],
+    ['skills', 'Skill loads', entry => entry.type === 'skill.invoked'],
+    ['unlinked', 'Unlinked boundaries', entry => (turn(entry) && (!entry.turnId || entry.agentId === null))
+      || (tool(entry) && toolIdentity(entry) === null) || (hook(entry) && hookIdentity(entry) === null)],
+  ].map(([key, label, includes]) => ({ key, label, count: stats[key], entries: entries.filter(includes) }));
+  const ids = new Map();
+  for (const entry of entries) ids.set(entry.id, (ids.get(entry.id) || 0) + 1);
+  const protocol = entry => {
+    const data = explanationData(entry);
+    const identity = entry.type === 'tool.execution_complete' ? 'toolCallId' : 'hookInvocationId';
+    return ids.get(entry.id) === 1 && identityText(entry.id) && (entry.agentId === '' || identityText(entry.agentId))
+      && data && identityText(entry[identity]) && data[identity] === entry[identity]
+      && (!Object.hasOwn(entry, 'protectedContentOmitted') || entry.protectedContentOmitted === false)
+      && typeof data.success === 'boolean' && data.success === entry.success ? data.success : null;
+  };
+  const failures = [
+    ['tools', 'Tool protocol failure records', entry => entry.type === 'tool.execution_complete' && protocol(entry) === false],
+    ['hooks', 'Hook pipeline failure records', entry => entry.type === 'hook.end' && protocol(entry) === false],
+    ['errors', 'Host error records', entry => entry.type === 'session.error'],
+    ['agents', 'Delegated failure records', entry => entry.type === 'subagent.failed'],
+    ['interruptions', 'Interruption records', entry => entry.type === 'abort'],
+  ].map(([key, label, includes]) => ({ key, label, entries: entries.filter(includes) }));
+  const clipped = entries.filter(entry => entry.truncated).length;
+  const validation = validationOverview(entries, scope);
+  const checks = new Set(validation.checks.map(check => check.start));
+  const validationUnknown = toolBuckets(entries).filter(bucket => toolIdentity(bucket.boundaries[0]) !== null
+    && !checks.has(bucket.start)).flatMap(bucket => bucket.boundaries);
+  return { entries, stats, metrics, failures, retrieval: retrievalLedger(entries, scope),
+    validation, validationUnknown, claims: validationClaims(entries, scope),
+    unknownToolResults: entries.filter(entry => entry.type === 'tool.execution_complete' && protocol(entry) === null),
+    notes: [
+      'Frozen retained observations only, across all views and filters. Request completion, task success, causality and overall elapsed time remain unknown. No durations are added together.',
+      'Counts use Statistics definitions on exactly these entries. Tool calls and hook pipelines use exact source and call identities, including completion-only calls; model turns use retained turn boundaries; skill loads count individual records. Counts from separate intervals are not additive.',
+      'Failure counts describe records, not unique failed tasks. Tool protocol status, typed process exits and assistant claims are separate observations. Missing, unclassified or conflicting results remain unknown; zero observed records does not prove nothing happened.',
+      'At most 300 retained events are available. Unsupported or malformed events may be absent. Resource coverage, validation assertions, skipped tests and suite coverage remain unknown.',
+      `${clipped} selected records have Trace-clipped evidence. Host output may also be shortened; retained text does not establish complete output.`,
+      ...(history !== 'ready' ? ['Earlier history is unavailable or still loading.'] : []),
+      ...(omitted ? [`${omitted} older events were omitted from the captured retained window.`] : []),
+    ] };
 }
 
 export function describeTurn(entry, context, operation) {

@@ -106,6 +106,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     '#prompt-panel', '#prompt-button', '#prompt-draft',
     '#arguments-button', '#arguments-panel', '#arguments-first', '#arguments-second', '#arguments-first-detail', '#arguments-second-detail',
     '#arguments-status', '#arguments-limits', '#arguments-diff', '#arguments-scope',
+    '#recap-button', '#recap-panel', '#recap-range', '#recap-scope', '#recap-status', '#recap-report',
     '#retrieval-ledger', '#retrieval-summary', '#retrieval-scope', '#retrieval-list', '#retrieval-unclassified', '#retrieval-unknown-list',
     '#validation-overview', '#validation-summary', '#validation-scope', '#validation-list',
     '#repeated-activity', '#repeated-summary', '#repeated-scope', '#repeated-list',
@@ -125,6 +126,10 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   selectors.get('#plausible-summary').tagName = 'summary';
   for (const id of ['summary', 'scope', 'list']) plausible.append(selectors.get(`#plausible-${id}`));
   const statistics = selectors.get('#statistics-panel');
+  const recapPanel = selectors.get('#recap-panel'); recapPanel.tagName = 'dialog'; recapPanel.className = 'footer-panel';
+  const recapClose = new Element('button'); recapClose.textContent = 'Close'; recapClose.dataset.closePanel = ''; recapPanel.append(recapClose);
+  for (const id of ['range', 'scope', 'status', 'report']) recapPanel.append(selectors.get(`#recap-${id}`));
+  selectors.get('#recap-button').tagName = 'button'; selectors.get('#recap-range').tagName = 'select';
   const argumentsPanel = selectors.get('#arguments-panel'); argumentsPanel.tagName = 'dialog'; argumentsPanel.className = 'footer-panel';
   const argumentsClose = new Element('button'); argumentsClose.textContent = 'Close'; argumentsClose.dataset.closePanel = ''; argumentsPanel.append(argumentsClose);
   selectors.get('#arguments-button').tagName = 'button';
@@ -3791,4 +3796,128 @@ test('repeated deliberate jumps use the current snapshot while live arrival stay
   assert.equal(ui.get('#follow').checked, true);
   page.scrollHeight = 2000; ui.syncFollowing();
   assert.equal(page.scrollTop, 1800);
+});
+
+function selectRecap(ui, value = 'range') {
+  ui.get('#recap-button').dispatch('click'); ui.get('#recap-range').value = value; ui.get('#recap-range').dispatch('change');
+}
+
+test('recap explicitly selects a frozen range and keeps counts, content, focus and reading position through arrivals', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close()); emitRead(data);
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot())); await ui.refreshFeed();
+  ui.get('#recap-button').dispatch('click');
+  assert.equal(ui.get('#recap-panel').open, true); assert.equal(ui.get('#follow').checked, false);
+  assert.equal(ui.get('#recap-report').textContent, '', 'The user explicitly chooses a scope.');
+  ui.get('#recap-range').value = 'range'; ui.get('#recap-range').dispatch('change');
+  const report = ui.get('#recap-report'), text = report.textContent, scope = ui.get('#recap-scope').textContent;
+  const choices = ui.get('#recap-range').textContent;
+  assert.match(text, /Tool calls: 1/); assert.match(text, /Information gathering/);
+  assert.match(text, /日本語🧪<script>/); assert.equal(report.querySelectorAll('script').length, 0);
+  const original = report.querySelector('button'); original.focus(); report.scrollTop = 55; ui.document.scrollingElement.scrollTop = 200;
+  emitRead(data, 'arrival'); data.emit('interrupt', 'abort');
+  data.emit('new-request', 'user.message', { content: 'Later request', delivery: 'idle' }); await ui.refreshFeed();
+  assert.equal(report.textContent, text); assert.equal(ui.get('#recap-scope').textContent, scope);
+  assert.equal(ui.get('#recap-range').textContent, choices);
+  assert.equal(ui.document.activeElement, original); assert.equal(report.scrollTop, 55); assert.equal(ui.document.scrollingElement.scrollTop, 200);
+  assert.equal(report.attributes['aria-live'], undefined);
+  original.dispatch('click'); assert.equal(ui.get('#recap-panel').open, false);
+  assert.equal(ui.get('#follow').checked, false); assert.equal(ui.get('#event-order').value, 'chronological');
+  assert.ok(walk(ui.get('#timeline')).some(node => node.scrolled));
+  selectRecap(ui); assert.match(report.textContent, /Tool calls: 2/);
+  ui.get('#recap-panel').dispatch('cancel'); assert.equal(report.textContent, '');
+  assert.equal(ui.document.activeElement, ui.get('#recap-button'));
+});
+
+test('recap queued native close cannot carry an old selection into a reopened capture', async () => {
+  const entries = await argumentFixture(), ui = fixture(appSource); ui.render(entries); selectRecap(ui);
+  const panel = ui.get('#recap-panel'), stale = ui.get('#recap-report').querySelector('button');
+  panel.close = () => { panel.open = false; };
+  panel.dispatch('cancel');
+  ui.render(entries.slice(1)); ui.get('#recap-button').dispatch('click'); panel.dispatch('close');
+  assert.equal(panel.open, true); assert.equal(ui.get('#recap-range').value, '');
+  assert.equal(ui.get('#recap-report').textContent, '', 'A reopened capture needs a new explicit selection.');
+  assert.equal(ui.get('#recap-status').textContent, '');
+  ui.document.scrollingElement.scrollTop = 200; stale.dispatch('click');
+  assert.equal(ui.document.scrollingElement.scrollTop, 200); assert.equal(panel.open, true);
+});
+
+test('recap separates identical event IDs in examples, live snapshots and active prediction prefixes', async () => {
+  const entries = examples.parseExampleLibrary(exampleText)[0].snapshot.entries;
+  const ui = fixture(appSource, undefined, undefined, undefined, Date, async () => exampleResponse(exampleText));
+  ui.render(entries); selectRecap(ui); const liveLink = ui.get('#recap-report').querySelector('button');
+  ui.get('#examples-load').dispatch('click'); await ui.settleExamples(); ui.get('#examples-open').dispatch('click');
+  selectRecap(ui); assert.match(ui.get('#recap-scope').textContent, /Synthetic demonstration/);
+  ui.document.scrollingElement.scrollTop = 200; liveLink.dispatch('click');
+  assert.equal(ui.get('#recap-panel').open, true); assert.equal(ui.document.scrollingElement.scrollTop, 200);
+  const exampleLink = ui.get('#recap-report').querySelector('button');
+  ui.get('#playback-exit').dispatch('click'); selectRecap(ui);
+  assert.match(ui.get('#recap-scope').textContent, /Recorded chat observations/);
+  ui.document.scrollingElement.scrollTop = 220; exampleLink.dispatch('click');
+  assert.equal(ui.get('#recap-panel').open, true); assert.equal(ui.document.scrollingElement.scrollTop, 220);
+  ui.get('#prediction-replay').dispatch('click'); selectRecap(ui);
+  assert.match(ui.get('#recap-scope').textContent, /prefix only/);
+  assert.match(ui.get('#recap-report').textContent, /Tool calls: 0/);
+  assert.doesNotMatch(ui.get('#recap-report').textContent, /demo\/|Tests passed/);
+  ui.closePage();
+});
+
+test('recap empty partial capture keeps zero counts scoped and lets a cleared selection return to choosing', () => {
+  const ui = fixture(appSource); ui.render([], { history: 'unavailable', omitted: 7 }); selectRecap(ui);
+  assert.match(ui.get('#recap-scope').textContent, /No retained events/);
+  assert.match(ui.get('#recap-report').textContent, /7 older events.*omitted/);
+  assert.match(ui.get('#recap-report').textContent, /Earlier history.*unavailable/);
+  assert.match(ui.get('#recap-report').textContent, /Tool calls: 0/);
+  assert.equal(ui.get('#recap-report').querySelectorAll('button').length, 0);
+  ui.get('#recap-range').value = ''; ui.get('#recap-range').dispatch('change');
+  assert.equal(ui.get('#recap-report').textContent, ''); assert.match(ui.get('#recap-scope').textContent, /Choose/);
+});
+
+test('recap retains frozen counts after replacement or eviction while guarding stale source callbacks', async () => {
+  const entries = await argumentFixture(), ui = fixture(appSource); ui.render(entries); selectRecap(ui);
+  const report = ui.get('#recap-report'), original = report.querySelector('button'); original.focus();
+  const count = byClass(report, 'recap-metric').textContent;
+  ui.render([{ ...entries[0], evidence: 'REPLACED' }], { omitted: 2 });
+  assert.equal(byClass(report, 'recap-metric').textContent, count.replaceAll('Open original', 'Original unavailable'));
+  assert.match(ui.get('#recap-status').textContent, /unavailable.*frozen|frozen.*unavailable/i);
+  assert.equal(original.attributes['aria-disabled'], 'true'); assert.equal(ui.document.activeElement, original);
+  ui.document.scrollingElement.scrollTop = 200; original.dispatch('click');
+  assert.equal(ui.document.scrollingElement.scrollTop, 200); assert.equal(ui.get('#recap-panel').open, true);
+  ui.closePage(); original.dispatch('click'); assert.equal(report.textContent, '');
+});
+
+test('recap captures queued interval context without expanding its bounds and clears future data on reverse playback', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  data.emit('queue', 'user.message', { content: 'QUEUED 日本語', delivery: 'queued', interactionId: 'next' });
+  data.emit('turn', 'assistant.turn_start', { turnId: '0', interactionId: 'next' }); emitRead(data, 'later');
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot())); await ui.refreshFeed();
+  ui.get('#recap-button').dispatch('click');
+  const queued = ui.get('#recap-range').children.find(option => /Queued/.test(option.textContent));
+  assert.ok(queued); ui.get('#recap-range').value = queued.value; ui.get('#recap-range').dispatch('change');
+  assert.match(ui.get('#recap-report').textContent, /QUEUED 日本語/);
+  assert.match(ui.get('#recap-scope').textContent, /3 events/);
+  assert.match(ui.get('#recap-report').textContent, /earlier.*outside.*counts/i);
+  const stale = ui.get('#recap-report').querySelector('button');
+  ui.get('#playback-start').dispatch('click'); stale.dispatch('click');
+  assert.equal(ui.get('#recap-report').textContent, ''); assert.equal(ui.get('#recap-panel').open, false);
+  assert.doesNotMatch(ui.get('#timeline').textContent, /QUEUED/);
+  ui.get('#playback-next').dispatch('click'); ui.get('#playback-next').dispatch('click'); selectRecap(ui, 'chapter:turn');
+  assert.match(ui.get('#recap-report').textContent, /QUEUED/);
+  const future = ui.get('#recap-report').querySelector('button');
+  ui.get('#playback-previous').dispatch('click'); ui.get('#playback-previous').dispatch('click'); future.dispatch('click');
+  assert.equal(ui.get('#recap-report').textContent, ''); assert.doesNotMatch(ui.get('#timeline').textContent, /QUEUED/);
+});
+
+test('incompatible retrieval results stay unknown in both Statistics extent and the frozen recap', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  data.emit('read-start', 'tool.execution_start', { toolCallId: 'read', toolName: 'view', arguments: { path: 'file', view_range: [2, 3] } });
+  data.emit('read-end', 'tool.execution_complete', { toolCallId: 'read', success: true, origin: 'custom', result: { content: 'UNTRUSTED_RETURNED_TEXT' } });
+  const ui = fixture(appSource); ui.render(data.trace.snapshot().entries);
+  assert.equal(ui.get('#retrieval-list').children.length, 0);
+  const unknown = ui.get('#retrieval-unknown-list');
+  assert.match(unknown.textContent, /Returned extent unknown/);
+  assert.doesNotMatch(unknown.textContent, /code units retained|UNTRUSTED_RETURNED_TEXT|Lines 2/);
+  assert.ok(unknown.querySelectorAll('button').length >= 2);
+  selectRecap(ui); assert.match(ui.get('#recap-report').textContent, /Tool calls: 1/);
+  assert.match(ui.get('#recap-report').textContent, /Retrieval status unknown: 1/);
+  assert.doesNotMatch(ui.get('#recap-report').textContent, /text returned|UNTRUSTED_RETURNED_TEXT/);
 });

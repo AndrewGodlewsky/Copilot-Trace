@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.47",
+    "summary": "Open a factual recap of a selected request interval or retained range. Counts stay fixed while you inspect their original evidence, with missing results and history limits stated."
+  },
+  {
     "version": "0.1.46",
     "summary": "Prepare a prompt with an optional developer checklist and a temporary draft. Copy an outline without sending it to the chat; closing discards the draft."
   },

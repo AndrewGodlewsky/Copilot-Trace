@@ -10,6 +10,7 @@ import { initInstructionSources } from './instructions.mjs';
 import { vocabulary, conceptForEntry, glossaryExample, retainedExample } from './glossary.mjs';
 import { validationClaims, validationChecks, validationOverview, linkValidationClaim, retainedValidationLink, observedActivity, repeatedActivity, argumentComparisonCalls, retainedArgumentCall, compareToolArguments } from './presentation.mjs';
 import { plausibleActions, retainedPlausibleScenario } from './presentation.mjs';
+import { observedRecap, retainedRecapEntry } from './presentation.mjs';
 
 const diagnostics = createDiagnostics();
 diagnostics.record('panel_started');
@@ -213,6 +214,126 @@ function clearArgumentComparison() {
   for (const select of argumentSelects) select.value = '';
 }
 argumentsPanel.addEventListener('close', () => { if (!argumentsPanel.open) clearArgumentComparison(); });
+
+const recapButton = document.querySelector('#recap-button'), recapPanel = document.querySelector('#recap-panel');
+const recapRange = document.querySelector('#recap-range'), recapReport = document.querySelector('#recap-report');
+let recapCapture, recapSelection, recapLinks = [];
+recapButton.addEventListener('click', () => {
+  if (panelClosed || !footerPanels.openPanel('recap-panel', recapButton)) return;
+  clearRecap();
+  const snapshot = freezeLearningSnapshot(lastSnapshot || { entries: [], history: 'unknown', omitted: 0 });
+  const choices = [{ id: 'range', label: 'Entire retained range', entries: snapshot.entries, notes: [], prompt: null },
+    ...requestChapters(snapshot.entries, snapshot).filter(chapter => chapter.boundary !== 'unknown').map((chapter, index) => ({ ...chapter,
+      label: `${chapter.boundary === 'queued' ? 'Queued' : 'Idle'} request interval ${index + 1}` }))];
+  recapCapture = { snapshot, choices, context: activeExample ? 'Synthetic demonstration observations.'
+    : practice || playback ? 'Displayed practice/playback prefix only.' : 'Recorded chat observations.' };
+  const placeholder = element('option', 'Choose a captured range'); placeholder.value = ''; recapRange.replaceChildren(placeholder);
+  for (const choice of choices) {
+    const option = element('option', `${choice.label} · ${choice.entries.length} events`); option.value = choice.id; recapRange.append(option);
+  }
+  recapRange.value = '';
+  document.querySelector('#recap-scope').textContent = `${recapCapture.context} Choose the retained range or a supported chronological request interval. Choices freeze when opened; close and reopen to capture current evidence.`;
+});
+recapRange.addEventListener('change', () => {
+  if (panelClosed || !recapPanel.open || !recapCapture) return;
+  const choice = recapCapture.choices.find(choice => choice.id === recapRange.value);
+  recapSelection = choice ? { choice, expired: false } : null; recapLinks = []; recapReport.replaceChildren();
+  document.querySelector('#recap-status').textContent = '';
+  if (!choice) {
+    document.querySelector('#recap-scope').textContent = `${recapCapture.context} Choose a captured range. Close and reopen to capture current evidence.`;
+    return;
+  }
+  const report = observedRecap(choice.entries, recapCapture.snapshot), first = choice.entries[0], last = choice.entries.at(-1);
+  document.querySelector('#recap-scope').textContent = `${recapCapture.context} ${choice.label}: ${choice.entries.length} events`
+    + (first ? `, from ${first.id} through ${last.id} inclusive.` : '. No retained events in this capture.')
+    + (recapCapture.snapshot.history !== 'ready' ? ' Earlier history is unavailable or loading.' : '')
+    + (recapCapture.snapshot.omitted ? ` ${recapCapture.snapshot.omitted} older events omitted from the captured window.` : '')
+    + ' Frozen when opened; later arrivals are excluded. Chronological boundaries do not establish causal ownership or request completion.';
+  const context = recapSection('Selected scope', choice.entries.length ? [first, ...(last !== first ? [last] : [])] : []);
+  if (choice.prompt) {
+    context.append(element('pre', choice.prompt.preview || 'Prompt preview unavailable'));
+    if (!choice.entries.includes(choice.prompt)) context.append(element('p', 'This earlier queued input is boundary context, outside the selected interval and its counts.'));
+    recapSources(context, [choice.prompt]);
+  }
+  for (const note of choice.notes) context.append(element('p', note));
+  if (choice.partial) context.append(element('p', 'This request interval has a partial or uncertain earlier boundary.'));
+  recapReport.append(element('h3', 'Observed counts'));
+  for (const metric of report.metrics) {
+    const section = recapSection(`${metric.label}: ${metric.count}`, metric.entries, 'recap-metric');
+    if (!metric.count) section.append(element('p', 'None observed in this selected range; this is not a claim about other history.'));
+  }
+  recapReport.append(element('h3', 'Information gathering'));
+  recapSection(`Recognized retrieval requests: ${report.retrieval.rows.length}`, report.retrieval.rows.flatMap(row =>
+    choice.entries.filter(entry => row.links.some(link => link.id === entry.id))));
+  for (const row of report.retrieval.rows) {
+    const section = recapSection(`${row.toolName} · ${row.statusLabel}`, choice.entries.filter(entry => row.links.some(link => link.id === entry.id)));
+    section.append(element('pre', row.request), element('p', row.scopeNote));
+  }
+  recapSection(`Retrieval status unknown: ${report.retrieval.unclassified.length} calls or unlinked boundaries`,
+    choice.entries.filter(entry => report.retrieval.unclassified.some(row => row.links.some(link => link.id === entry.id))));
+  recapReport.append(element('p', 'Recognized requests do not prove complete resources were returned, understood or used. Unclassified calls may conceal retrieval.'));
+  recapReport.append(element('h3', 'Reported failures and interruptions'));
+  for (const row of report.failures) recapSection(`${row.label}: ${row.entries.length}`, row.entries);
+  recapSection(`Tool result records with unknown protocol status: ${report.unknownToolResults.length}`, report.unknownToolResults);
+  recapReport.append(element('p', 'No observed failure is not proof of success. Missing completions remain unknown; failure records are not a count of failed tasks.'));
+  recapReport.append(element('h3', 'Validation observations'));
+  recapSection(`Recognized validation requests: ${report.validation.checks.length}`,
+    report.validation.checks.flatMap(check => [check.start, check.result].filter(Boolean)));
+  for (const check of report.validation.checks) {
+    const section = recapSection(check.command, [check.start, check.result].filter(Boolean));
+    section.append(element('p', `Tool protocol: ${check.toolSuccess === null ? 'unknown' : check.toolSuccess ? 'reported success' : 'reported failure'}. Typed process exit: ${check.exitCode === null ? 'unknown' : check.exitCode}.`),
+      element('p', 'Assertion counts, skipped tests and coverage: unknown. Exit zero does not verify tests or the task.'), element('p', check.notes.join(' ')));
+  }
+  recapSection(`Validation status unknown: ${report.validation.unclassifiedCalls} tool calls`, report.validationUnknown);
+  recapReport.append(element('p', 'Only the validation overview’s supported literal commands are recognized. Unlinked boundaries are listed in Observed counts. Missing or unclassified validation remains unknown; Trace runs no checks.'));
+  recapReport.append(element('h3', 'Assistant claims · separate from results'));
+  recapSection(`Recognized assistant claims: ${report.claims.length}`, report.claims.map(claim => claim.entry));
+  for (const claim of report.claims) recapSection(claim.statement, [claim.entry]);
+  recapReport.append(element('p', 'Recognition is limited to an entire message exactly stating Tests, Build or Checks passed. or failed. Other statements remain unclassified. These are assistant claims, not verified results; no supporting result is inferred.'));
+  const limits = element('details'); limits.append(element('summary', 'Scope and limits'));
+  for (const note of report.notes) limits.append(element('p', note));
+  recapSources(limits, choice.entries.filter(entry => entry.truncated));
+  recapReport.append(limits); updateRecap();
+});
+function recapSection(title, entries, className = '') {
+  const section = element('details', '', className); section.append(element('summary', title));
+  recapSources(section, entries); recapReport.append(section); return section;
+}
+function recapSources(container, entries) {
+  const capture = recapCapture, selection = recapSelection;
+  for (const entry of [...new Set(entries)]) {
+    const label = [entry.type, entry.displayName, describeActor(entry).source, entry.id].filter(Boolean).join(' · ');
+    const button = element('button', `Open original · ${label}`); button.type = 'button';
+    const link = { button, entry, label, expired: false }; recapLinks.push(link); container.append(button);
+    button.addEventListener('click', () => {
+      if (panelClosed || !recapPanel.open || recapCapture !== capture || recapSelection !== selection) return;
+      updateRecap();
+      if (link.expired || !retainedRecapEntry(lastSnapshot?.entries || [], entry)) return;
+      footerPanels.closePanel('recap-panel', { restoreFocus: false });
+      showBoundary(entry.id, 'Showing an original record from the frozen recap. Follow live is paused.', entry);
+    });
+  }
+}
+function updateRecap() {
+  if (panelClosed || !recapPanel.open || !recapSelection) return;
+  const entries = lastSnapshot?.entries || [], { choice } = recapSelection;
+  const retained = new Map([...choice.entries, ...(choice.prompt ? [choice.prompt] : [])].map(entry => [entry, retainedRecapEntry(entries, entry)]));
+  recapSelection.expired ||= [...retained.values()].some(present => !present);
+  for (const link of recapLinks) {
+    link.expired ||= !retained.get(link.entry);
+    link.button.setAttribute('aria-disabled', String(link.expired));
+    if (link.expired) link.button.textContent = `Original unavailable · ${link.label}`;
+  }
+  document.querySelector('#recap-status').textContent = recapSelection.expired
+    ? 'Some original evidence changed, became ambiguous or left the retained window. Unavailable links cannot navigate. Frozen observations and counts are unchanged; close and reopen to capture current evidence.'
+    : 'Frozen observations. Original links use only the exact current evidence. Close and reopen to capture current evidence.';
+}
+function clearRecap() {
+  recapCapture = undefined; recapSelection = undefined; recapLinks = [];
+  for (const node of [recapRange, recapReport, document.querySelector('#recap-scope'), document.querySelector('#recap-status')]) node.replaceChildren();
+  recapRange.value = '';
+}
+recapPanel.addEventListener('close', () => { if (!recapPanel.open) clearRecap(); });
 function protectedEvidenceNotice(entry) {
   if (entry.protectedContentOmitted === true) return 'Protected content was omitted by Trace. This retained raw event is incomplete; omitted values cannot be recovered from this panel.';
   return Object.hasOwn(entry, 'protectedContentOmitted') && typeof entry.protectedContentOmitted !== 'boolean'
@@ -1535,6 +1656,7 @@ function reconcileLanes(snapshot, visible) {
 function render(snapshot) {
   updateGlossary();
   updateArgumentComparison();
+  updateRecap();
   updatePlausibleActions();
   const focused = document.activeElement;
   const focusedId = [...nodes].find(([, node]) => node.item.contains(focused))?.[0];
@@ -1830,7 +1952,7 @@ const poller = createPoller({
   },
 });
 const footerPanels = initFooter({ diagnostics, refresh: poller.refresh, onInspect: () => { follow.checked = false; pausePlayback(); } });
-const exampleContexts = ['statistics-panel', 'glossary-panel', 'arguments-panel'].map(id => {
+const exampleContexts = ['statistics-panel', 'glossary-panel', 'arguments-panel', 'recap-panel'].map(id => {
   const panel = document.querySelector(`#${id}`), note = element('p', '', 'example-banner');
   note.hidden = true; panel.insertBefore(note, panel.children[1] || null); return note;
 });
@@ -1840,6 +1962,7 @@ function closePracticeInspectors() {
   clearPlausibleActions();
   for (const panel of document.querySelectorAll('.footer-panel')) footerPanels.closePanel(panel.id, { restoreFocus: false });
   clearArgumentComparison(); glossaryTarget = undefined; guidanceExamples = [];
+  clearRecap();
   for (const id of ['glossary-example', 'glossary-status', 'guidance-examples']) document.querySelector(`#${id}`).textContent = '';
   glossarySource.hidden = true;
 }
@@ -2077,6 +2200,7 @@ window.addEventListener('pagehide', () => {
   practiceGeneration++; practice = undefined; liveSnapshot = undefined; lastSnapshot = undefined;
   prediction('result').replaceChildren();
   clearArgumentComparison();
+  clearRecap();
   poller.stop(); capabilityView.close(); instructionView.close(); pageSize.disconnect();
   claimsClosed = true;
   for (const view of claimViews.values()) { view.link = null; view.results.clear(); view.details.remove(); }

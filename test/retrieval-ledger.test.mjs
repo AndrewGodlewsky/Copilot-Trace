@@ -168,3 +168,40 @@ test('the ledger uses the retained window and keeps same-call requests in separa
   assert.equal(separate.rows[1].status, 'returned');
   assert.equal(separate.rows[1].content, 'child body');
 });
+
+test('semantic retrieval rejects unusable identities and incompatible result providers without changing Statistics', async () => {
+  for (const [label, raw] of [
+    ['whitespace call', [start(' ', 'view', { path: 'file' }), end(' ', true, 'body')]],
+    ['whitespace source', [start('call', 'view', { path: 'file' }, { agentId: ' ' }), end('call', true, 'body', { agentId: ' ' })]],
+    ['whitespace event', [start('call', 'view', { path: 'file' }, { id: ' ' }), end('call', true, 'body')]],
+    ...['origin', 'overridesBuiltInTool', 'mcpServerName', 'mcpToolName', 'mcpConfigServerName'].map(field => [field,
+      [start('call', 'view', { path: 'file' }), end('call', true, 'body', {}, { [field]: field === 'overridesBuiltInTool' ? true : 'custom' })]]),
+    ['protected request', [start('call', 'view', { path: 'file', encryptedContent: 'hidden' }), end('call', true, 'body')]],
+    ['protected result', [start('call', 'view', { path: 'file' }), end('call', true, 'body', {}, { reasoningOpaque: 'hidden' })]],
+  ]) {
+    const entries = await observe(raw), result = ledger(entries);
+    assert.equal(presentation.summarize(entries).tools, 1, label);
+    assert.equal(result.rows.length, 0, label); assert.equal(result.references, 0, label);
+    assert.equal(result.unclassified.length, 1, label);
+    assert.match(result.unclassified[0].extent.returned, /unknown/i, label);
+    assert.deepEqual(result.unclassified[0].extent.requested, [], label);
+    assert.equal(result.unclassified[0].links.length, 2, label);
+  }
+});
+
+test('semantic retrieval rejects ambiguous event IDs and reversed boundaries while keeping independent shortening facts', async () => {
+  const entries = await observe([start('call', 'view', { path: 'file', view_range: [2, 3] }), end('call', true, 'body')]);
+  const duplicate = await observe([start('other', 'view', { path: 'other' }, { id: entries[1].id, agentId: 'child' })]);
+  for (const altered of [[entries[1], entries[0]], [...entries, ...duplicate],
+    [entries[0], { ...entries[1], protectedContentOmitted: 'invalid' }]]) {
+    const result = ledger(altered);
+    assert.equal(result.rows.length, 0); assert.ok(result.unclassified.length > 0);
+    assert.ok(result.unclassified.every(row => /unknown/i.test(row.extent.returned)));
+    assert.ok(result.unclassified.every(row => row.extent.requested.length === 0));
+  }
+  const shortened = await observe([start('call', 'view', { path: 'file' }), end('call', true, '', {}, {
+    origin: 'custom', result: { content: 'preview', contents: [{ type: 'shell_exit', shellId: '0', exitCode: 0, outputTruncated: true, outputPreview: 'preview' }] },
+  })]);
+  const extent = ledger(shortened).unclassified[0].extent;
+  assert.equal(extent.hostShortened, true); assert.match(extent.returned, /unknown/i);
+});
