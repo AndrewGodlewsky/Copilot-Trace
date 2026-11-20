@@ -136,6 +136,99 @@ async function provenanceFixture() {
   return entries;
 }
 
+async function operationFixture() {
+  const raw = [
+    { id: 'read', type: 'tool.execution_start', data: { toolCallId: 'read-call', toolName: 'view', arguments: { path: '日本語😀<img>.mjs' } } },
+    { id: 'read-result', type: 'tool.execution_complete', data: { toolCallId: 'read-call', success: false } },
+    { id: 'fetch', type: 'tool.execution_start', data: { toolCallId: 'fetch-call', toolName: 'web_fetch', arguments: { url: 'https://example.test' } } },
+    { id: 'fetch-result', type: 'tool.execution_complete', data: { toolCallId: 'fetch-call', success: true } },
+    { id: 'shell', type: 'tool.execution_start', data: { toolCallId: 'shell-call', toolName: 'powershell', arguments: { command: 'cat file; rm file', description: 'Read a file' } } },
+    { id: 'shell-result', type: 'tool.execution_complete', data: { toolCallId: 'shell-call', success: false } },
+    { id: 'service', type: 'tool.execution_start', data: { toolCallId: 'service-call', toolName: 'view', mcpToolName: 'delete', mcpServerName: 'local', mcpTransport: 'memory', arguments: { path: 'file' } } },
+    { id: 'service-result', type: 'tool.execution_complete', data: { toolCallId: 'service-call', success: false } },
+    { id: 'alias', type: 'tool.execution_start', data: { toolCallId: 'alias-call', toolName: 'custom_view', arguments: { path: 'file' } } },
+    { id: 'alias-result', type: 'tool.execution_complete', data: { toolCallId: 'alias-call', success: false } },
+  ].map(entry => ({ ...entry, timestamp: '2026-11-20T12:00:00Z' }));
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => raw });
+  await trace.ready;
+  const entries = trace.snapshot().entries;
+  trace.close();
+  return entries;
+}
+
+test('requested categories and their limits remain reachable with unchanged evidence and totals in every view and filter', async () => {
+  const entries = await operationFixture();
+  for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    const ui = fixture(appSource);
+    ui.get('#event-order').value = mode;
+    ui.render(entries);
+    const counts = ui.get('#stat-counts').textContent;
+    const labels = visibleWalk(ui.get('#timeline')).filter(node => node.className === 'operation-badge').map(node => node.textContent);
+    for (const label of ['Requested: Read', 'Requested: Read · External access', 'Requested: Execute', 'Requested: External access', 'Requested: Unclassified']) {
+      assert.ok(labels.includes(label), `${mode}: ${label}`);
+    }
+    const stages = walk(ui.get('#timeline')).filter(node => node.className === 'action-stages');
+    assert.equal(stages.length, 5, 'Category explanation reuses the existing action-stage disclosure.');
+    assert.ok(stages.every(node => /category limits/i.test(node.firstElementChild.textContent)));
+    assert.ok(stages.every(node => /not approval or completed effects/.test(byClass(node, 'operation-limits').textContent)));
+    assert.match(stages[2].textContent, /Shell text is opaque/);
+    assert.match(stages[3].textContent, /local or in-process/);
+    assert.match(stages[4].textContent, /unavailable/);
+    assert.deepEqual(visibleEvidence(ui), entries.map(entry => entry.evidence));
+    assert.ok(walk(ui.get('#timeline')).every(node => !['img', 'script', 'a'].includes(node.tagName)));
+    filterMode(ui, 'tools');
+    assert.equal(ui.get('#stat-counts').textContent, counts);
+    filterMode(ui, 'problems');
+    const visibleStages = visibleWalk(ui.get('#timeline')).filter(node => node.className === 'action-stages');
+    assert.equal(visibleStages.length, 4);
+    assert.match(visibleStages[0].textContent, /recorded view arguments/);
+    assert.ok(visibleWalk(ui.get('#timeline')).some(node => node.className === 'operation-badge' && node.textContent === 'Requested: Read'));
+    const sourceLink = walk(visibleStages[0]).find(node => node.tagName === 'button' && /Tool invocation entered/.test(node.textContent));
+    sourceLink.dispatch('click');
+    assert.equal(ui.get('#activity-filter').value, 'everything');
+    assert.equal(ui.get('#event-order').value, 'chronological');
+    assert.equal(byClass(ui.get('#timeline').children[0], 'recorded-evidence').open, true);
+    assert.equal(ui.document.activeElement, ui.get('#timeline').children[0].firstElementChild.firstElementChild);
+    assert.equal(ui.get('#stat-counts').textContent, counts);
+    filterMode(ui, 'automation');
+    assert.equal(visibleWalk(ui.get('#timeline')).filter(node => node.className === 'operation-badge').length, 0);
+    assert.equal(ui.get('#stat-counts').textContent, counts);
+  }
+});
+
+test('category updates preserve focus and reading position, discard evicted bases and reject newly ambiguous calls', async () => {
+  const entries = await operationFixture();
+  for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    const ui = fixture(appSource);
+    ui.get('#event-order').value = mode;
+    ui.render(entries.slice(0, 1));
+    const stages = byClass(ui.get('#timeline'), 'action-stages');
+    stages.open = true;
+    const link = walk(stages).find(node => node.tagName === 'button');
+    link.focus();
+    ui.document.scrollingElement.scrollTop = 333;
+    ui.render(entries.slice(0, 2));
+    assert.equal(ui.document.activeElement, link);
+    assert.equal(ui.document.scrollingElement.scrollTop, 333);
+    assert.equal(stages.open, true);
+    assert.equal(byClass(ui.get('#timeline'), 'operation-badge').textContent, 'Requested: Read');
+    const raw = JSON.parse(entries[0].evidence);
+    const ambiguous = { ...entries[0], id: 'duplicate', evidence: JSON.stringify({ ...raw, id: 'duplicate' }) };
+    ui.render([entries[0], ambiguous, entries[1]]);
+    assert.ok(walk(ui.get('#timeline')).filter(node => node.className === 'operation-badge')
+      .every(node => node.textContent === 'Requested: Unclassified'));
+    assert.ok(walk(ui.get('#timeline')).filter(node => node.className === 'node-title').every(node => !node.textContent.startsWith('View ')),
+      'Ambiguous calls cannot retain a contradictory interpreted title.');
+    ui.render(entries.slice(1, 2), { omitted: 1 });
+    assert.equal(byClass(ui.get('#timeline'), 'operation-badge').textContent, 'Requested: Unclassified');
+    assert.equal(byClass(ui.get('#timeline'), 'action-stages'), stages);
+    assert.match(byClass(stages, 'operation-basis').textContent, /unavailable/);
+    assert.ok(ui.document.activeElement.isConnected);
+    assert.notEqual(ui.document.activeElement, link);
+    assert.deepEqual(visibleEvidence(ui), [entries[1].evidence]);
+  }
+});
+
 test('tool origins remain literal and distinguish identical provider names with exact evidence navigation in every view', async () => {
   const entries = await provenanceFixture();
   for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {

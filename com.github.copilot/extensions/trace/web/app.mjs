@@ -1,4 +1,4 @@
-import { describeActor, explainStep, describeHookGroup, describeToolGroup, toolProvenance, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
+import { describeActor, explainStep, describeHookGroup, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -129,7 +129,8 @@ function nodeShell(display, actor) {
   const copy = element('span', undefined, 'node-copy');
   copy.append(element('span', actor.role, 'node-kind'), title, subtitle, context);
   const provenanceBadge = actor.role === 'Tool' ? element('span', 'Origin: Unknown', 'provenance-badge') : null;
-  if (provenanceBadge) copy.append(provenanceBadge);
+  const operationBadge = actor.role === 'Tool' ? element('span', 'Requested: Unclassified', 'operation-badge') : null;
+  if (provenanceBadge) copy.append(operationBadge, provenanceBadge);
   const chevron = element('span', undefined, 'chevron');
   chevron.setAttribute('aria-hidden', 'true');
   summary.append(icon(display.kind), copy, chevron);
@@ -139,7 +140,7 @@ function nodeShell(display, actor) {
     if (details.open) follow.checked = false;
   });
   item.append(details);
-  return { item, details, summary, title, subtitle, context, provenanceBadge };
+  return { item, details, summary, title, subtitle, context, provenanceBadge, operationBadge };
 }
 
 function applyContext(node, context, entry) {
@@ -257,18 +258,23 @@ function renderToolProvenance(group, description) {
   group.provenanceLink.hidden = !description.basisId;
 }
 
-function renderActionStages(group, description) {
+function renderActionStages(group, description, operation) {
   if (!group.actions) {
     group.actions = element('details', undefined, 'action-stages');
-    group.actions.append(element('summary', 'Observed action stages'));
+    group.actions.append(element('summary', 'Observed action stages and category limits'));
     group.actions.addEventListener('toggle', () => { if (group.actions.open) follow.checked = false; });
     group.permission = element('p', '', 'action-permission');
+    group.operationBasis = element('p', '', 'operation-basis');
+    group.operationLimits = element('p', '', 'operation-limits');
     group.stages = element('ol', undefined, 'action-stage-list');
     group.stages.setAttribute('aria-label', 'Observed stages in recorded event order');
     group.stageNotes = element('p', '', 'action-stage-notes');
     group.stageRows = new Map();
-    group.actions.append(group.permission, group.stages, group.stageNotes);
+    group.actions.append(group.operationBasis, group.operationLimits, group.permission, group.stages, group.stageNotes);
   }
+  if (group.operationBadge.textContent !== operation.label) group.operationBadge.textContent = operation.label;
+  if (group.operationBasis.textContent !== operation.basis) group.operationBasis.textContent = operation.basis;
+  if (group.operationLimits.textContent !== operation.limits) group.operationLimits.textContent = operation.limits;
   if (group.permission.textContent !== description.permission) group.permission.textContent = description.permission;
   const notes = description.notes.join(' ');
   if (group.stageNotes.textContent !== notes) group.stageNotes.textContent = notes;
@@ -482,6 +488,7 @@ function render(snapshot) {
   const contexts = turnContext(snapshot.entries, snapshot);
   const stages = actionStages(snapshot.entries, snapshot);
   const provenance = toolProvenance(snapshot.entries);
+  const operations = toolOperations(snapshot.entries);
   renderStatistics(snapshot);
   const oldGroups = groups.map(group => ({ group, ids: group.ids, open: group.details.open }));
   const retained = new Set(snapshot.entries.map(entry => entry.id));
@@ -492,11 +499,14 @@ function render(snapshot) {
     let node = nodes.get(entry.id);
     if (!node) { node = row(entry); nodes.set(entry.id, node); }
     const context = contexts.get(entry.id);
-    const display = describeTurn(entry, context);
+    const display = describeTurn(entry, context, operations.get(entry.id));
     if (node.title.textContent !== display.title) node.title.textContent = display.title;
     if (node.subtitle.textContent !== display.subtitle) node.subtitle.textContent = display.subtitle;
     if (node.provenanceBadge && node.provenanceBadge.textContent !== provenance.get(entry.id).label) {
       node.provenanceBadge.textContent = provenance.get(entry.id).label;
+    }
+    if (node.operationBadge && node.operationBadge.textContent !== operations.get(entry.id).label) {
+      node.operationBadge.textContent = operations.get(entry.id).label;
     }
     node.item.dataset.tone = display.tone;
     node.item.dataset.activity = display.activityId ? 'reported' : '';
@@ -524,7 +534,7 @@ function render(snapshot) {
     const existing = prior?.group;
     let group = existing && !nextGroups.includes(existing) ? existing : null;
     const tool = section.kind === 'tool';
-    const display = tool ? describeToolGroup(section.entries) : describeHookGroup(section.entries);
+    const display = tool ? describeToolGroup(section.entries, operations.get(section.entries[0].id)) : describeHookGroup(section.entries);
     if (!group) {
       group = nodeShell(display, describeActor(section.entries[0]));
       group.kind = section.kind;
@@ -548,7 +558,7 @@ function render(snapshot) {
     applyContext(group, tool ? null : contexts.get(section.entries[0].id));
     group.ids = new Set(section.entries.map(entry => entry.id));
     if (tool) {
-      renderActionStages(group, stages.get(section.entries[0].id));
+      renderActionStages(group, stages.get(section.entries[0].id), operations.get(section.entries[0].id));
       renderToolProvenance(group, provenance.get(section.entries[0].id));
       if (oldGroups.some(old => old.group.actions?.open && section.entries.some(entry => old.ids.has(entry.id)))) group.actions.open = true;
       if (oldGroups.some(old => old.group.provenance?.open && section.entries.some(entry => old.ids.has(entry.id)))) group.provenance.open = true;

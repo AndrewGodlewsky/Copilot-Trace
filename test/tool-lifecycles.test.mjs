@@ -5,8 +5,11 @@ import { createTrace } from '../com.github.copilot/extensions/trace/trace.mjs';
 
 const boundary = (id, type, extra = {}) => ({ id, type: `tool.execution_${type}`, category: 'tool',
   agentId: '', toolCallId: 'call', toolName: 'view', timestamp: '2026-11-20T12:00:00Z', ...extra });
-const start = boundary('start', 'start', { evidence: JSON.stringify({ data: { toolName: 'view', arguments: { path: '日本語😀<img>.mjs' } } }) });
-const end = boundary('end', 'complete', { timestamp: '2026-11-20T12:00:01.250Z', success: false });
+const start = boundary('start', 'start', { evidence: JSON.stringify({ id: 'start', type: 'tool.execution_start',
+  timestamp: '2026-11-20T12:00:00Z', data: { toolCallId: 'call', toolName: 'view', arguments: { path: '日本語😀<img>.mjs' } } }) });
+const end = boundary('end', 'complete', { timestamp: '2026-11-20T12:00:01.250Z', success: false,
+  evidence: JSON.stringify({ id: 'end', type: 'tool.execution_complete', timestamp: '2026-11-20T12:00:01.250Z',
+    data: { toolCallId: 'call', success: false } }) });
 
 test('tool grouping joins exact identities across interleaved activity without losing original records', () => {
   const childStart = boundary('child-start', 'start', { agentId: 'child' });

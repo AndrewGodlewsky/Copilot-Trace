@@ -1,6 +1,6 @@
 # Trace
 
-Current version: **0.1.21**
+Current version: **0.1.22**
 
 A GitHub Copilot desktop plugin for understanding the activity inside your current chat. `/trace` opens a live timeline with turn markers and expandable recorded evidence. This is an initial proof of concept: explanations describe what events mean; they do not infer why the model made a decision.
 
@@ -18,9 +18,11 @@ A **Model turn** heading marks one iteration of the agent loop. Activity recorde
 
 The panel supports user messages, model turn boundaries, assistant messages/intent/reported reasoning, tool starts/results, skill invocations, subagents, hooks, permissions, compaction and host diagnostics when the host supplies them. Skill triggers distinguish user invocation, agent invocation and context loading; an absent trigger stays unknown. Tool results use agent identity and tool-call IDs to find retained starts. Chronological neighbors are not treated as causes.
 
-Tool cards include **Observed action stages** with links to the original assistant request, permission records, invocation and result when their IDs and ownership can be matched. Invocation entry and approval do not prove that an operation executed; missing permission evidence stays unknown. See [action stages](docs/action-stages.md) for live/history differences and supported fallbacks.
+Tool cards include **Observed action stages and category limits** with links to the original assistant request, permission records, invocation and result when their IDs and ownership can be matched. Invocation entry and approval do not prove that an operation executed; missing permission evidence stays unknown. See [action stages](docs/action-stages.md) for live/history differences and supported fallbacks.
 
 Tool provenance shows recorded MCP provider details when the invocation supplies them. An absent or unverified origin stays **Unknown**, including built-in or plugin tools without a reliable origin field. Provider labels do not establish network activity or trust. See [tool provenance](docs/tool-provenance.md) for the metadata basis and limitations.
+
+Tool cards classify recognized requested operations as **Read**, **Search**, **Edit**, **Execute** or **External access**. Unrecognized or incomplete evidence stays **Unclassified**. Categories describe the request, including when it fails or is denied; they do not prove effects. Shell commands remain opaque execution with unknown possible effects. See [operation categories](docs/operation-categories.md) for supported contracts and fallbacks.
 
 Trace keeps up to 300 recent supported events per panel in memory, with up to 12,000 UTF-16 code units of evidence per event; omissions and shortening are labeled. Token deltas, canvas bookkeeping and replay checkpoint copies are excluded. Encrypted/opaque reasoning fields are omitted. Closing the panel releases its observer and server. Trace makes no model requests, saves no transcripts and reads no project files. The host may retain its own logs; event payloads can contain sensitive chat content, file paths and tool arguments.
 

@@ -1,6 +1,6 @@
 # Recorded action stages
 
-Tool cards expose **Observed action stages**: the assistant's structured tool request, a runtime invocation entry, any linked permission request and decision, and a reported tool result. Only retained records appear. The list keeps their recorded order and timestamps; it is not a required sequence or a progress checklist. Each button opens the exact original event and its literal evidence in Chronological events, resets the filter and pauses Follow live.
+Tool cards expose **Observed action stages and category limits**: the assistant's structured tool request, a runtime invocation entry, any linked permission request and decision, and a reported tool result. The same disclosure explains the [requested operation category](operation-categories.md) and its limits. Only retained records appear. The list keeps their recorded order and timestamps; it is not a required sequence or a progress checklist. Each button opens the exact original event and its literal evidence in Chronological events, resets the filter and pauses Follow live.
 
 An invocation entry does not prove that the underlying operation ran. The inspected runtime emits `tool.execution_start` before permission evaluation, including when permission is denied and the requested file write never occurs. Approval permits an operation; a result reports the tool's outcome. Neither establishes that the user's overall task is correct or complete. A missing result does not mean the tool is still running.
 

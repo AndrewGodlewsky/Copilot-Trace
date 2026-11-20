@@ -62,8 +62,10 @@ test('projected missing and invalid raw agent IDs retain their distinct source m
 });
 
 function toolStart(toolName, args) {
-  return { id: 'start', type: 'tool.execution_start', category: 'tool', toolName,
-    evidence: JSON.stringify({ data: { toolName, arguments: args } }) };
+  const event = { id: 'start', type: 'tool.execution_start', timestamp: '2026-11-20T12:00:00Z',
+    data: { toolCallId: 'call', toolName, arguments: args } };
+  return { id: event.id, type: event.type, timestamp: event.timestamp, category: 'tool', toolName,
+    agentId: '', toolCallId: 'call', evidence: JSON.stringify(event) };
 }
 
 test('recognized structured view and grep starts describe recorded targets literally', () => {

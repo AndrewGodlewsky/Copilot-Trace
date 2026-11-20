@@ -394,7 +394,7 @@ function recordedLaneData(entry) {
     && data && typeof data === 'object' && !Array.isArray(data) && data.toolCallId === entry.toolCallId ? data : null;
 }
 
-export function describeToolGroup(entries) {
+export function describeToolGroup(entries, operation = toolOperations(entries).get(entries[0]?.id)) {
   const starts = entries.filter(entry => entry.type === 'tool.execution_start');
   const ends = entries.filter(entry => entry.type === 'tool.execution_complete');
   const conflicting = starts.length > 1 || ends.length > 1;
@@ -409,15 +409,22 @@ export function describeToolGroup(entries) {
   const elapsed = linked && !conflicting && start && end
     ? timestampMilliseconds(end.timestamp) - timestampMilliseconds(start.timestamp) : NaN;
   const timing = Number.isFinite(elapsed) && elapsed >= 0 ? `${elapsed / 1000} s elapsed` : 'Elapsed unknown';
-  return { kind: 'Tool', title: conflicting ? 'Tool call with conflicting boundaries' : describeStep(start || end).title,
+  return { kind: 'Tool', title: conflicting ? 'Tool call with conflicting boundaries' : describeStep(start || end, operation).title,
     subtitle: `${source} · ${status} · ${timing}`, tone: !conflicting && end?.success === false ? 'error' : 'tool' };
 }
 
-// Invocation evidence is historical; a current inventory cannot establish a past tool's origin.
-export function toolProvenance(entries) {
-  const text = (value, limit = 256) => typeof value === 'string' && value.trim().length > 0 && value.length <= limit;
-  const result = new Map();
-  for (const section of groupSteps(entries).filter(section => section.kind === 'tool')) {
+const identityText = (value, limit = 256) => typeof value === 'string' && value.trim().length > 0 && value.length <= limit;
+const mcpFields = ['mcpConfigServerName', 'mcpServerName', 'mcpToolName', 'mcpServerDisplayName', 'mcpConfigSource', 'mcpTransport'];
+
+function validMcpMetadata(data) {
+  return identityText(data.mcpToolName) && (identityText(data.mcpConfigServerName) || identityText(data.mcpServerName))
+    && mcpFields.slice(0, 4).every(field => data[field] === undefined || identityText(data[field], field === 'mcpServerDisplayName' ? 180 : 256))
+    && (data.mcpConfigSource === undefined || ['user', 'workspace', 'plugin', 'builtin', 'managed', 'account'].includes(data.mcpConfigSource))
+    && (data.mcpTransport === undefined || ['stdio', 'http', 'sse', 'memory'].includes(data.mcpTransport));
+}
+
+function toolBuckets(entries) {
+  return groupSteps(entries).filter(section => section.kind === 'tool').map(section => {
     const boundaries = section.entries;
     const starts = boundaries.filter(entry => entry.type === 'tool.execution_start');
     const ends = boundaries.filter(entry => entry.type === 'tool.execution_complete');
@@ -426,21 +433,25 @@ export function toolProvenance(entries) {
     const matched = key !== null && starts.length === 1 && ends.length <= 1 && boundaries.every(entry => {
       const record = entry === start ? data : explanationData(entry);
       return toolIdentity(entry) === key && record?.toolCallId === entry.toolCallId
+        && (record.toolName === undefined || record.toolName === start.toolName)
         && (entry === start || entry.toolName === '' || entry.toolName === start.toolName);
-    }) && text(data?.toolName, 180) && data.toolName === start.toolName;
+    }) && identityText(data?.toolName, 180) && data.toolName === start.toolName;
+    return { boundaries, start, data: matched ? data : null };
+  });
+}
+
+// Invocation evidence is historical; a current inventory cannot establish a past tool's origin.
+export function toolProvenance(entries) {
+  const result = new Map();
+  for (const { boundaries, start, data } of toolBuckets(entries)) {
     let description = {
       origin: 'Unknown', label: 'Origin: Unknown', provider: null, serverKey: null, serverName: null,
       toolName: null, modelToolName: null, configSource: null, transport: null, basisId: null,
-      basis: matched ? 'This invocation has no supported, complete MCP origin metadata.'
+      basis: data ? 'This invocation has no supported, complete MCP origin metadata.'
         : 'A unique invocation with complete, matching source and call evidence is unavailable.',
       uncertainty: 'Native built-in and plugin origins are unknown without a verified host discriminator. Names, titles and absent MCP fields do not establish origin.',
     };
-    const strings = ['mcpConfigServerName', 'mcpServerName', 'mcpToolName', 'mcpServerDisplayName'];
-    const valid = matched && text(data.mcpToolName) && (text(data.mcpConfigServerName) || text(data.mcpServerName))
-      && strings.every(field => data[field] === undefined || text(data[field], field === 'mcpServerDisplayName' ? 180 : 256))
-      && (data.mcpConfigSource === undefined || ['user', 'workspace', 'plugin', 'builtin', 'managed', 'account'].includes(data.mcpConfigSource))
-      && (data.mcpTransport === undefined || ['stdio', 'http', 'sse', 'memory'].includes(data.mcpTransport));
-    if (valid) {
+    if (data && validMcpMetadata(data)) {
       const provider = data.mcpServerDisplayName ?? null;
       const serverKey = data.mcpConfigServerName ?? null;
       description = {
@@ -452,6 +463,66 @@ export function toolProvenance(entries) {
           + (serverKey ? '' : ' Legacy mcpServerName may be a display name; an exact configured server key is unknown.'),
       };
     }
+    for (const entry of boundaries) result.set(entry.id, description);
+  }
+  return result;
+}
+
+const argumentString = value => typeof value === 'string';
+const argumentText = value => argumentString(value) && value.length > 0;
+const argumentBoolean = value => typeof value === 'boolean';
+const nonnegativeInteger = value => Number.isSafeInteger(value) && value >= 0;
+const argumentPaths = value => argumentText(value) || (Array.isArray(value) && value.length > 0 && value.every(argumentText));
+const operationContracts = new Map(Object.entries({
+  view: { required: ['path'], fields: { path: argumentText, forceReadLargeFiles: argumentBoolean,
+    view_range: value => Array.isArray(value) && value.length === 2 && value.every(Number.isSafeInteger)
+      && value[0] >= 1 && (value[1] === -1 || value[1] >= value[0]) }, categories: ['Read'], title: args => `View ${args.path}` },
+  grep: { required: ['pattern'], fields: { pattern: argumentText, paths: argumentPaths, glob: argumentString, type: argumentString,
+    output_mode: value => ['content', 'files_with_matches', 'count'].includes(value), '-i': argumentBoolean,
+    '-A': nonnegativeInteger, '-B': nonnegativeInteger, '-C': nonnegativeInteger, '-n': argumentBoolean,
+    head_limit: nonnegativeInteger, multiline: argumentBoolean }, categories: ['Search'], title: args => `Search for pattern “${args.pattern}”` },
+  glob: { required: ['pattern'], fields: { pattern: argumentText, paths: argumentPaths }, categories: ['Search'] },
+  create: { required: ['path', 'file_text'], fields: { path: argumentText, file_text: argumentString }, categories: ['Edit'] },
+  edit: { required: ['path'], fields: { path: argumentText, old_str: argumentString, new_str: argumentString }, categories: ['Edit'] },
+  powershell: { required: ['command', 'description'], fields: { command: argumentText,
+    description: value => argumentText(value) && value.length <= 100, shellId: argumentText,
+    mode: value => ['sync', 'async'].includes(value), detach: argumentBoolean,
+    initial_wait: value => typeof value === 'number' && value >= 30 && value <= 600 }, categories: ['Execute'],
+    valid: args => args.detach === undefined || args.mode === 'async' },
+  web_fetch: { required: ['url'], fields: { url: value => {
+    if (!argumentText(value)) return false;
+    try { return ['http:', 'https:'].includes(new URL(value).protocol); } catch { return false; }
+  }, max_length: value => nonnegativeInteger(value) && value > 0 && value <= 20000,
+  start_index: nonnegativeInteger, raw: argumentBoolean }, categories: ['Read', 'External access'] },
+}));
+
+function requestedOperation(data) {
+  const args = data?.arguments;
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
+  if (mcpFields.some(field => Object.hasOwn(data, field))) {
+    return validMcpMetadata(data) ? { categories: ['External access'], title: '',
+      basis: 'Recorded MCP invocation requests service interaction; its tool-specific operation is unknown.',
+      limits: 'The service may be local or in-process; this does not prove a network request.' } : null;
+  }
+  const contract = operationContracts.get(data.toolName);
+  if (!contract || !contract.required.every(field => Object.hasOwn(args, field))
+    || !Object.entries(args).every(([field, value]) => Object.hasOwn(contract.fields, field) && contract.fields[field](value))
+    || (contract.valid && !contract.valid(args))) return null;
+  return { categories: [...contract.categories], title: shortTitle(contract.title?.(args) || ''),
+    basis: `Authored schema interpretation of recorded ${data.toolName} arguments; the name does not verify its implementation.`,
+    limits: data.toolName === 'powershell' ? 'Shell text is opaque; possible read, write and network effects are unknown.' : '' };
+}
+
+export function toolOperations(entries) {
+  const result = new Map();
+  for (const { boundaries, start, data } of toolBuckets(entries)) {
+    const operation = data && requestedOperation(data);
+    const description = { categories: operation?.categories || [], title: operation?.title || '',
+      label: `Requested: ${operation ? operation.categories.join(' · ') : 'Unclassified'}`,
+      basisId: operation ? start.id : null,
+      basis: operation?.basis || 'A recognized request with complete, unambiguous source, call and argument evidence is unavailable.',
+      limits: 'Categories describe requested operations, not approval or completed effects. Actual implementation and effects remain unknown; this is not a security guarantee.'
+        + (operation?.limits ? ` ${operation.limits}` : '') };
     for (const entry of boundaries) result.set(entry.id, description);
   }
   return result;
@@ -662,16 +733,16 @@ export function summarize(entries) {
     skillNames: [...skills], hookNames: [...hookNames], unlinked };
 }
 
-export function describeTurn(entry, context) {
+export function describeTurn(entry, context, operation) {
   if (!context) {
     if (entry.type === 'assistant.turn_end') return { kind: 'Model', tone: 'model',
       title: entry.turnId ? `Turn ${entry.turnId} complete` : 'Turn complete',
       subtitle: 'Matching start unavailable in this view.' };
     if (entry.type === 'assistant.turn_start') return { kind: 'Model', tone: 'model',
       title: 'Model turn', subtitle: 'Start recorded; usable turn or agent ID unavailable.' };
-    return describeStep(entry);
+    return describeStep(entry, operation);
   }
-  if (context.role === 'inside') return describeStep(entry);
+  if (context.role === 'inside') return describeStep(entry, operation);
   const { turn, role } = context;
   const source = turn.agent ? `Agent ${turn.agent}` : 'Main chat';
   const activity = role === 'start' && turn.activitySupported ? turn.activity : null;
@@ -708,17 +779,9 @@ export function describeHookGroup(entries) {
   return { kind: 'Hook', title: 'Hooks', subtitle, tone: failures ? 'error' : 'host' };
 }
 
-function actionTitle(entry) {
-  if (entry.type !== 'tool.execution_start' || entry.truncated
-    || typeof entry.evidence !== 'string' || entry.evidence.length > 12000) return '';
-  let data;
-  try { data = JSON.parse(entry.evidence)?.data; } catch { return ''; }
-  const args = data?.arguments;
-  if (data?.toolName !== entry.toolName || !args || typeof args !== 'object' || Array.isArray(args)) return '';
-  let title = '';
-  if (entry.toolName === 'view' && typeof args.path === 'string' && args.path.length) title = `View ${args.path}`;
-  if (entry.toolName === 'grep' && typeof args.pattern === 'string' && args.pattern.length) title = `Search for pattern “${args.pattern}”`;
-  return shortTitle(title);
+function actionTitle(entry, operation) {
+  if (entry.type !== 'tool.execution_start') return '';
+  return (operation || toolOperations([entry]).get(entry.id))?.title || '';
 }
 
 function shortTitle(title) {
@@ -728,7 +791,7 @@ function shortTitle(title) {
   return prefix + '…';
 }
 
-export function describeStep(entry) {
+export function describeStep(entry, operation) {
   const type = entry.type;
   if (type === 'user.message') {
     const delivery = { idle: 'Idle input · Starts its own run', steering: 'Steering input · Injected into an in-flight run',
@@ -739,7 +802,7 @@ export function describeStep(entry) {
   if (entry.category === 'tool') {
     const subtitle = type === 'tool.execution_start' ? 'Started'
       : entry.success === false ? 'Failed' : entry.success === true ? 'Completed' : 'Result recorded';
-    return { kind: 'Tool', title: actionTitle(entry) || entry.toolName || 'Tool name unavailable', subtitle, tone: entry.success === false ? 'error' : 'tool' };
+    return { kind: 'Tool', title: actionTitle(entry, operation) || entry.toolName || 'Tool name unavailable', subtitle, tone: entry.success === false ? 'error' : 'tool' };
   }
   if (entry.category === 'skill') {
     const triggers = { 'user-invoked': 'Invoked by you', 'agent-invoked': 'Invoked by agent', 'context-load': 'Loaded into context' };

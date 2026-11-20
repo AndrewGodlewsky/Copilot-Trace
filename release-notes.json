@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.22",
+    "summary": "Tool cards now label recognized requested operations, with clear limits for shell commands and unknown tools. Categories stay separate from recorded outcomes."
+  },
+  {
     "version": "0.1.21",
     "summary": "Tool cards now show recorded MCP provenance and provider details. Missing or unverified origins stay unknown."
   },
