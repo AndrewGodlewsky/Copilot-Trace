@@ -1,4 +1,4 @@
-import { describeActor, explainStep, describeHookGroup, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
+import { describeActor, explainStep, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -25,7 +25,7 @@ const navigationStatus = document.querySelector('#navigation-status');
 const actorLegend = document.querySelector('#actor-legend');
 actorLegend.addEventListener('toggle', () => { if (actorLegend.open) follow.checked = false; });
 const statValues = new Map();
-for (const [key, label] of [['turns', 'Model turns'], ['hooks', 'Hook calls'], ['tools', 'Tool calls'], ['skills', 'Skill loads']]) {
+for (const [key, label] of [['turns', 'Model turns'], ['hooks', 'Hook pipelines'], ['tools', 'Tool calls'], ['skills', 'Skill loads']]) {
   const cell = element('div');
   cell.dataset.metric = key;
   const value = element('dd', '—');
@@ -158,7 +158,7 @@ function renderStatistics(snapshot) {
     : `Retained: ${stats.turns} ${stats.turns === 1 ? 'turn' : 'turns'} · ${stats.tools} ${stats.tools === 1 ? 'tool call' : 'tool calls'}`;
   const peek = document.querySelector('#statistics-peek');
   if (peek.textContent !== preview) peek.textContent = preview;
-  document.querySelector('#stat-scope').textContent = `${snapshot.entries.length} retained events only; not whole-chat totals. Tool and hook calls count once per exact source and call ID, including partial calls. Tool cards with conflicting boundaries count once; their outcome is unknown.${snapshot.history !== 'ready' ? ' History is incomplete or unavailable.' : ''}${snapshot.omitted ? ' Older events have been omitted.' : ''}`;
+  document.querySelector('#stat-scope').textContent = `${snapshot.entries.length} retained events only; not whole-chat totals. Tool calls and hook pipeline invocations count once per exact source and call ID, including partial calls. Hook pipelines are not counts of configured scripts or callbacks. A pipeline can span hook groups, so group counts do not add up to this total. Conflicting boundaries count once; their outcome is unknown.${snapshot.history !== 'ready' ? ' History is incomplete or unavailable.' : ''}${snapshot.omitted ? ' Older events have been omitted.' : ''}`;
   const unlinked = document.querySelector('#stat-unlinked');
   unlinked.hidden = !stats.unlinked;
   unlinked.textContent = `${stats.unlinked} turn, hook or tool events lack usable IDs and are excluded from those totals.`;
@@ -223,6 +223,108 @@ function metadataValues(entry) {
   const actor = describeActor(entry);
   const time = typeof entry.timestamp === 'string' && entry.timestamp ? entry.timestamp : 'Not recorded';
   return [['Recorded time', time], ['Actor', actor.role], ['Source', actor.source], ['Event', entry.type]];
+}
+
+function renderHookInvocation(owner, call) {
+  if (!owner.hook) {
+    owner.hook = element('details', undefined, 'hook-invocation');
+    owner.hookTitle = element('summary');
+    owner.hookSource = element('p');
+    owner.hookTiming = element('p');
+    owner.hookOutcome = element('p');
+    owner.hookNotes = element('p', '', 'hook-notes');
+    owner.hookReported = element('dl', undefined, 'metadata hook-reported');
+    owner.hookFields = new Map();
+    owner.hookLinks = element('div', undefined, 'boundary-links');
+    owner.hookLinks.setAttribute('role', 'group');
+    owner.hookLinks.setAttribute('aria-label', 'Original hook boundaries in recorded event order');
+    owner.hookButtons = new Map();
+    owner.hookRaw = element('details', undefined, 'hook-output');
+    owner.hookRaw.append(element('summary', 'Recorded output and error'));
+    owner.hookOutput = element('pre');
+    owner.hookOutput.tabIndex = 0;
+    owner.hookOutput.setAttribute('aria-label', 'Recorded hook output');
+    owner.hookError = element('pre');
+    owner.hookError.tabIndex = 0;
+    owner.hookError.setAttribute('aria-label', 'Recorded hook error');
+    owner.hookRaw.append(element('p', 'Output'), owner.hookOutput, element('p', 'Error'), owner.hookError);
+    owner.hook.append(owner.hookTitle, owner.hookSource, element('h4', 'General lifecycle timing'), owner.hookTiming,
+      element('h4', 'Recorded pipeline result'), owner.hookOutcome, owner.hookReported, owner.hookRaw,
+      element('p', 'A reported result or decision request does not verify downstream effects, approval, blocking or instruction compliance. Supplied context is shown only when output exposes it; callback returns may be absent from pipeline output.'),
+      owner.hookNotes, owner.hookLinks);
+    owner.hook.addEventListener('toggle', () => { if (owner.hook.open) follow.checked = false; });
+  }
+  const title = `${call.title} · ${call.linked ? 'Pipeline invocation' : 'Unlinked boundary'}`;
+  const source = `${describeActor(call.entries[0]).source} · Invocation ID: ${call.hookInvocationId ?? 'Unavailable'}`;
+  const result = call.outcome === 'unknown' ? 'Pipeline outcome unknown.' : `Reported pipeline ${call.outcome}.`;
+  const status = `${result} ${call.entries.length} retained boundary ${call.entries.length === 1 ? 'event' : 'events'} · ${call.status}.`;
+  for (const [node, text] of [[owner.hookTitle, title], [owner.hookSource, source], [owner.hookTiming, call.timing],
+    [owner.hookOutcome, status], [owner.hookNotes, call.notes.join(' ')],
+    [owner.hookOutput, call.output ?? 'Output not exposed in complete matching evidence.'],
+    [owner.hookError, call.error ?? 'No typed error exposed in complete matching evidence.']]) {
+    if (node.textContent !== text) node.textContent = text;
+  }
+  const fields = new Set(call.reported.map(item => item.field));
+  for (const [key, row] of owner.hookFields) if (!fields.has(key)) {
+    row.label.remove(); row.value.remove(); owner.hookFields.delete(key);
+  }
+  let previousField;
+  for (const field of call.reported) {
+    let row = owner.hookFields.get(field.field);
+    if (!row) {
+      row = { label: element('dt'), value: element('dd') };
+      owner.hookFields.set(field.field, row);
+    }
+    if (row.label.textContent !== field.label) row.label.textContent = field.label;
+    if (row.value.textContent !== field.value) row.value.textContent = field.value;
+    previousField = place(owner.hookReported, row.label, previousField);
+    previousField = place(owner.hookReported, row.value, previousField);
+  }
+  let previousButton;
+  const ids = new Set(call.entries.map(entry => entry.id));
+  for (const entry of call.entries) {
+    let button = owner.hookButtons.get(entry.id);
+    if (!button) {
+      button = element('button'); button.type = 'button';
+      button.addEventListener('click', () => showBoundary(entry.id));
+      owner.hookButtons.set(entry.id, button);
+    }
+    const label = `${entry.type === 'hook.start' ? 'Start' : 'End'} evidence · ${entry.timestamp || 'Time unavailable'}`;
+    if (button.textContent !== label) button.textContent = label;
+    previousButton = place(owner.hookLinks, button, previousButton);
+  }
+  for (const [id, button] of owner.hookButtons) if (!ids.has(id)) { button.remove(); owner.hookButtons.delete(id); }
+}
+
+function renderHookGroup(group, calls, chronological, previousRows, usedRows, focused) {
+  if (!group.invocations) {
+    group.invocations = element('ol', undefined, 'hook-invocations');
+    group.invocations.setAttribute('aria-label', 'Retained hook pipeline invocations');
+    group.hookRows = new Map();
+    group.details.insertBefore(element('p', 'Summaries link matching retained boundaries across groups. Original events below remain in their recorded order; invocation counts across groups are not additive.', 'group-note'), group.children);
+    group.details.insertBefore(group.invocations, group.children);
+  }
+  const nextRows = new Map();
+  let previous;
+  for (const call of calls) {
+    const local = call.entries.filter(entry => group.ids.has(entry.id));
+    const candidates = previousRows.filter(old => old.id === call.id && local.some(entry => old.ids.has(entry.id)));
+    const available = candidates.filter(old => !usedRows.has(old.row));
+    const prior = available.find(old => old.row.hook.contains(focused))
+      || available.find(old => old.open) || available.find(old => old.group === group) || available[0];
+    const row = prior?.row || { item: element('li') };
+    renderHookInvocation(row, call);
+    row.hook.open = candidates.some(old => old.open);
+    row.hookRaw.open = candidates.some(old => old.rawOpen);
+    row.ids = new Set(local.map(entry => entry.id));
+    nextRows.set(call.id, row);
+    usedRows.add(row);
+    const boundary = local.find(entry => matchesFilter(entry, activityFilter.value)) || local[0];
+    const target = chronological ? nodes.get(boundary.id).body : row.item;
+    if (row.hook.parentElement !== target) target.append(row.hook);
+    previous = place(group.invocations, row.item, previous);
+  }
+  group.hookRows = nextRows;
 }
 
 function renderToolProvenance(group, description) {
@@ -489,8 +591,14 @@ function render(snapshot) {
   const stages = actionStages(snapshot.entries, snapshot);
   const provenance = toolProvenance(snapshot.entries);
   const operations = toolOperations(snapshot.entries);
+  const hooks = hookInvocations(snapshot.entries);
+  const hookByEvent = new Map(hooks.flatMap(call => call.entries.map(entry => [entry.id, call])));
   renderStatistics(snapshot);
   const oldGroups = groups.map(group => ({ group, ids: group.ids, open: group.details.open }));
+  const oldHookRows = groups.flatMap(group => [...(group.hookRows || [])].map(([id, row]) => ({
+    id, row, group, ids: row.ids, open: row.hook.open, rawOpen: row.hookRaw.open,
+  })));
+  const usedHookRows = new Set();
   const retained = new Set(snapshot.entries.map(entry => entry.id));
   for (const [id, node] of nodes) {
     if (!retained.has(id)) { node.item.remove(); nodes.delete(id); }
@@ -547,7 +655,7 @@ function render(snapshot) {
         group.details.append(element('p', 'Positioned at the first retained boundary. View each boundary in event order to inspect intervening activity.', 'group-note'), group.links);
       }
       group.children = element('ol', undefined, tool ? 'tool-events' : 'hook-events');
-      group.children.setAttribute('aria-label', tool ? 'Original tool boundary events' : 'Individual hook events');
+      group.children.setAttribute('aria-label', tool ? 'Original tool boundary events' : 'Original hook boundaries in recorded event order');
       group.details.append(group.children);
       group.details.open = Boolean(prior?.open || section.entries.some(entry => nodes.get(entry.id).details.open));
     }
@@ -557,6 +665,8 @@ function render(snapshot) {
     group.item.dataset.tone = display.tone;
     applyContext(group, tool ? null : contexts.get(section.entries[0].id));
     group.ids = new Set(section.entries.map(entry => entry.id));
+    if (!tool) renderHookGroup(group, [...new Set(section.entries.map(entry => hookByEvent.get(entry.id)))], chronological,
+      oldHookRows, usedHookRows, focused);
     if (tool) {
       renderActionStages(group, stages.get(section.entries[0].id), operations.get(section.entries[0].id));
       renderToolProvenance(group, provenance.get(section.entries[0].id));
@@ -612,6 +722,8 @@ function render(snapshot) {
     if (!nextGroups.includes(group)) group.actions?.remove();
     if (!nextGroups.includes(group)) group.provenance?.remove();
   }
+  // History can split or merge groups; release only disclosures no new group retained.
+  for (const { row } of oldHookRows) if (!usedHookRows.has(row)) { row.hook.remove(); row.item.remove(); }
   for (const chapter of chapters) if (!chapterView || !nextChapters.includes(chapter)) chapter.item.remove();
   for (const lane of lanes) if (!laneView || !nextLanes.includes(lane)) lane.item.remove();
   for (const group of nextGroups) {

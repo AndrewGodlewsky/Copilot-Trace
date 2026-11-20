@@ -97,13 +97,160 @@ const start = boundary('start "<>日本語\uD800', 'start');
 const end = boundary('end', 'complete', { success: false, timestamp: '2026-11-20T12:00:01Z' });
 const walk = element => [element, ...element.children.flatMap(walk)];
 const visibleWalk = element => element.hidden ? [] : [element, ...element.children.flatMap(visibleWalk)];
-const visibleEvidence = ui => visibleWalk(ui.get('#timeline')).filter(node => node.tagName === 'pre').map(node => node.textContent);
+const visibleEvidence = ui => visibleWalk(ui.get('#timeline')).filter(node => node.attributes['aria-label'] === 'Recorded event data').map(node => node.textContent);
 function filterMode(ui, value) {
   ui.get('#activity-filter').value = value;
   ui.get('#activity-filter').dispatch('change');
 }
 const byClass = (element, name) => walk(element).find(node => node.className.split(' ').includes(name));
 const evidenceRows = group => byClass(group, 'tool-events').children;
+
+async function hookFixture() {
+  const raw = [
+    ['first-start', 'hook.start', 'first', 'postToolUse'],
+    ['second-start', 'hook.start', 'second', 'postToolUse'],
+    ['first-end', 'hook.end', 'first', 'postToolUse'],
+    ['gap', 'assistant.message'],
+    ['second-end', 'hook.end', 'second', 'postToolUse'],
+  ].map(([id, type, hookInvocationId, hookType]) => ({ id, type, timestamp: '2026-11-20T12:00:00Z',
+    data: type === 'assistant.message' ? { content: 'intervening event' }
+      : { hookInvocationId, hookType, ...(type === 'hook.end' ? { success: false,
+        output: { additionalContext: '<img> 日本語😀 exact context' }, error: { message: 'Literal <script> failure' } } : {}) } }));
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => raw });
+  await trace.ready;
+  const entries = trace.snapshot().entries;
+  trace.close();
+  return entries;
+}
+const originalEvidence = visibleEvidence;
+
+test('hook groups expose individual pipelines while original boundary evidence stays in event order', async () => {
+  const entries = await hookFixture();
+  const ui = fixture(appSource);
+  ui.render(entries);
+  const group = ui.get('#timeline').firstElementChild;
+  assert.ok(byClass(group, 'hook-invocations'), 'A hook group exposes individual pipeline summaries.');
+  assert.equal(byClass(group, 'hook-invocations').children.length, 2);
+  assert.match(group.textContent, /successful result/);
+  assert.match(group.textContent, /Reported pipeline failure/);
+  assert.match(group.textContent, /<img> 日本語😀 exact context/);
+  assert.equal(walk(group).filter(node => node.tagName === 'img' || node.tagName === 'script').length, 0);
+  assert.deepEqual(originalEvidence(ui), entries.map(entry => entry.evidence));
+  assert.equal(ui.get('#stat-counts').children.find(node => node.dataset.metric === 'hooks').children[1].textContent, '2');
+  assert.match(ui.get('#stat-scope').textContent, /pipeline.*scripts/);
+  const second = byClass(group, 'hook-invocations').children[1];
+  const endLink = walk(second).find(node => node.tagName === 'button' && /End/.test(node.textContent));
+  endLink.dispatch('click');
+  assert.equal(ui.get('#event-order').value, 'chronological');
+  assert.equal(ui.document.activeElement, ui.get('#timeline').children[4].firstElementChild.firstElementChild);
+  assert.equal(byClass(ui.get('#timeline').children[4], 'recorded-evidence').open, true);
+  assert.deepEqual(originalEvidence(ui), entries.map(entry => entry.evidence));
+});
+
+test('hook explanations survive view filters, retained-history reconciliation and focused disclosure updates', async () => {
+  const entries = await hookFixture();
+  const ui = fixture(appSource);
+  ui.render(entries.slice(0, 2), { history: 'loading' });
+  const group = ui.get('#timeline').firstElementChild;
+  const invocation = byClass(group, 'hook-invocations')?.firstElementChild?.firstElementChild;
+  assert.ok(invocation, 'Individual invocation disclosure exists before its result arrives.');
+  invocation.open = true;
+  invocation.firstElementChild.focus();
+  ui.document.scrollingElement.scrollTop = 250;
+  ui.render(entries);
+  assert.equal(ui.document.activeElement, invocation.firstElementChild);
+  assert.equal(invocation.open, true);
+  assert.equal(ui.document.scrollingElement.scrollTop, 250);
+  assert.match(invocation.textContent, /Reported pipeline failure/);
+  for (const mode of ['chronological', 'chapters', 'lanes', 'grouped']) {
+    filterMode(ui, 'everything');
+    invocation.firstElementChild.focus();
+    ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change');
+    assert.equal(ui.document.activeElement, invocation.firstElementChild, 'The same invocation disclosure follows view changes.');
+    assert.equal(invocation.open, true);
+    for (const filter of ['everything', 'automation', 'problems', 'tools']) {
+      filterMode(ui, filter);
+      const expected = entries.filter(entry => presentation.matchesFilter(entry, filter));
+      assert.deepEqual(originalEvidence(ui), expected.map(entry => entry.evidence));
+      if (filter !== 'tools') assert.ok(visibleWalk(ui.get('#timeline')).some(node => node.className === 'hook-invocation'));
+      assert.equal(ui.get('#stat-counts').children.find(node => node.dataset.metric === 'hooks').children[1].textContent, '2');
+    }
+  }
+  filterMode(ui, 'everything');
+  const retainedGroup = ui.get('#timeline').firstElementChild;
+  const retainedInvocation = byClass(retainedGroup, 'hook-invocations').firstElementChild.firstElementChild;
+  const staleStart = walk(retainedInvocation).find(node => node.tagName === 'button' && /Start/.test(node.textContent));
+  staleStart.focus();
+  ui.render(entries.slice(2), { omitted: 2 });
+  assert.ok(ui.document.activeElement.isConnected);
+  assert.notEqual(ui.document.activeElement, staleStart);
+  assert.match(retainedInvocation.textContent, /Start boundary not retained/);
+  ui.document.scrollingElement.scrollTop = 250;
+  staleStart.dispatch('click');
+  assert.match(ui.get('#navigation-status').textContent, /no longer retained/);
+  assert.equal(ui.document.scrollingElement.scrollTop, 250);
+});
+
+test('history splits and merges migrate the expanded focused hook disclosure with its retained invocation', async () => {
+  const entries = await hookFixture();
+  const live = entries.filter(entry => entry.type !== 'assistant.message');
+  const gap = entries.find(entry => entry.type === 'assistant.message');
+  const ui = fixture(appSource);
+  ui.render(live, { history: 'loading' });
+  const selected = byClass(ui.get('#timeline').firstElementChild, 'hook-invocations').children[1].firstElementChild;
+  selected.open = true;
+  byClass(selected, 'hook-output').open = true;
+  selected.firstElementChild.focus();
+  ui.document.scrollingElement.scrollTop = 250;
+  const split = [live[0], gap, ...live.slice(1)];
+  for (const records of [split, live, split, split.slice(1)]) {
+    ui.render(records);
+    assert.equal(selected.isConnected, true, 'A surviving invocation moves to its new group instead of being destroyed.');
+    assert.equal(selected.open, true);
+    assert.equal(byClass(selected, 'hook-output').open, true);
+    assert.equal(ui.document.activeElement, selected.firstElementChild);
+    assert.equal(ui.document.scrollingElement.scrollTop, 250);
+    assert.deepEqual(originalEvidence(ui), records.map(entry => entry.evidence));
+    assert.equal(walk(ui.get('#timeline')).filter(node => node === selected).length, 1);
+  }
+  walk(selected).find(node => node.tagName === 'button' && /End evidence/.test(node.textContent)).dispatch('click');
+  assert.equal(ui.get('#event-order').value, 'chronological');
+  const target = ui.get('#timeline').children[3];
+  assert.equal(ui.document.activeElement, target.firstElementChild.firstElementChild);
+  assert.equal(byClass(target, 'recorded-evidence').open, true);
+  assert.deepEqual(originalEvidence(ui), split.slice(1).map(entry => entry.evidence));
+});
+
+test('merging duplicate hook summaries preserves the focused copy and cannot transfer it to another source or reused identity', async () => {
+  const entries = await hookFixture();
+  const start = entries[0], end = entries[2], gap = entries[3];
+  const ui = fixture(appSource);
+  ui.render([start, gap, end]);
+  const firstCopy = byClass(ui.get('#timeline').firstElementChild, 'hook-invocations').firstElementChild.firstElementChild;
+  firstCopy.open = true;
+  byClass(firstCopy, 'hook-output').open = true;
+  const selected = byClass(ui.get('#timeline').children[2], 'hook-invocations').firstElementChild.firstElementChild;
+  selected.firstElementChild.focus();
+  ui.render([start, end]);
+  assert.equal(selected.isConnected, true);
+  assert.equal(selected.open, true);
+  assert.equal(byClass(selected, 'hook-output').open, true);
+  assert.equal(ui.document.activeElement, selected.firstElementChild);
+  assert.equal(walk(ui.get('#timeline')).filter(node => node.className === 'hook-invocation').length, 1);
+  ui.render([start, gap, end]);
+  assert.equal(selected.isConnected, true);
+  assert.equal(selected.open, true);
+  assert.equal(ui.document.activeElement, selected.firstElementChild);
+  ui.render([start, gap, { ...end, agentId: 'different-agent' }]);
+  const child = byClass(ui.get('#timeline').children[2], 'hook-invocations').firstElementChild.firstElementChild;
+  assert.notEqual(child, selected);
+  assert.equal(child.open, false);
+  assert.match(child.textContent, /Agent different-agent/);
+  ui.render([{ ...start, id: 'new-start' }, { ...end, id: 'new-end' }]);
+  assert.equal(selected.isConnected, false, 'A reused identity without retained common boundaries is a new disclosure.');
+  assert.equal(byClass(ui.get('#timeline').firstElementChild, 'hook-invocations').firstElementChild.firstElementChild.open, false);
+  assert.ok(ui.document.activeElement.isConnected);
+});
 
 async function actionFixture() {
   const raw = [

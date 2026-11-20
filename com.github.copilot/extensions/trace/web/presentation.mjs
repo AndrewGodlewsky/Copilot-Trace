@@ -7,8 +7,8 @@ const actorRoles = new Map(Object.entries({
   'assistant.reasoning': 'Assistant',
   'tool.execution_start': 'Tool',
   'tool.execution_complete': 'Tool',
-  'hook.start': 'Configured automation',
-  'hook.end': 'Configured automation',
+  'hook.start': 'Hook system',
+  'hook.end': 'Hook system',
   'permission.requested': 'Permission system',
   'permission.completed': 'Permission system',
   'skill.invoked': 'Instruction loading',
@@ -95,9 +95,9 @@ const stepLessons = new Map(Object.entries({
   'subagent.failed': ['The host reported a delegated agent failure.',
     'This is a failure report for delegated work; the evidence may provide a recorded error.',
     'The root cause, recovery and effect on the overall task are not established by this event alone.'],
-  'hook.start': ['The harness recorded a hook starting.',
-    'A hook is configured automation run at a workflow point.',
-    'This start does not establish the result, what changed or which configuration selected the hook.'],
+  'hook.start': ['The harness recorded a hook pipeline starting.',
+    'Hooks attach automation to lifecycle points. A pipeline record does not prove a configured handler ran.',
+    'This start does not establish the result, what changed or why the assistant chose a related operation. A missing end does not mean it is still running.'],
   'hook.end': ['The harness recorded a hook result.',
     'The reported outcome is unavailable; a result event alone does not establish success.',
     'A hook result does not verify the user’s task or prove which later actions it affected.'],
@@ -190,6 +190,94 @@ function toolIdentity(entry) {
     ? JSON.stringify([entry.agentId, entry.toolCallId]) : null;
 }
 
+function hookIdentity(entry) {
+  return typeof entry.agentId === 'string' && entry.agentId.length <= 256
+    && typeof entry.hookInvocationId === 'string' && entry.hookInvocationId.length > 0 && entry.hookInvocationId.length <= 256
+    ? JSON.stringify([entry.agentId, entry.hookInvocationId]) : null;
+}
+
+const hookTiming = new Map(Object.entries({
+  preToolUse: 'Before a tool is executed; one pipeline may cover several tool requests.',
+  preMcpToolCall: 'Before an MCP tool is called.',
+  postToolUse: 'After a tool returns a successful result; other result kinds use different lifecycle paths.',
+  postToolUseFailure: 'After a tool result of type failure; rejected, denied and timeout results do not trigger this hook.',
+  userPromptSubmitted: 'When the user submits a prompt.',
+  userPromptTransformed: 'After the runtime transforms a submitted prompt, before it is stored or sent to the model.',
+  sessionStart: 'When a session starts, including startup, resume or a new session.',
+  sessionEnd: 'When a session ends.',
+  errorOccurred: 'When an error occurs.',
+  agentStop: 'When the main agent reaches a natural terminal stop without pending work, excluding aborts and rejected-tool stops.',
+  subagentStart: 'Before a subagent’s first turn.',
+  subagentStop: 'After a subagent completes a turn.',
+}));
+
+function hookData(entry) {
+  const data = explanationData(entry);
+  return hookIdentity(entry) !== null && data?.hookInvocationId === entry.hookInvocationId
+    && typeof data.hookType === 'string' && data.hookType.length > 0 && shortTitle(data.hookType) === entry.displayName
+    ? data : null;
+}
+
+// Pipeline identities span retained groups; original boundary rows always keep their recorded order.
+export function hookInvocations(entries) {
+  const invocations = new Map();
+  for (const entry of entries) {
+    if (!['hook.start', 'hook.end'].includes(entry.type)) continue;
+    const identity = hookIdentity(entry);
+    const id = identity === null ? `unlinked-hook:${entry.id}` : `hook:${identity}`;
+    if (!invocations.has(id)) invocations.set(id, { id, linked: identity !== null,
+      agentId: entry.agentId, hookInvocationId: identity === null ? null : entry.hookInvocationId, entries: [] });
+    invocations.get(id).entries.push(entry);
+  }
+  for (const call of invocations.values()) {
+    const starts = call.entries.filter(entry => entry.type === 'hook.start');
+    const ends = call.entries.filter(entry => entry.type === 'hook.end');
+    const records = call.entries.map(hookData);
+    const types = [...new Set(call.entries.map((entry, index) => records[index]?.hookType || entry.displayName).filter(Boolean))];
+    call.hookType = types.length === 1 ? types[0] : null;
+    call.title = call.hookType || (types.length > 1 ? 'Conflicting hook types' : 'Hook type unavailable');
+    call.timing = hookTiming.get(call.hookType) || 'Timing unknown for this hook type; no lifecycle is inferred from its name.';
+    call.notes = [];
+    call.status = starts.length && ends.length ? 'paired' : starts.length ? 'start-only' : 'end-only';
+    if (!call.linked) {
+      call.status = 'unlinked';
+      call.notes.push('Source or invocation ID unavailable; this boundary is unlinked and excluded from invocation totals.');
+    } else if (starts.length > 1 || ends.length > 1 || types.length > 1
+      || (starts.length && ends.length && call.entries.indexOf(ends[0]) < call.entries.indexOf(starts[0]))) {
+      call.status = 'conflict';
+      call.notes.push('Duplicate boundaries, conflicting hook types or an end before its start make the invocation outcome unknown. Inspect the original events.');
+    }
+    if (!starts.length) call.notes.push('Start boundary not retained; this invocation is partial.');
+    if (!ends.length) call.notes.push('End boundary not retained; the outcome is unknown. This does not mean it is still running.');
+    if (records.some(data => !data)) call.notes.push('Complete matching evidence is unavailable for one or more boundaries.');
+    call.notes.push('Whether a configured handler ran is unknown from pipeline events alone. One pipeline can include multiple callbacks; counts are not scripts. Timing does not explain why the assistant chose a related operation.');
+    const end = call.status !== 'conflict' && call.linked && ends.length === 1 ? ends[0] : null;
+    const data = end ? hookData(end) : null;
+    call.outcome = typeof data?.success === 'boolean' && data.success === end.success ? data.success ? 'success' : 'failure' : 'unknown';
+    call.output = data && Object.hasOwn(data, 'output') ? JSON.stringify(data.output, null, 2) : null;
+    call.error = data?.error && typeof data.error === 'object' && !Array.isArray(data.error) && typeof data.error.message === 'string'
+      ? JSON.stringify(data.error, null, 2) : null;
+    call.reported = [];
+    const output = data?.output;
+    if (!output || typeof output !== 'object' || Array.isArray(output)) continue;
+    const add = (field, label) => call.reported.push({ field, label, value: output[field] });
+    if (['preToolUse', 'postToolUse', 'postToolUseFailure', 'userPromptSubmitted', 'sessionStart', 'subagentStart'].includes(call.hookType)
+      && typeof output.additionalContext === 'string') add('additionalContext', 'Supplied context (additionalContext)');
+    if (call.hookType === 'preToolUse' && ['allow', 'deny', 'ask'].includes(output.permissionDecision)) {
+      add('permissionDecision', 'Recorded permission decision request');
+    }
+    if ((['userPromptSubmitted', 'agentStop'].includes(call.hookType) && output.decision === 'block')
+      || (call.hookType === 'subagentStop' && ((output.decision === 'allow' && output.reason === undefined)
+        || (output.decision === 'block' && typeof output.reason === 'string' && output.reason.trim())))) {
+      add('decision', call.hookType === 'userPromptSubmitted' ? 'Recorded prompt decision request' : 'Recorded stop decision request');
+    }
+    if (call.hookType === 'errorOccurred' && ['retry', 'skip', 'abort'].includes(output.errorHandling)) {
+      add('errorHandling', 'Recorded error-handling request');
+    }
+  }
+  return [...invocations.values()];
+}
+
 export function groupSteps(entries, chronological = false) {
   if (chronological) return entries.map(entry => ({ id: `event:${entry.id}`, kind: 'event', entries: [entry] }));
   const sections = [];
@@ -207,8 +295,9 @@ export function groupSteps(entries, chronological = false) {
     }
     const hook = entry.type === 'hook.start' || entry.type === 'hook.end';
     const previous = sections.at(-1);
-    if (hook && entry.agentId !== null && previous?.kind === 'hooks' && previous.entries.at(-1) === entries[index - 1]
-      && previous.entries[0].agentId !== null && (previous.entries[0].agentId || '') === (entry.agentId || '')) {
+    if (hook && typeof entry.agentId === 'string' && entry.agentId.length <= 256
+      && previous?.kind === 'hooks' && previous.entries.at(-1) === entries[index - 1]
+      && previous.entries[0].agentId === entry.agentId) {
       previous.entries.push(entry);
     } else {
       sections.push({ id: `${hook ? 'hooks' : 'event'}:${entry.id}`, kind: hook ? 'hooks' : 'event', entries: [entry] });
@@ -710,11 +799,11 @@ export function summarize(entries) {
       }
       continue;
     }
-    let calls, id;
-    if (['hook.start', 'hook.end'].includes(entry.type)) { calls = hooks; id = entry.hookInvocationId; }
-    if (['tool.execution_start', 'tool.execution_complete'].includes(entry.type)) { calls = tools; id = entry.toolCallId; }
+    let calls;
+    if (['hook.start', 'hook.end'].includes(entry.type)) calls = hooks;
+    if (['tool.execution_start', 'tool.execution_complete'].includes(entry.type)) calls = tools;
     if (calls) {
-      const key = calls === tools ? toolIdentity(entry) : !id || entry.agentId === null ? null : JSON.stringify([entry.agentId || '', id]);
+      const key = calls === tools ? toolIdentity(entry) : hookIdentity(entry);
       if (key === null) { unlinked++; continue; }
       if (!calls.has(key) || !calls.get(key)) calls.set(key, entry.displayName || '');
     }
@@ -724,8 +813,8 @@ export function summarize(entries) {
     }
   }
   const hookNames = new Map();
-  for (const value of hooks.values()) {
-    const name = value || 'Name unavailable';
+  for (const call of hookInvocations(entries).filter(call => call.linked)) {
+    const name = call.hookType || (call.status === 'conflict' ? call.title : 'Name unavailable');
     hookNames.set(name, (hookNames.get(name) || 0) + 1);
   }
   return { turns, hooks: hooks.size, tools: tools.size,
@@ -775,7 +864,8 @@ export function describeHookGroup(entries) {
   const names = [...new Set(entries.map(entry => entry.displayName).filter(Boolean))];
   const failures = entries.filter(entry => entry.type === 'hook.end' && entry.success === false).length;
   const count = entries.length;
-  const subtitle = `${count} ${count === 1 ? 'event' : 'events'}${failures ? ` · ${failures} failed` : ''}${names.length ? ` · ${names.slice(0, 2).join(', ')}${names.length > 2 ? '…' : ''}` : ''}`;
+  const calls = new Set(entries.map(hookIdentity).filter(id => id !== null)).size;
+  const subtitle = `${calls ? `${calls} pipeline ${calls === 1 ? 'invocation' : 'invocations'} · ` : ''}${count} ${count === 1 ? 'event' : 'events'}${failures ? ` · ${failures} failed` : ''}${names.length ? ` · ${names.slice(0, 2).join(', ')}${names.length > 2 ? '…' : ''}` : ''}`;
   return { kind: 'Hook', title: 'Hooks', subtitle, tone: failures ? 'error' : 'host' };
 }
 

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
-import { actionStages, agentLanes, toolProvenance } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
+import { actionStages, agentLanes, hookInvocations, toolProvenance, summarize } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
 
 const sdkDirectory = process.env.COPILOT_SDK_DIR;
 const cli = process.env.COPILOT_CLI_PATH;
@@ -388,11 +388,18 @@ try {
   permissionFixture = undefined;
   provenanceFixture = { tools: [], responses: 0, allowCalls: false };
   const mcpEvents = [];
+  const hookCalls = [];
+  const fixtureHook = type => input => {
+    hookCalls.push({ type, toolName: input.toolName, toolCallId: input.toolCallId });
+    return { additionalContext: 'Fixed local hook context.' };
+  };
   const fixtureBase = `http://127.0.0.1:${fixture.address().port}`;
   session = await client.createSession({
     workingDirectory: project, configDirectory: home, availableTools: ['mcp:*'],
     requestExtensions: true, requestCanvasRenderer: true,
     extensionSdkPath: sdkDirectory, pluginDirectories: [root], enableConfigDiscovery: false,
+    hooks: { onPreToolUse: fixtureHook('preToolUse'), onPostToolUse: fixtureHook('postToolUse'),
+      onUserPromptSubmitted: fixtureHook('userPromptSubmitted') },
     mcpServers: Object.fromEntries(['first', 'second'].map(name => [name, { type: 'http', url: `${fixtureBase}/mcp/${name}`, tools: ['*'] }])),
     onPermissionRequest: request => { assert.equal(request.kind, 'mcp'); return { kind: 'approve-once' }; },
     model: 'fixture', provider: { type: 'openai', baseUrl: fixtureBase + '/v1', apiKey: 'fixture', wireApi: 'completions' },
@@ -417,12 +424,58 @@ try {
   provenanceFixture.allowCalls = true;
   await session.sendAndWait({ prompt: 'Synthetic local provenance fixture only.' }, 25000);
   if (fixtureError) throw fixtureError;
+  const hookEvents = mcpEvents.filter(event => event.type === 'hook.start' || event.type === 'hook.end');
   const mcpSnapshot = await until(() => fetch(mcpPanel.url + 'events').then(response => response.json()),
-    value => value.entries.filter(entry => entry.type === 'tool.execution_complete').length === 2, 'provenance projection');
+    value => value.entries.filter(entry => entry.type === 'tool.execution_complete').length === 2
+      && hookEvents.every(event => value.entries.some(entry => entry.id === event.id)), 'provenance and hook projection');
   stopMcpEvents();
   assert.equal(provenanceFixture.responses, 2);
   assert.equal(mcpMethods.filter(item => item.method === 'tools/call').length, 2);
   assert.equal(mcpEvents.some(event => event.type === 'session.error'), false);
+  assert.equal(hookCalls.filter(call => call.type === 'preToolUse').length, 2);
+  assert.equal(hookCalls.filter(call => call.type === 'postToolUse').length, 2);
+  assert.equal(hookCalls.filter(call => call.type === 'userPromptSubmitted').length, 1);
+  const hookStarts = hookEvents.filter(event => event.type === 'hook.start');
+  assert.equal(hookStarts.length, 9, 'Recorded pipeline invocations include lifecycle points without configured callbacks.');
+  assert.equal(hookEvents.length, 18);
+  assert.equal(summarize(mcpSnapshot.entries).hooks, hookStarts.length, 'Statistics counts pipeline invocations, not boundary events or callbacks.');
+  const pipelines = hookInvocations(mcpSnapshot.entries);
+  assert.equal(pipelines.length, hookStarts.length);
+  for (const start of hookStarts) {
+    assert.ok(typeof start.data.hookInvocationId === 'string' && start.data.hookInvocationId.length);
+    const ends = hookEvents.filter(event => event.type === 'hook.end' && event.data.hookInvocationId === start.data.hookInvocationId);
+    assert.equal(ends.length, 1);
+    assert.equal(ends[0].data.hookType, start.data.hookType);
+    assert.equal(ends[0].data.success, true);
+    const pipeline = pipelines.find(call => call.hookInvocationId === start.data.hookInvocationId
+      && call.agentId === (start.agentId ?? ''));
+    assert.ok(pipeline);
+    assert.deepEqual(pipeline.entries.map(entry => entry.id), [start.id, ends[0].id]);
+    assert.equal(pipeline.hookType, start.data.hookType);
+    assert.equal(pipeline.status, 'paired');
+    assert.equal(pipeline.outcome, 'success');
+    if (start.data.hookType === 'preToolUse') {
+      assert.equal(pipeline.output, null, 'Unexposed callback context remains unknown.');
+      assert.deepEqual(pipeline.reported, []);
+    }
+    if (start.data.hookType === 'postToolUse') {
+      assert.deepEqual(pipeline.reported, [{ field: 'additionalContext',
+        label: 'Supplied context (additionalContext)', value: 'Fixed local hook context.' }]);
+    }
+  }
+  const preToolRecords = hookEvents.filter(event => event.data.hookType === 'preToolUse');
+  assert.equal(preToolRecords.length, 2, 'One recorded pre-tool pipeline covers two callback requests.');
+  assert.equal(preToolRecords[0].data.input.toolCalls.length, 2);
+  assert.equal(preToolRecords[1].data.output, undefined, 'Callback context is not necessarily exposed in the pipeline record.');
+  assert.equal(hookEvents.filter(event => event.type === 'hook.end' && event.data.hookType === 'postToolUse'
+    && event.data.output?.additionalContext === 'Fixed local hook context.').length, 2);
+  for (const raw of hookEvents) {
+    const projected = mcpSnapshot.entries.find(entry => entry.id === raw.id);
+    assert.equal(projected.hookInvocationId, raw.data.hookInvocationId);
+    assert.equal(projected.agentId, raw.agentId ?? '');
+    assert.equal(projected.timestamp, raw.timestamp);
+    assert.deepEqual(JSON.parse(projected.evidence).data, raw.data);
+  }
   const origins = toolProvenance(mcpSnapshot.entries);
   for (const tool of mcpMetadata.tools) {
     const start = mcpEvents.find(event => event.type === 'tool.execution_start' && event.data.toolCallId === `fixture-mcp-${tool.mcpServerName}`);
@@ -457,7 +510,7 @@ try {
   await session.disconnect();
   assert.equal(requests, 12, 'Only the twelve expected local synthetic responses are permitted.');
   assert.equal(expired, false);
-  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping agents, approved/denied action boundaries and distinct MCP provenance verified with twelve fixed local responses across five disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
+  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping agents, approved/denied action boundaries, distinct MCP provenance and hook pipeline evidence verified with twelve fixed local responses across five disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
 } finally {
   clearTimeout(timer);
   releaseFirst();

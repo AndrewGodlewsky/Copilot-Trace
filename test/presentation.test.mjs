@@ -8,7 +8,7 @@ test('actor labels follow every supported exact event type independently of cate
     ['User', ['user.message']],
     ['Assistant', ['assistant.turn_start', 'assistant.turn_end', 'assistant.intent', 'assistant.message', 'assistant.reasoning']],
     ['Tool', ['tool.execution_start', 'tool.execution_complete']],
-    ['Configured automation', ['hook.start', 'hook.end']],
+    ['Hook system', ['hook.start', 'hook.end']],
     ['Permission system', ['permission.requested', 'permission.completed']],
     ['Instruction loading', ['skill.invoked']],
     ['Host', ['subagent.started', 'subagent.completed', 'subagent.failed', 'session.compaction_start',
@@ -57,7 +57,7 @@ test('projected missing and invalid raw agent IDs retain their distinct source m
   assert.deepEqual(trace.snapshot().entries.map(entry => describeActor(entry)), [
     { role: 'User', source: 'Main chat' },
     { role: 'Tool', source: 'Agent child' },
-    { role: 'Configured automation', source: 'Source unavailable' },
+    { role: 'Hook system', source: 'Source unavailable' },
   ]);
 });
 

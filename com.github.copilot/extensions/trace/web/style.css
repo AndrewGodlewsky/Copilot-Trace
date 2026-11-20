@@ -91,6 +91,18 @@ input { accent-color: var(--model); margin: 0; }
 .hook-events .step + .step::before, .tool-events .step + .step::before { height: 19px; top: -20px; }
 .tool-group > .node > summary .node-subtitle { display: block; overflow: visible; }
 .group-note { margin: 0; padding: 12px 14px 6px; color: var(--muted); font-size: .857rem; }
+.hook-group > .node > summary .node-subtitle { display: block; overflow: visible; }
+.hook-invocations { margin: 0; padding: 8px 14px 12px 32px; }
+.hook-invocations > li + li { margin-top: 12px; }
+.hook-invocation { font-size: .857rem; overflow-wrap: anywhere; }
+.hook-invocation > summary, .hook-output > summary { cursor: pointer; padding: 8px 0; white-space: pre-wrap; }
+.hook-invocation p, .hook-invocation h4 { margin: 8px 0; }
+.hook-notes { color: var(--muted); }
+.hook-invocation .boundary-links { padding: 8px 0; }
+.hook-invocation button { max-width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.hook-invocation pre, .hook-reported dd { white-space: pre-wrap; overflow-wrap: anywhere; }
+.hook-invocation pre { max-height: 240px; overflow: auto; padding: 10px; background: var(--code); }
+.hook-reported { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); }
 .step.request-chapter { max-width: 100%; }
 .request-chapter > .node > summary .node-title { white-space: pre-wrap; }
 .request-chapter > .node > summary .node-subtitle { display: block; overflow: visible; }
