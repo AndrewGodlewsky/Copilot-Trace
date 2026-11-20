@@ -273,6 +273,15 @@ body:has(.footer-panel[open]) { overflow: hidden; }
 #recap-report details { margin: 8px 0; }
 #recap-report button { display: block; max-width: 100%; margin: 6px 0; white-space: normal; overflow-wrap: anywhere; }
 #recap-report pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+#surprises-panel { overflow-wrap: anywhere; }
+#surprises-list { padding-left: 22px; max-height: min(24rem, 50vh); overflow: auto; overscroll-behavior: contain; }
+#surprises-list li { padding-block: 10px; border-top: 1px solid var(--line); }
+#surprises-list p { margin-block: 6px; }
+#surprises-panel button, .surprise-mark { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.surprise-mark { font-size: .857rem; }
+.surprise-mark[aria-pressed='true'] { border-color: var(--focus); }
+#surprises-panel button[aria-disabled='true'] { opacity: .65; cursor: default; }
+.surprise-feedback:empty, #surprises-status:empty { display: none; }
 .argument-selection p { white-space: pre-wrap; }
 #arguments-diff { padding-left: 22px; max-height: min(30rem, 55vh); overflow: auto; overscroll-behavior: contain; }
 #arguments-diff li { border-top: 1px solid var(--line); padding-block: 12px; }

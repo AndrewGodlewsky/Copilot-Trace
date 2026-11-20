@@ -1,4 +1,4 @@
-import { explanationData, toolOperations } from './presentation.mjs';
+import { explanationData, toolOperations, retainedRecapEntry } from './presentation.mjs';
 
 export const predictionCategories = Object.freeze({
   'read-search': 'Read / search', edit: 'Edit', execute: 'Execute', delegation: 'Delegation', response: 'Response',
@@ -6,6 +6,35 @@ export const predictionCategories = Object.freeze({
 const counter = value => Number.isSafeInteger(value) && value >= 0;
 const identity = value => typeof value === 'string' && value.trim().length > 0 && value.length <= 256;
 const unknown = (attempt, note) => ({ ...attempt, status: 'unknown', category: 'unknown', note });
+
+export function createSurpriseBookmarks() {
+  const items = [], limit = 20;
+  let sequence = 0, closed = false;
+  function clear() { for (const mark of items) mark.expected = null; items.length = 0; }
+  function sync(entries) {
+    for (const mark of items) if (mark.expected && !retainedRecapEntry(entries, mark.expected)) mark.expected = null;
+  }
+  function find(entry) { return items.find(mark => mark.expected && retainedRecapEntry([entry], mark.expected)); }
+  return {
+    items, limit, sync, find, clear,
+    mark(entry, entries) {
+      if (closed || !retainedRecapEntry(entries, entry)) return 'unavailable';
+      sync(entries);
+      if (find(entry)) return 'duplicate';
+      if (items.length === limit) return 'full';
+      // Keep an exact comparison copy only while retained; never a digest or expired archive.
+      if (JSON.stringify(entry).length > 65536) return 'unavailable';
+      items.push({ number: ++sequence, expected: freezeLearningSnapshot({ entries: [entry] }).entries[0] });
+      return 'marked';
+    },
+    unmark(mark) {
+      const index = items.indexOf(mark);
+      if (index < 0) return false;
+      mark.expected = null; items.splice(index, 1); return true;
+    },
+    close() { closed = true; clear(); },
+  };
+}
 
 // These categories interpret one record's contract, never later metadata or current catalogs.
 export function classifyPredictionEvent(entry) {

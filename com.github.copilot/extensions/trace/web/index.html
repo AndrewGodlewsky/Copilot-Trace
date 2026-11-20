@@ -238,6 +238,14 @@
           </details>
         </div>
       </dialog>
+      <dialog id="surprises-panel" class="footer-panel" aria-labelledby="surprises-title" aria-describedby="surprises-scope">
+        <div class="panel-heading"><h2 id="surprises-title">Surprising events</h2><button type="button" data-close-panel>Close</button></div>
+        <p id="surprises-scope"></p>
+        <p id="surprises-count"></p>
+        <ol id="surprises-list" aria-label="Marked live events"></ol>
+        <button id="surprises-clear" type="button">Clear all marks</button>
+        <p id="surprises-status" role="status"></p>
+      </dialog>
       <dialog id="recap-panel" class="footer-panel" aria-labelledby="recap-title" aria-describedby="recap-scope">
         <div class="panel-heading"><h2 id="recap-title">Observed recap</h2><button type="button" data-close-panel>Close</button></div>
         <p id="recap-scope"></p>
@@ -329,6 +337,7 @@
         <button id="refresh" type="button">↻ Refresh</button>
         <button id="arguments-button" type="button" aria-controls="arguments-panel" aria-haspopup="dialog" aria-expanded="false">Compare arguments</button>
         <button id="recap-button" type="button" aria-controls="recap-panel" aria-haspopup="dialog" aria-expanded="false">Recap</button>
+        <button id="surprises-button" type="button" aria-controls="surprises-panel" aria-haspopup="dialog" aria-expanded="false">Surprises</button>
         <button id="glossary-button" type="button" aria-controls="glossary-panel" aria-haspopup="dialog" aria-expanded="false">Glossary</button>
         <button id="prompt-button" type="button" data-panel="prompt-panel" aria-controls="prompt-panel" aria-haspopup="dialog" aria-expanded="false">Prompt prep</button>
         <button type="button" data-panel="settings-panel" aria-controls="settings-panel" aria-haspopup="dialog" aria-expanded="false">Settings</button>

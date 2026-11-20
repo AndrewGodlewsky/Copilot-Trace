@@ -1,7 +1,7 @@
 import { describeActor, explainStep, toolOutcomes, skillInstructions, compactionAttempts, delegationHandoffs, recoveryAttempts, guidanceComparison, retrievalLedger, toolExtents, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, observerScope, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
-import { predictionCategories, freezeLearningSnapshot, armLivePrediction, resolveLivePrediction, createReplayPractice, chooseReplayPrediction, createPlayback, createActivityCounter } from './learning.mjs';
+import { predictionCategories, freezeLearningSnapshot, armLivePrediction, resolveLivePrediction, createReplayPractice, chooseReplayPrediction, createPlayback, createActivityCounter, createSurpriseBookmarks } from './learning.mjs';
 import { parseExampleLibrary } from './examples.mjs';
 import { initFooter } from './footer.mjs';
 import { createFollow } from './follow.mjs';
@@ -66,6 +66,91 @@ let lastSnapshot;
 let liveSnapshot, practice, playback, activityCount, armingPrediction, practiceGeneration = 0;
 let exampleLibrary, activeExample, savedLiveView, loadingExamples, exampleLoading = false, exampleRequest;
 let feedState;
+const surprises = createSurpriseBookmarks(), surpriseRows = new Map();
+const surprisesButton = document.querySelector('#surprises-button'), surprisesPanel = document.querySelector('#surprises-panel');
+const surprisesList = document.querySelector('#surprises-list'), surprisesClear = document.querySelector('#surprises-clear');
+let surprisesOpening;
+const liveMarking = () => !panelClosed && !practice && !playback && !activeExample;
+function clearSurpriseView() {
+  surprisesOpening = undefined; surpriseRows.clear(); surprisesList.replaceChildren();
+  for (const id of ['scope', 'count', 'status']) document.querySelector(`#surprises-${id}`).textContent = '';
+}
+surprisesButton.addEventListener('click', () => {
+  if (panelClosed || !footerPanels.openPanel('surprises-panel', surprisesButton)) return;
+  clearSurpriseView(); surprisesOpening = {}; updateSurprises();
+});
+surprisesPanel.addEventListener('close', () => { if (!surprisesPanel.open) clearSurpriseView(); });
+surprisesClear.addEventListener('click', () => {
+  if (!surprisesPanel.open || !surprisesOpening || !liveMarking()) return;
+  surprises.clear(); updateSurprises(); updateSurpriseActions(true);
+  document.querySelector('#surprises-status').textContent = 'All marks cleared. Recorded events are unchanged.';
+});
+function updateSurpriseActions(clearFeedback = false) {
+  for (const node of nodes.values()) {
+    if (!node.surprise) continue;
+    const live = liveMarking(), marked = live && Boolean(surprises.find(node.entry));
+    if (clearFeedback || !live || node.surprise.disabled || node.surpriseMarked !== marked) node.surpriseHelp.textContent = '';
+    node.surprise.disabled = !live; node.surpriseMode.hidden = live; node.surpriseMarked = marked;
+    node.surprise.setAttribute('aria-pressed', String(marked));
+  }
+}
+function updateSurprises() {
+  if (panelClosed) return;
+  surprises.sync(liveSnapshot?.entries || []);
+  surprisesButton.textContent = liveMarking() && surprises.items.length ? `Surprises (${surprises.items.length})` : 'Surprises';
+  if (!surprisesPanel.open || !surprisesOpening) return;
+  const live = liveMarking(), scroll = surprisesPanel.scrollTop, listScroll = surprisesList.scrollTop;
+  document.querySelector('#surprises-scope').textContent = live
+    ? 'Live-record marks stay only in memory for this open Trace panel. Up to 20 marks, oldest first; at the limit, unmark one before adding another. Original evidence is not archived: changed, ambiguous or evicted records become numbered unavailable marks. Closing this list keeps marks; closing Trace discards them.'
+    : 'Return to live to mark or inspect events. Live marks stay in memory but their count and content are hidden during prediction, practice, playback and demonstrations. Learning events cannot be marked.';
+  document.querySelector('#surprises-count').textContent = live ? `${surprises.items.length} of ${surprises.limit} marks${surprises.items.length ? '' : ' · No surprising events marked.'}` : '';
+  surprisesClear.hidden = !live; surprisesClear.setAttribute('aria-disabled', String(!surprises.items.length));
+  if (!live) { surpriseRows.clear(); surprisesList.replaceChildren(); return; }
+  const opening = surprisesOpening;
+  for (const [mark, row] of surpriseRows) if (!surprises.items.includes(mark)) { row.item.remove(); surpriseRows.delete(mark); }
+  let previous;
+  for (const mark of surprises.items) {
+    let row = surpriseRows.get(mark);
+    if (!row) {
+      const item = element('li'), title = element('p'), detail = element('p');
+      const original = element('button', 'Open original'), unmark = element('button', 'Unmark');
+      original.type = 'button'; unmark.type = 'button';
+      const actions = element('div', '', 'panel-actions'); actions.append(original, unmark); item.append(title, detail, actions);
+      row = { item, title, detail, original, unmark }; surpriseRows.set(mark, row);
+      const current = () => liveMarking() && surprisesPanel.open && surprisesOpening === opening
+        && surpriseRows.get(mark) === row && surprises.items.includes(mark) && row.item.isConnected;
+      original.addEventListener('click', () => {
+        if (!current()) return;
+        updateSurprises();
+        const expected = mark.expected;
+        if (!expected || !retainedRecapEntry(lastSnapshot?.entries || [], expected)) return;
+        footerPanels.closePanel('surprises-panel', { restoreFocus: false });
+        clearSurpriseView();
+        showBoundary(expected.id, 'Showing a surprising event’s original retained evidence. Follow live is paused.', expected);
+      });
+      unmark.addEventListener('click', () => {
+        if (!current()) return;
+        const index = surprises.items.indexOf(mark), neighbor = surprises.items[index + 1] || surprises.items[index - 1];
+        if (row.item.contains(document.activeElement)) (surpriseRows.get(neighbor)?.unmark || surprisesClear).focus({ preventScroll: true });
+        surprises.unmark(mark); updateSurprises(); updateSurpriseActions(true);
+        document.querySelector('#surprises-status').textContent = 'Mark removed. Recorded event unchanged.';
+      });
+    }
+    const entry = mark.expected;
+    const title = entry ? `Mark ${mark.number} · ${describeStep(entry).title}` : `Mark ${mark.number} · Original unavailable`;
+    const detail = entry ? `${entry.type} · ${describeActor(entry).source} · ${entry.timestamp || 'Time unavailable'}`
+      : 'Evidence changed, became ambiguous or left the retained window. Its comparison copy and label were discarded. Unmark this placeholder when finished.';
+    if (row.title.textContent !== title) row.title.textContent = title;
+    if (row.detail.textContent !== detail) row.detail.textContent = detail;
+    row.original.setAttribute('aria-disabled', String(!entry));
+    const originalLabel = entry ? 'Open original' : 'Original unavailable';
+    if (row.original.textContent !== originalLabel) row.original.textContent = originalLabel;
+    row.original.setAttribute('aria-label', `${originalLabel} for surprising event ${mark.number}`);
+    row.unmark.setAttribute('aria-label', `Unmark surprising event ${mark.number}`);
+    previous = place(surprisesList, row.item, previous);
+  }
+  surprisesPanel.scrollTop = scroll; surprisesList.scrollTop = listScroll;
+}
 const plausibleDisclosure = document.querySelector('#plausible-actions'), plausibleList = document.querySelector('#plausible-list');
 let plausibleViews = [];
 plausibleDisclosure.addEventListener('toggle', () => {
@@ -894,6 +979,21 @@ function row(entry, outcome) {
   const node = nodeShell(describeStep(entry), actor);
   const body = element('div', undefined, 'evidence');
   node.body = body;
+  node.surprise = element('button', 'Mark as surprising', 'surprise-mark'); node.surprise.type = 'button';
+  node.surpriseHelp = element('p', '', 'surprise-feedback'); node.surpriseHelp.setAttribute('role', 'status');
+  node.surpriseMode = element('p', 'Return to live to mark events. Live marks stay hidden during learning.'); node.surpriseMode.hidden = true;
+  node.surprise.addEventListener('click', () => {
+    if (!liveMarking() || !node.surprise.isConnected || nodes.get(node.entry.id) !== node) return;
+    surprises.sync(liveSnapshot?.entries || []);
+    const mark = surprises.find(node.entry);
+    let result;
+    if (mark) { surprises.unmark(mark); result = 'removed'; }
+    else result = surprises.mark(node.entry, lastSnapshot?.entries || []);
+    updateSurprises(); updateSurpriseActions(true);
+    node.surpriseHelp.textContent = result === 'full' ? '20 marks reached. Open Surprises and unmark one before adding another.'
+      : result === 'unavailable' ? 'This original is unavailable, ambiguous or too large to mark. Reading position unchanged.'
+        : result === 'removed' ? 'Mark removed. Recorded event unchanged.' : 'Marked as surprising. Find it in Surprises; memory only until this Trace panel closes.';
+  });
   if (entry.type === 'assistant.turn_start') {
     node.activityBox = element('div', undefined, 'activity-source');
     node.activityBox.hidden = true;
@@ -945,7 +1045,7 @@ function row(entry, outcome) {
   node.pre.tabIndex = 0;
   node.pre.setAttribute('aria-label', 'Recorded event data');
   node.recordedEvidence.append(node.truncated, node.protectedContent, node.pre);
-  body.append(node.recordedEvidence);
+  body.append(node.recordedEvidence, node.surprise, node.surpriseHelp, node.surpriseMode);
   node.details.append(body);
   return node;
 }
@@ -1654,6 +1754,7 @@ function reconcileLanes(snapshot, visible) {
 }
 
 function render(snapshot) {
+  updateSurprises();
   updateGlossary();
   updateArgumentComparison();
   updateRecap();
@@ -1743,6 +1844,7 @@ function render(snapshot) {
     node.protectedContent.hidden = !protection;
     applyContext(node, context, entry);
   }
+  updateSurpriseActions();
   const nextGroups = [];
   const sections = groupSteps(snapshot.entries);
   for (const section of sections) {
@@ -1909,6 +2011,7 @@ const poller = createPoller({
       const snapshot = await response.json();
       if (panelClosed) return false;
       liveSnapshot = snapshot;
+      surprises.sync(snapshot.entries);
       lastFeedReceipt = Date.now(); unchangedFeed = false;
       etag = response.headers.get('etag');
       if (feedState !== 'connected') diagnostics.record('connected');
@@ -1963,6 +2066,7 @@ function closePracticeInspectors() {
   for (const panel of document.querySelectorAll('.footer-panel')) footerPanels.closePanel(panel.id, { restoreFocus: false });
   clearArgumentComparison(); glossaryTarget = undefined; guidanceExamples = [];
   clearRecap();
+  clearSurpriseView();
   for (const id of ['glossary-example', 'glossary-status', 'guidance-examples']) document.querySelector(`#${id}`).textContent = '';
   glossarySource.hidden = true;
 }
@@ -2192,6 +2296,8 @@ motionPreference.addEventListener('change', changeMotion);
 document.querySelector('#playback').addEventListener('toggle', () => { if (!document.querySelector('#playback').open) pausePlayback(); });
 window.addEventListener('pagehide', () => {
   panelClosed = true;
+  surprises.close(); clearSurpriseView();
+  surprisesButton.textContent = 'Surprises';
   clearPlausibleActions();
   exampleRequest?.abort(); exampleRequest = undefined; exampleLibrary = undefined; activeExample = undefined; savedLiveView = undefined;
   document.querySelector('#examples-select').replaceChildren(); document.querySelector('#examples-notes').replaceChildren();

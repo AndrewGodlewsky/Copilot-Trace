@@ -11,6 +11,7 @@ import * as footer from '../com.github.copilot/extensions/trace/web/footer.mjs';
 import { createPoller } from '../com.github.copilot/extensions/trace/web/polling.mjs';
 import * as learning from '../com.github.copilot/extensions/trace/web/learning.mjs';
 import * as examples from '../com.github.copilot/extensions/trace/web/examples.mjs';
+import { createDiagnostics } from '../com.github.copilot/extensions/trace/web/diagnostics.mjs';
 
 // A small DOM boundary double exercises reconciliation, not browser layout or native focus behavior.
 function fixture(source, inventoryLoad = async () => { throw new Error('Unexpected inventory request'); }, feedLoad, instructionLoad = async () => { throw new Error('Unexpected instruction request'); }, clock = Date, exampleLoad) {
@@ -107,6 +108,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     '#arguments-button', '#arguments-panel', '#arguments-first', '#arguments-second', '#arguments-first-detail', '#arguments-second-detail',
     '#arguments-status', '#arguments-limits', '#arguments-diff', '#arguments-scope',
     '#recap-button', '#recap-panel', '#recap-range', '#recap-scope', '#recap-status', '#recap-report',
+    '#surprises-button', '#surprises-panel', '#surprises-scope', '#surprises-count', '#surprises-list', '#surprises-clear', '#surprises-status',
     '#retrieval-ledger', '#retrieval-summary', '#retrieval-scope', '#retrieval-list', '#retrieval-unclassified', '#retrieval-unknown-list',
     '#validation-overview', '#validation-summary', '#validation-scope', '#validation-list',
     '#repeated-activity', '#repeated-summary', '#repeated-scope', '#repeated-list',
@@ -126,6 +128,11 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   selectors.get('#plausible-summary').tagName = 'summary';
   for (const id of ['summary', 'scope', 'list']) plausible.append(selectors.get(`#plausible-${id}`));
   const statistics = selectors.get('#statistics-panel');
+  const surprisesPanel = selectors.get('#surprises-panel'); surprisesPanel.tagName = 'dialog'; surprisesPanel.className = 'footer-panel';
+  const surprisesClose = new Element('button'); surprisesClose.textContent = 'Close'; surprisesClose.dataset.closePanel = ''; surprisesPanel.append(surprisesClose);
+  for (const id of ['scope', 'count', 'list', 'clear', 'status']) surprisesPanel.append(selectors.get(`#surprises-${id}`));
+  selectors.get('#surprises-button').tagName = 'button'; selectors.get('#surprises-clear').tagName = 'button';
+  selectors.get('#surprises-list').tagName = 'ol';
   const recapPanel = selectors.get('#recap-panel'); recapPanel.tagName = 'dialog'; recapPanel.className = 'footer-panel';
   const recapClose = new Element('button'); recapClose.textContent = 'Close'; recapClose.dataset.closePanel = ''; recapPanel.append(recapClose);
   for (const id of ['range', 'scope', 'status', 'report']) recapPanel.append(selectors.get(`#recap-${id}`));
@@ -179,6 +186,8 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   document.getElementById = id => selectors.get(`#${id}`);
   document.querySelectorAll = selector => document.body.querySelectorAll(selector);
   const windowEvents = new Map();
+  const diagnostics = createDiagnostics(), fetches = [], storageCalls = [];
+  const storage = { setItem(...args) { storageCalls.push(args); }, getItem() { return null; }, removeItem() {}, clear() {} };
   const playbackTimers = new Map(), playbackCallbacks = []; let playbackTimerId = 0, motionListener;
   const motion = { matches: false, addEventListener(name, listener) { motionListener = listener; }, removeEventListener() { motionListener = undefined; } };
   const context = vm.createContext({ ...presentation, ...learning, ...examples, TextEncoder,
@@ -188,16 +197,17 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     document, window: { matchMedia: () => motion, addEventListener(name, listener) {
     if (!windowEvents.has(name)) windowEvents.set(name, []); windowEvents.get(name).push(listener);
   } },
-    ResizeObserver: class { observe() {} disconnect() {} }, createDiagnostics: () => ({ record() {} }),
+    ResizeObserver: class { observe() {} disconnect() {} }, createDiagnostics: () => diagnostics,
+    localStorage: storage, sessionStorage: storage,
     createFollow,
     initCapabilities: options => capabilities.initCapabilities({ ...options, document, load: inventoryLoad }),
     initInstructionSources: options => instructions.initInstructionSources({ ...options, document, load: instructionLoad }),
-    fetch: (url, options) => url === 'examples.json' && exampleLoad ? exampleLoad(url, options) : feedLoad(url, options), AbortSignal, AbortController, Date: clock,
+    fetch: (url, options) => { fetches.push({ url, options }); return url === 'examples.json' && exampleLoad ? exampleLoad(url, options) : feedLoad(url, options); }, AbortSignal, AbortController, Date: clock,
     createPoller: options => feedLoad ? createPoller({ ...options, schedule: () => 1, cancel() {} }) : ({ refresh() {}, stop() {} }),
     initFooter: options => footer.initPanels?.({ ...options, document }),
   });
   vm.runInContext(source.replace(/^import .*;\r?\n/gm, ''), context);
-  return { document, get: selector => selectors.get(selector),
+  return { document, diagnostics, fetches, storageCalls, get: selector => selectors.get(selector),
     playbackTimers, playbackCallbacks,
     tickPlayback() { const [id, callback] = playbackTimers.entries().next().value; playbackTimers.delete(id); callback(); },
     reduceMotion(matches) { motion.matches = matches; motionListener?.({ matches }); },
@@ -3801,6 +3811,132 @@ test('repeated deliberate jumps use the current snapshot while live arrival stay
 function selectRecap(ui, value = 'range') {
   ui.get('#recap-button').dispatch('click'); ui.get('#recap-range').value = value; ui.get('#recap-range').dispatch('change');
 }
+
+const surpriseActions = ui => ui.get('#timeline').querySelectorAll('.surprise-mark');
+const surpriseOriginal = ui => ui.get('#surprises-list').querySelector('button');
+function openSurprises(ui) { ui.get('#surprises-button').dispatch('click'); }
+
+test('surprise marks preserve reading and Follow, reconcile live arrivals, and open nested filtered original evidence', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close()); emitRead(data);
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot())); await ui.refreshFeed();
+  const before = JSON.stringify(data.trace.snapshot()), action = surpriseActions(ui).at(-1);
+  assert.ok(action, 'Original event rows expose an opt-in mark action.');
+  ui.document.scrollingElement.scrollTop = 210; action.focus(); action.dispatch('click');
+  assert.equal(action.attributes['aria-pressed'], 'true'); assert.equal(ui.get('#follow').checked, true);
+  assert.equal(ui.document.activeElement, action); assert.equal(ui.document.scrollingElement.scrollTop, 210);
+  assert.equal(JSON.stringify(data.trace.snapshot()), before);
+  filterMode(ui, 'automation'); openSurprises(ui);
+  assert.match(ui.get('#surprises-count').textContent, /1 of 20/);
+  assert.match(ui.get('#surprises-scope').textContent, /memory.*panel/i);
+  const list = ui.get('#surprises-list'), row = list.children[0], original = surpriseOriginal(ui);
+  original.focus(); list.scrollTop = 35; ui.document.scrollingElement.scrollTop = 220;
+  emitRead(data, 'arrival'); await ui.refreshFeed();
+  assert.equal(list.children[0], row); assert.equal(ui.document.activeElement, original);
+  assert.equal(list.scrollTop, 35); assert.equal(ui.document.scrollingElement.scrollTop, 220);
+  assert.equal(list.attributes['aria-live'], undefined);
+  original.dispatch('click'); assert.equal(ui.get('#surprises-panel').open, false);
+  assert.equal(ui.get('#event-order').value, 'chronological'); assert.equal(ui.get('#activity-filter').value, 'everything');
+  assert.equal(ui.get('#follow').checked, false); assert.match(ui.get('#navigation-status').textContent, /surprising.*original/i);
+  assert.ok(walk(ui.get('#timeline')).some(node => node.scrolled));
+  const marked = surpriseActions(ui).find(button => button.attributes['aria-pressed'] === 'true');
+  marked.dispatch('click'); assert.equal(marked.attributes['aria-pressed'], 'false');
+  openSurprises(ui); assert.match(ui.get('#surprises-count').textContent, /0 of 20/);
+});
+
+test('surprise marks become ordinal-only expired placeholders and never attach to replacement evidence', () => {
+  const ui = fixture(appSource); ui.render([start, end]); const action = surpriseActions(ui)[0];
+  assert.ok(action); action.dispatch('click'); openSurprises(ui);
+  const original = surpriseOriginal(ui); original.focus(); const list = ui.get('#surprises-list');
+  ui.render([{ ...start, evidence: 'replacement' }, end]);
+  assert.equal(original.attributes['aria-disabled'], 'true'); assert.equal(ui.document.activeElement, original);
+  assert.match(list.textContent, /Mark 1.*Original unavailable/); assert.doesNotMatch(list.textContent, /日本語|replacement/);
+  assert.equal(surpriseActions(ui)[0].attributes['aria-pressed'], 'false');
+  ui.document.scrollingElement.scrollTop = 230; original.dispatch('click');
+  assert.equal(ui.document.scrollingElement.scrollTop, 230); assert.equal(ui.get('#surprises-panel').open, true);
+  ui.get('#surprises-panel').close(); surpriseActions(ui)[0].dispatch('click'); openSurprises(ui);
+  assert.equal(list.children.length, 2, 'Marking a replacement is a separate deliberate mark.');
+  const unmark = list.children[0].querySelectorAll('button')[1]; unmark.focus(); unmark.dispatch('click');
+  assert.equal(list.children.length, 1); assert.equal(ui.document.activeElement, list.children[0].querySelectorAll('button')[1]);
+  ui.get('#surprises-clear').focus(); ui.get('#surprises-clear').dispatch('click');
+  assert.equal(list.children.length, 0); assert.equal(ui.document.activeElement, ui.get('#surprises-clear'));
+  assert.equal(ui.document.scrollingElement.scrollTop, 230); assert.equal(ui.get('#follow').checked, false);
+});
+
+test('surprise marks keep live-only scope across same-ID examples and prediction/playback prefixes', async () => {
+  const entries = examples.parseExampleLibrary(exampleText)[0].snapshot.entries;
+  const ui = fixture(appSource, undefined, undefined, undefined, Date, async () => exampleResponse(exampleText));
+  ui.render(entries); assert.ok(surpriseActions(ui).length); surpriseActions(ui).at(-1).dispatch('click'); openSurprises(ui);
+  const stale = surpriseOriginal(ui);
+  ui.get('#examples-load').dispatch('click'); await ui.settleExamples(); ui.get('#examples-open').dispatch('click');
+  for (const action of surpriseActions(ui)) assert.equal(action.disabled, true);
+  openSurprises(ui); assert.equal(ui.get('#surprises-list').textContent, ''); assert.equal(ui.get('#surprises-count').textContent, '');
+  assert.match(ui.get('#surprises-scope').textContent, /Return to live/);
+  ui.document.scrollingElement.scrollTop = 200; stale.dispatch('click'); assert.equal(ui.document.scrollingElement.scrollTop, 200);
+  ui.get('#playback-exit').dispatch('click'); openSurprises(ui);
+  assert.match(ui.get('#surprises-count').textContent, /1 of 20/);
+  ui.get('#prediction-replay').dispatch('click'); openSurprises(ui);
+  assert.equal(ui.get('#surprises-list').textContent, ''); assert.equal(ui.get('#surprises-count').textContent, '');
+  assert.match(ui.get('#surprises-scope').textContent, /Return to live/);
+  ui.get('#prediction-exit').dispatch('click'); ui.get('#playback-start').dispatch('click');
+  ui.get('#playback-next').dispatch('click'); ui.get('#playback-previous').dispatch('click'); openSurprises(ui);
+  assert.equal(ui.get('#surprises-list').textContent, '');
+  ui.get('#playback-exit').dispatch('click'); openSurprises(ui); assert.match(ui.get('#surprises-count').textContent, /1 of 20/);
+  ui.closePage(); stale.dispatch('click'); assert.equal(ui.get('#surprises-list').textContent, '');
+});
+
+test('surprise dialog queued close/reopen invalidates old callbacks without discarding marks', () => {
+  const ui = fixture(appSource); ui.render([start]); assert.ok(surpriseActions(ui).length);
+  surpriseActions(ui)[0].dispatch('click'); openSurprises(ui);
+  const panel = ui.get('#surprises-panel'), stale = surpriseOriginal(ui);
+  panel.close = () => { panel.open = false; }; panel.dispatch('cancel');
+  openSurprises(ui); panel.dispatch('close');
+  assert.equal(panel.open, true); assert.match(ui.get('#surprises-count').textContent, /1 of 20/);
+  ui.document.scrollingElement.scrollTop = 250; stale.dispatch('click');
+  assert.equal(panel.open, true); assert.equal(ui.document.scrollingElement.scrollTop, 250);
+  ui.closePage(); surpriseOriginal(ui)?.dispatch('click');
+  assert.equal(ui.get('#surprises-list').textContent, '');
+});
+
+test('surprise list enforces its visible limit, renders literal Unicode and sends no mark data to diagnostics, storage or requests', () => {
+  const ui = fixture(appSource), text = 'PRIVATE 日本語🧪<script> C:/private/file https://private.example';
+  const entries = Array.from({ length: 21 }, (_, index) => ({ ...start, id: `private-${index}`, type: 'user.message',
+    category: 'chat', preview: text, evidence: text }));
+  ui.render(entries); const diagnosticsBefore = JSON.stringify(ui.diagnostics.snapshot()), requestsBefore = ui.fetches.length;
+  for (const action of surpriseActions(ui).slice(0, 20)) action.dispatch('click');
+  const last = surpriseActions(ui)[20]; last.focus(); ui.document.scrollingElement.scrollTop = 240; last.dispatch('click');
+  assert.equal(last.attributes['aria-pressed'], 'false'); assert.equal(ui.document.activeElement, last);
+  assert.equal(ui.document.scrollingElement.scrollTop, 240); assert.match(last.parentElement.textContent, /20 marks reached/);
+  ui.render([...entries, { ...entries[0], id: 'unmarked-arrival' }]);
+  assert.match(last.parentElement.textContent, /20 marks reached/, 'Live updates keep the limit explanation readable.');
+  openSurprises(ui); const list = ui.get('#surprises-list');
+  assert.equal(list.children.length, 20); assert.match(ui.get('#surprises-count').textContent, /20 of 20/);
+  assert.ok(list.textContent.includes(text)); assert.equal(list.querySelectorAll('script').length, 0);
+  const stale = surpriseOriginal(ui); ui.get('#surprises-clear').focus(); ui.get('#surprises-clear').dispatch('click');
+  stale.dispatch('click'); assert.equal(list.children.length, 0); assert.equal(ui.get('#surprises-panel').open, true);
+  ui.get('#surprises-panel').dispatch('cancel');
+  assert.equal(ui.document.activeElement, ui.get('#surprises-button'));
+  surpriseActions(ui)[0].dispatch('click'); ui.closePage();
+  surpriseActions(ui)[0].dispatch('click'); openSurprises(ui);
+  assert.equal(list.children.length, 0);
+  assert.equal(JSON.stringify(ui.diagnostics.snapshot()), diagnosticsBefore);
+  assert.deepEqual(ui.storageCalls, []); assert.equal(ui.fetches.length, requestsBefore);
+});
+
+test('live eviction during learning expires hidden marks before return and never revives a reused event ID', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  let snapshot = data.trace.snapshot();
+  const ui = fixture(appSource, undefined, async () => feedResponse(snapshot)); await ui.refreshFeed();
+  const originalEntries = snapshot.entries; surpriseActions(ui)[0].dispatch('click');
+  ui.get('#prediction-live').dispatch('click');
+  snapshot = { ...snapshot, revision: snapshot.revision + 1, entries: [], omitted: 1 }; await ui.refreshFeed();
+  openSurprises(ui); assert.equal(ui.get('#surprises-list').textContent, ''); assert.equal(ui.get('#surprises-count').textContent, '');
+  snapshot = { ...snapshot, revision: snapshot.revision + 1, entries: originalEntries }; await ui.refreshFeed();
+  ui.get('#prediction-exit').dispatch('click'); openSurprises(ui);
+  assert.match(ui.get('#surprises-list').textContent, /Mark 1.*Original unavailable/);
+  assert.doesNotMatch(ui.get('#surprises-list').textContent, /Question/);
+  assert.equal(surpriseOriginal(ui).attributes['aria-disabled'], 'true');
+  assert.equal(surpriseActions(ui)[0].attributes['aria-pressed'], 'false');
+});
 
 test('recap explicitly selects a frozen range and keeps counts, content, focus and reading position through arrivals', async t => {
   const data = await predictionFixture(); t.after(() => data.trace.close()); emitRead(data);

@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.48",
+    "summary": "Mark surprising events and revisit their original evidence from a compact list. Marks stay in memory, with clear limits and unavailable evidence states."
+  },
+  {
     "version": "0.1.47",
     "summary": "Open a factual recap of a selected request interval or retained range. Counts stay fixed while you inspect their original evidence, with missing results and history limits stated."
   },
