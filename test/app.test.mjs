@@ -53,12 +53,14 @@ function fixture(source) {
   document.documentElement = document.body;
   const selectors = new Map();
   for (const selector of ['main', '#timeline', '#connection', '#notice', '#empty', '#follow', '#actor-legend', '#stat-counts',
-    '#stat-scope', '#stat-unlinked', '#stat-hooks', '#stat-skills', '#statistics-peek', '#footer-dock', '#event-order']) {
-    const element = new Element(selector === '#event-order' ? 'select' : 'div');
+    '#stat-scope', '#stat-unlinked', '#stat-hooks', '#stat-skills', '#statistics-peek', '#footer-dock', '#event-order',
+    '#activity-filter', '#reset-filter', '#filter-status', '#filter-empty']) {
+    const element = new Element(['#event-order', '#activity-filter'].includes(selector) ? 'select' : 'div');
     selectors.set(selector, element); document.body.append(element);
   }
   selectors.get('#follow').checked = true;
   selectors.get('#event-order').value = 'grouped';
+  selectors.get('#activity-filter').value = 'everything';
   document.querySelector = selector => selectors.get(selector);
   const context = vm.createContext({ ...presentation, document, window: { addEventListener() {} },
     ResizeObserver: class { observe() {} }, createDiagnostics: () => ({ record() {} }),
@@ -79,6 +81,12 @@ const boundary = (id, type, extra = {}) => ({ id, type: `tool.execution_${type}`
 const start = boundary('start "<>日本語\uD800', 'start');
 const end = boundary('end', 'complete', { success: false, timestamp: '2026-11-20T12:00:01Z' });
 const walk = element => [element, ...element.children.flatMap(walk)];
+const visibleWalk = element => element.hidden ? [] : [element, ...element.children.flatMap(visibleWalk)];
+const visibleEvidence = ui => visibleWalk(ui.get('#timeline')).filter(node => node.tagName === 'pre').map(node => node.textContent);
+function filterMode(ui, value) {
+  ui.get('#activity-filter').value = value;
+  ui.get('#activity-filter').dispatch('change');
+}
 const byClass = (element, name) => walk(element).find(node => node.className.split(' ').includes(name));
 const evidenceRows = group => byClass(group, 'tool-events').children;
 
@@ -277,6 +285,145 @@ const request = (id, extra = {}) => ({ id, type: 'user.message', category: 'chat
   delivery: 'idle', interactionId: id, preview: '<img> 日本語😀\n  exact text', evidence: JSON.stringify({ id }), ...extra });
 const requestTurn = (id, interactionId) => ({ id, type: 'assistant.turn_start', category: 'turn', agentId: '',
   turnId: '0', interactionId, evidence: JSON.stringify({ id }) });
+
+test('filters preserve full-snapshot contexts, boundaries and retained Statistics in every view', () => {
+  const hook = { id: 'hook', type: 'hook.end', category: 'hook', agentId: '', hookId: 'hook', hookType: 'pre', success: false, evidence: '{"id":"hook"}' };
+  const other = { id: 'other', type: 'assistant.turn_start', category: 'turn', agentId: 'child', turnId: '0', evidence: '{"id":"other"}' };
+  const afterInput = boundary('after-input', 'start', { toolCallId: 'after-input' });
+  const entries = [request('input'), activityStart, start, other, end, request('new-input'), afterInput, hook];
+  for (const mode of ['grouped', 'chronological', 'chapters']) {
+    const ui = fixture(appSource);
+    ui.render(entries);
+    ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change');
+    const counts = ui.get('#stat-counts').textContent;
+    filterMode(ui, 'tools');
+    assert.deepEqual(visibleEvidence(ui), [start.evidence, end.evidence, afterInput.evidence]);
+    assert.match(ui.get('#filter-status').textContent, /Tools.*3 matching.*5 hidden.*8 retained/);
+    assert.match(ui.get('#filter-status').textContent, /gaps.*connectors.*off/i);
+    assert.equal(ui.get('#timeline').dataset.filtered, 'true');
+    assert.equal(ui.get('#follow').checked, false);
+    assert.equal(ui.get('#stat-counts').textContent, counts);
+    const matchingRows = visibleWalk(ui.get('#timeline')).filter(node => node.tagName === 'pre').map(pre => pre.closest('li'));
+    assert.match(byClass(matchingRows[0], 'turn-context').textContent, /Within turn 0.*Main chat/);
+    assert.equal(byClass(matchingRows[2], 'turn-context').hidden, true, 'Hidden idle input still closes turn context.');
+    if (mode === 'chapters') {
+      assert.equal(ui.get('#timeline').children.filter(node => !node.hidden).length, 2, 'Hidden prompts still partition chapters.');
+      assert.match(ui.get('#timeline').textContent, /Retained chapter context/);
+    }
+    filterMode(ui, 'problems');
+    assert.deepEqual(visibleEvidence(ui), [end.evidence, hook.evidence]);
+    if (mode === 'grouped') assert.match(ui.get('#timeline').textContent, /Retained call context.*1 matching.*1 hidden/);
+    filterMode(ui, 'automation');
+    assert.deepEqual(visibleEvidence(ui), [hook.evidence]);
+    ui.get('#reset-filter').dispatch('click');
+    assert.equal(ui.get('#activity-filter').value, 'everything');
+    assert.equal(visibleEvidence(ui).length, entries.length);
+    assert.equal(ui.get('#timeline').dataset.filtered, 'false');
+    assert.equal(ui.document.activeElement, ui.get('#activity-filter'));
+    assert.equal(ui.get('#stat-counts').textContent, counts);
+  }
+});
+
+test('filtered rows keep disclosure state while same-ID changes, polling and eviction refresh matches and focus', () => {
+  const ui = fixture(appSource);
+  ui.render([start, end]);
+  const card = ui.get('#timeline').firstElementChild;
+  card.firstElementChild.open = true;
+  const [first, result] = evidenceRows(card);
+  result.firstElementChild.open = true;
+  const evidence = walk(result).find(node => node.tagName === 'pre');
+  evidence.focus();
+  filterMode(ui, 'problems');
+  assert.equal(ui.document.activeElement, evidence);
+  assert.equal(first.hidden, true);
+  assert.equal(result.hidden, false);
+  const changed = { ...end, success: true, evidence: '{"success":true}' };
+  ui.render([start, changed]);
+  assert.equal(result.dataset.tone, 'tool', 'Canonical success also refreshes the retained row presentation.');
+  assert.equal(ui.get('#filter-empty').hidden, false);
+  assert.equal(ui.get('#empty').hidden, true);
+  assert.equal(ui.document.activeElement, ui.get('#activity-filter'), 'Same-ID replacement hides focused evidence safely.');
+  assert.equal(ui.get('#activity-filter').value, 'problems');
+  assert.match(ui.get('#filter-status').textContent, /0 matching.*2 hidden.*2 retained/);
+  ui.render([start, changed, { id: 'info', type: 'session.info', evidence: '{}' }]);
+  assert.equal(ui.get('#filter-empty').hidden, false);
+  ui.render([start, changed, { id: 'error', type: 'session.error', evidence: '{"error":true}' }]);
+  assert.equal(ui.get('#filter-empty').hidden, true);
+  assert.match(ui.get('#filter-status').textContent, /1 matching.*2 hidden.*3 retained/);
+  ui.get('#reset-filter').dispatch('click');
+  assert.equal(ui.get('#timeline').firstElementChild, card);
+  assert.equal(card.firstElementChild.open, true);
+  assert.equal(result.firstElementChild.open, true);
+  assert.equal(evidence.textContent, changed.evidence);
+  filterMode(ui, 'tools');
+  evidence.focus();
+  ui.render([changed], { omitted: 2 });
+  assert.equal(ui.document.activeElement, evidence);
+  assert.equal(evidenceRows(card)[0], result);
+  assert.match(ui.get('#notice').textContent, /Older events were omitted/);
+  ui.render([]);
+  assert.equal(ui.get('#filter-empty').hidden, true);
+  assert.equal(ui.get('#empty').hidden, false);
+  assert.equal(ui.document.activeElement, ui.get('#activity-filter'));
+});
+
+test('filter-hidden card focus moves visibly and exact source navigation resets the filter', () => {
+  const ui = fixture(appSource);
+  ui.render([activityStart, activityIntent('intent', 'Inspect'), start, end]);
+  const turnRow = ui.get('#timeline').firstElementChild;
+  const reported = walk(turnRow).find(node => node.tagName === 'button');
+  reported.focus();
+  filterMode(ui, 'tools');
+  assert.equal(ui.document.activeElement, ui.get('#activity-filter'));
+  filterMode(ui, 'problems');
+  const card = ui.get('#timeline').children.find(node => node.className.includes('tool-group'));
+  const startButton = walk(card).find(node => node.tagName === 'button');
+  startButton.focus(); startButton.dispatch('click');
+  assert.equal(ui.get('#activity-filter').value, 'everything');
+  assert.equal(ui.get('#event-order').value, 'chronological');
+  const target = ui.get('#timeline').children[2];
+  assert.equal(target.hidden, false);
+  assert.equal(ui.document.activeElement, target.firstElementChild.firstElementChild);
+  assert.equal(target.scrolled, true);
+  assert.match(ui.get('#filter-status').textContent, /Everything.*4 matching.*0 hidden.*4 retained/);
+  // Both source controls share the same deliberate reveal path.
+  filterMode(ui, 'tools'); reported.dispatch('click');
+  assert.equal(ui.get('#activity-filter').value, 'everything');
+  assert.equal(ui.document.activeElement, ui.get('#timeline').children[1].firstElementChild.firstElementChild);
+});
+
+test('filtered view changes preserve disclosures and do not join hooks across hidden boundaries', () => {
+  const ui = fixture(appSource);
+  const firstHook = { id: 'first-hook', type: 'hook.start', category: 'hook', agentId: '', hookInvocationId: 'h1', evidence: '{"id":"first-hook"}' };
+  const secondHook = { id: 'second-hook', type: 'hook.end', category: 'hook', agentId: '', hookInvocationId: 'h2', evidence: '{"id":"second-hook"}' };
+  const entries = [request('one'), activityStart, firstHook, request('two'), secondHook];
+  ui.render(entries);
+  filterMode(ui, 'automation');
+  const groups = ui.get('#timeline').children.filter(node => !node.hidden);
+  assert.equal(groups.length, 2, 'Hidden user input still separates hook groups.');
+  assert.match(groups[0].textContent, /Within turn 0.*Main chat/);
+  assert.equal(byClass(groups[1], 'turn-context').hidden, true);
+  groups[0].firstElementChild.open = true;
+  const hookRow = byClass(groups[0], 'hook-events').firstElementChild;
+  hookRow.firstElementChild.open = true;
+  const evidence = walk(hookRow).find(node => node.tagName === 'pre');
+  evidence.focus();
+  for (const mode of ['chapters', 'chronological', 'grouped']) {
+    ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change');
+    assert.equal(ui.get('#activity-filter').value, 'automation');
+    assert.equal(ui.document.activeElement, evidence);
+    assert.equal(hookRow.firstElementChild.open, true);
+    assert.deepEqual(visibleEvidence(ui), [firstHook.evidence, secondHook.evidence]);
+  }
+  assert.equal(ui.get('#timeline').children.filter(node => !node.hidden)[0], groups[0]);
+  assert.equal(groups[0].firstElementChild.open, true);
+  filterMode(ui, 'tools');
+  assert.equal(ui.get('#filter-empty').hidden, false);
+  assert.equal(ui.document.activeElement, ui.get('#activity-filter'));
+  ui.render([], { history: 'unsupported' });
+  assert.equal(ui.get('#filter-empty').hidden, true, 'Unavailable events are not a successful empty filter result.');
+  assert.match(ui.get('#notice').textContent, /did not expose the session event API/);
+});
 const chapterRows = chapter => byClass(chapter, 'chapter-events').children;
 function chapterMode(ui) {
   ui.get('#event-order').value = 'chapters';

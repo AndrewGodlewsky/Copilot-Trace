@@ -1,6 +1,6 @@
 # Trace
 
-Current version: **0.1.15**
+Current version: **0.1.16**
 
 A GitHub Copilot desktop plugin for understanding the activity inside your current chat. `/trace` opens a live timeline with turn markers and expandable recorded evidence. This is an initial proof of concept: explanations describe what events mean; they do not infer why the model made a decision.
 

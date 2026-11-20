@@ -30,6 +30,18 @@
       <p id="order-help">Tool cards sit at their first retained boundary, with later results inside. Use Chronological events or a card’s boundary buttons to see intervening activity. Event order uses recorded timestamps; ties keep history/arrival order, and missing or unparseable times appear last.</p>
       <p>Request chapters collect chronological intervals beneath recorded input previews. Steering stays in the current interval; queued input starts a chapter only when its interaction is linked. Unknown boundaries remain labeled.</p>
     </div>
+    <div class="filter-control">
+      <label for="activity-filter">Filter
+        <select id="activity-filter" aria-describedby="filter-status">
+          <option value="everything">Everything</option>
+          <option value="tools">Tools</option>
+          <option value="automation">Skills and hooks</option>
+          <option value="problems">Problems</option>
+        </select>
+      </label>
+      <button id="reset-filter" type="button">Reset filters</button>
+      <p id="filter-status" role="status">Waiting for retained events.</p>
+    </div>
     <details id="actor-legend" class="legend">
       <summary>Actor labels and sources</summary>
       <p>Labels describe recorded event roles, not who chose the next action.</p>
@@ -50,6 +62,7 @@
       <h2>Waiting for activity</h2>
       <p>Keep this panel open and continue the chat. Supported events will appear here as the host shares them.</p>
     </div>
+    <p id="filter-empty" class="empty" hidden></p>
     <ol id="timeline" aria-label="Recorded chat activity"></ol>
     <footer>
       <p>Arrows follow the selected view’s ordering, not cause. Grouped cards can contain later events.</p>
@@ -59,6 +72,7 @@
         <p>Tool boundaries share a card only with the exact same usable source-agent and call IDs. Missing boundaries remain partial: a missing completion does not mean a tool is still running. Conflicting boundaries keep their evidence but have no combined outcome. Elapsed time requires one start, one result and valid timestamps in that order; it measures the recorded interval, not model thinking or billable time.</p>
         <p>Request chapters begin at main-chat idle input or a turn start linked to earlier queued input by its exact interaction ID. They show timing, not which input caused an action. Input can be host-supplied. Steering never starts a new chapter; missing delivery or linkage leaves boundaries unknown. Original events stay in order, and Chronological events removes the chapter headers. A new chapter or an interruption does not establish success or completion.</p>
         <p>Recorded evidence only, with up to 300 recent supported events. Long evidence is shortened. Some host activity and earlier streaming updates may be unavailable. Trace keeps its copy of chat content in memory and makes no model calls.</p>
+        <p>Filters only hide retained event rows. Tools includes recorded tool starts and results, not proof of file changes. Skills and hooks includes skill invocations and hook starts/results. Problems includes session errors or warnings, interruptions, failed subagents, and tool or hook results with an explicit failure. Other text, missing results and permission waiting do not establish a problem. Call and chapter headers retain their full context; Statistics always counts all retained events. Evidence-navigation buttons reset the filter to Everything and open the original event.</p>
       </details>
       <dialog id="statistics-panel" class="footer-panel statistics-drawer" aria-labelledby="statistics-title">
         <div class="drawer-grip" aria-hidden="true"></div>

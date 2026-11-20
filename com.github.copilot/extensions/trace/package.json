@@ -1,6 +1,6 @@
 {
   "name": "trace-canvas",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "type": "module",
   "description": "Trace canvas; the host supplies the SDK and runtime."
 }

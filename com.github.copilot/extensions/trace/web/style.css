@@ -41,6 +41,11 @@ input { accent-color: var(--model); margin: 0; }
 .order-control label { flex-wrap: wrap; }
 .order-control select { max-width: 100%; }
 .order-control p { margin: 6px 0; }
+.filter-control { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-top: 14px; color: var(--muted); font-size: .857rem; }
+.filter-control label { flex-wrap: wrap; min-width: 0; }
+.filter-control select { max-width: 100%; }
+#filter-status { flex-basis: 100%; margin: 0; }
+.filter-context { display: block; margin-top: 6px; color: var(--muted); font-size: .786rem; }
 .notice { font-size: 0.857rem; color: var(--muted); margin: 12px 0 26px; }
 .statistics-body { padding: 16px 20px 24px; }
 .statistics-body p { color: var(--muted); }
@@ -60,6 +65,7 @@ input { accent-color: var(--model); margin: 0; }
 .step + .step { margin-top: 30px; }
 .step + .step::before { content: ''; position: absolute; height: 29px; width: 1px; background: var(--connector); top: -30px; left: 50%; }
 .step + .step::after { content: ''; position: absolute; width: 6px; height: 6px; border-right: 1px solid var(--connector); border-bottom: 1px solid var(--connector); transform: rotate(45deg); top: -8px; left: calc(50% - 3px); }
+#timeline[data-filtered='true'] .step::before, #timeline[data-filtered='true'] .step::after { display: none; }
 .step[data-tone='user'] { --node-color: var(--user); max-width: 34rem; }
 .step[data-tone='model'] { --node-color: var(--model); max-width: 25rem; }
 .step[data-tone='tool'] { --node-color: var(--tool); max-width: 27rem; }

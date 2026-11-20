@@ -23,6 +23,18 @@ const actorRoles = new Map(Object.entries({
   'abort': 'Host',
 }));
 
+export const filterLabels = Object.freeze({
+  everything: 'Everything', tools: 'Tools', automation: 'Skills and hooks', problems: 'Problems',
+});
+
+export function matchesFilter(entry, filter) {
+  if (filter === 'tools') return entry.type === 'tool.execution_start' || entry.type === 'tool.execution_complete';
+  if (filter === 'automation') return ['skill.invoked', 'hook.start', 'hook.end'].includes(entry.type);
+  if (filter === 'problems') return ['session.error', 'session.warning', 'abort', 'subagent.failed'].includes(entry.type)
+    || (['tool.execution_complete', 'hook.end'].includes(entry.type) && entry.success === false);
+  return true;
+}
+
 export function describeActor(entry) {
   const id = entry.agentId;
   const source = typeof id !== 'string' || id.length > 256 ? 'Source unavailable'

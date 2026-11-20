@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.16",
+    "summary": "Focus the timeline on tools, automation or problems while keeping retained totals and hidden activity clear. Reset the filter to restore the full view."
+  },
+  {
     "version": "0.1.15",
     "summary": "Model turns can show recorded activity with a direct link to its evidence. Uncertain or incomplete intervals keep neutral headings."
   },

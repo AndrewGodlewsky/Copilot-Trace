@@ -1,4 +1,4 @@
-import { describeActor, describeHookGroup, describeToolGroup, describeStep, describeTurn, groupSteps, requestChapters, turnContext, summarize } from './presentation.mjs';
+import { describeActor, describeHookGroup, describeToolGroup, describeStep, describeTurn, groupSteps, requestChapters, turnContext, summarize, filterLabels, matchesFilter } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -15,6 +15,9 @@ const notice = document.querySelector('#notice');
 const empty = document.querySelector('#empty');
 const follow = document.querySelector('#follow');
 const eventOrder = document.querySelector('#event-order');
+const activityFilter = document.querySelector('#activity-filter');
+const filterStatus = document.querySelector('#filter-status');
+const filterEmpty = document.querySelector('#filter-empty');
 const actorLegend = document.querySelector('#actor-legend');
 actorLegend.addEventListener('toggle', () => { if (actorLegend.open) follow.checked = false; });
 const statValues = new Map();
@@ -34,6 +37,16 @@ let lastSnapshot;
 eventOrder.addEventListener('change', () => {
   follow.checked = false;
   if (lastSnapshot) render(lastSnapshot);
+});
+activityFilter.addEventListener('change', () => {
+  follow.checked = false;
+  if (lastSnapshot) render(lastSnapshot);
+});
+document.querySelector('#reset-filter').addEventListener('click', () => {
+  follow.checked = false;
+  activityFilter.value = 'everything';
+  if (lastSnapshot) render(lastSnapshot);
+  activityFilter.focus({ preventScroll: true });
 });
 
 function setConnection(message, state) {
@@ -173,12 +186,45 @@ function place(parent, item, previous) {
 function showBoundary(id) {
   follow.checked = false;
   eventOrder.value = 'chronological';
+  activityFilter.value = 'everything';
   render(lastSnapshot);
   const node = nodes.get(id);
   if (!node) return;
   node.details.open = true;
   node.summary.focus({ preventScroll: true });
   node.item.scrollIntoView({ block: 'center' });
+}
+
+function unhidden(node) {
+  if (!node?.isConnected) return false;
+  for (let ancestor = node; ancestor; ancestor = ancestor.parentElement) if (ancestor.hidden) return false;
+  return true;
+}
+
+function applyFilter(snapshot) {
+  const filter = Object.hasOwn(filterLabels, activityFilter.value) ? activityFilter.value : 'everything';
+  const active = filter !== 'everything';
+  activityFilter.value = filter;
+  const matching = new Set(snapshot.entries.filter(entry => matchesFilter(entry, filter)).map(entry => entry.id));
+  for (const [id, node] of nodes) node.item.hidden = !matching.has(id);
+  for (const group of [...groups, ...chapters]) {
+    const count = [...group.ids].filter(id => matching.has(id)).length;
+    group.item.hidden = count === 0;
+    if (!group.filterNote) {
+      group.filterNote = element('span', '', 'filter-context');
+      group.subtitle.parentElement.append(group.filterNote);
+    }
+    group.filterNote.hidden = !active;
+    const note = `Retained ${group.kind === 'tool' ? 'call' : group.kind === 'hooks' ? 'hook group' : 'chapter'} context · ${count} matching · ${group.ids.size - count} hidden events`;
+    if (group.filterNote.textContent !== note) group.filterNote.textContent = note;
+  }
+  timeline.dataset.filtered = String(active);
+  const status = `${filterLabels[filter]} · ${matching.size} matching · ${snapshot.entries.length - matching.size} hidden · ${snapshot.entries.length} retained events. Statistics always covers retained events.`
+    + (active ? ' Hidden events may leave gaps; order connectors are off. Group and chapter headers show retained context. Evidence links reset filters.' : '');
+  if (filterStatus.textContent !== status) filterStatus.textContent = status;
+  filterEmpty.hidden = !snapshot.entries.length || matching.size > 0;
+  const message = `No retained events match ${filterLabels[filter]}. Choose another filter or Reset filters to see all retained activity.`;
+  if (filterEmpty.textContent !== message) filterEmpty.textContent = message;
 }
 
 function reconcileChapters(snapshot, visible) {
@@ -237,6 +283,7 @@ function render(snapshot) {
     const display = describeTurn(entry, context);
     if (node.title.textContent !== display.title) node.title.textContent = display.title;
     if (node.subtitle.textContent !== display.subtitle) node.subtitle.textContent = display.subtitle;
+    node.item.dataset.tone = display.tone;
     node.item.dataset.activity = display.activityId ? 'reported' : '';
     if (node.activityBox) {
       node.activityId = display.activityId;
@@ -323,10 +370,14 @@ function render(snapshot) {
   }
   groups = nextGroups;
   chapters = nextChapters;
+  applyFilter(snapshot);
   // Moving an existing disclosure into a group must not strand keyboard focus.
   const focusedNode = nodes.get(focusedId);
   let focusTarget = focusedNode?.activityLink === focused && focusedNode?.activityBox.hidden
-    ? focusedNode.summary : focused?.isConnected ? focused : null;
+    ? focusedNode.summary : unhidden(focused) ? focused : null;
+  if (focusTarget && !unhidden(focusTarget)) focusTarget = null;
+  const filtered = activityFilter.value !== 'everything';
+  if (!focusTarget && filtered && (focusedId || focusedGroup || focusedChapter)) focusTarget = activityFilter;
   if (!focusTarget && focusedGroup) {
     const group = groups.find(group => group === focusedGroup);
     focusTarget = chronological ? nodes.get(group?.ids.values().next().value)?.summary : group?.summary;
