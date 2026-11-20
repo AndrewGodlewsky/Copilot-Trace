@@ -87,6 +87,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     '#event-target', '#jump-event', '#navigation-status', '#capabilities', '#capability-refresh', '#capability-status',
     '#capability-scope', '#capability-window', '#capability-list', '#glossary-button', '#glossary-panel',
     '#glossary-concept', '#glossary-definition', '#glossary-deeper', '#glossary-example', '#glossary-source', '#glossary-status',
+    '#guidance-comparison', '#guidance-examples',
     '#retrieval-ledger', '#retrieval-summary', '#retrieval-scope', '#retrieval-list', '#retrieval-unclassified', '#retrieval-unknown-list',
     '#instruction-sources', '#instruction-refresh', '#instruction-status', '#instruction-scope', '#instruction-window', '#instruction-current', '#instruction-loads',
     '#instruction-inspector', '#instruction-title', '#instruction-detail', '#instruction-body', '#instruction-original', '#instruction-selection-status',
@@ -121,6 +122,8 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   selectors.get('#glossary-button').tagName = 'button';
   const deeper = selectors.get('#glossary-deeper'), more = new Element('details');
   more.className = 'glossary-depth'; glossary.insertBefore(more, deeper); more.append(deeper);
+  const comparison = selectors.get('#guidance-comparison'); comparison.tagName = 'details';
+  comparison.append(new Element('summary'), selectors.get('#guidance-examples')); glossary.append(comparison);
   selectors.get('#follow').checked = true;
   selectors.get('#event-order').value = 'grouped';
   selectors.get('#activity-filter').value = 'everything';
@@ -609,6 +612,83 @@ test('an open glossary never rebinds an evicted or changed example and falls bac
     assert.equal(ui.document.activeElement, replacement ? opener : ui.get('#glossary-button'));
     assert.equal(ui.get('#follow').checked, false);
   }
+});
+
+test('guidance comparison keeps chosen examples, literal bodies, focus and disclosures during live reading in every view', async () => {
+  const records = [
+    { id: 'lesson-skill', type: 'skill.invoked', timestamp: '', agentId: '<img> 日本語 🧪', data: { name: '<b>review</b>', path: '', content: '<script>deny()</script> 日本語 🧪'.repeat(40) } },
+    { id: 'lesson-start', type: 'hook.start', timestamp: '', data: { hookInvocationId: 'pipeline', hookType: 'preToolUse' } },
+    { id: 'lesson-end', type: 'hook.end', timestamp: '', data: { hookInvocationId: 'pipeline', hookType: 'preToolUse', success: true, output: { permissionDecision: 'deny', additionalContext: '<img> 日本語 🧪' } } },
+    { id: 'lesson-permission', type: 'permission.completed', timestamp: '', data: { requestId: 'request', result: { kind: 'denied-by-rules' } } },
+  ];
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => records }); await trace.ready;
+  const entries = trace.snapshot().entries; trace.close();
+  for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    const ui = fixture(appSource); ui.get('#event-order').value = mode; ui.render(entries);
+    const opener = walk(ui.get('#timeline')).find(node => node.className === 'glossary-term' && /skill/i.test(node.textContent));
+    reveal(opener); opener.dispatch('click');
+    const disclosure = ui.get('#guidance-comparison'), examples = ui.get('#guidance-examples');
+    assert.equal(disclosure.open, false);
+    assert.equal(examples.children.length, 3);
+    assert.ok(examples.textContent.includes('Recorded permission decision request: deny'));
+    assert.ok(examples.textContent.includes('denied-by-rules'));
+    assert.ok(examples.textContent.includes('<script>deny()</script> 日本語 🧪'));
+    assert.equal(walk(examples).some(node => ['script', 'img', 'b'].includes(node.tagName)), false);
+    disclosure.open = true;
+    const body = examples.querySelector('details'); body.open = true;
+    const button = examples.querySelector('button'); button.focus();
+    const text = examples.textContent;
+    ui.get('#glossary-panel').scrollTop = 71; ui.document.scrollingElement.scrollTop = 333;
+    ui.render([...entries, { ...entries[0], id: 'later', evidence: entries[0].evidence.replace('lesson-skill', 'later') }]);
+    filterMode(ui, 'tools'); ui.get('#event-order').value = 'chronological'; ui.get('#event-order').dispatch('change');
+    assert.equal(examples.textContent, text); assert.equal(disclosure.open, true); assert.equal(body.open, true);
+    assert.equal(examples.querySelector('button'), button); assert.equal(ui.document.activeElement, button);
+    assert.equal(ui.get('#glossary-panel').scrollTop, 71); assert.equal(ui.document.scrollingElement.scrollTop, 333);
+    button.dispatch('click');
+    assert.equal(ui.get('#glossary-panel').open, false);
+    assert.equal(ui.get('#activity-filter').value, 'everything'); assert.equal(ui.get('#event-order').value, 'chronological');
+    const row = ui.get('#timeline').children[0];
+    assert.equal(ui.document.activeElement, row.firstElementChild.firstElementChild);
+    assert.equal(byClass(row, 'recorded-evidence').open, true); assert.equal(ui.get('#follow').checked, false);
+  }
+});
+
+test('guidance comparison invalidates changed supporting evidence without replacing the frozen lesson or reviving links', async () => {
+  const records = [
+    { id: 'start', type: 'hook.start', timestamp: '', data: { hookInvocationId: 'pipeline', hookType: 'preToolUse' } },
+    { id: 'end', type: 'hook.end', timestamp: '', data: { hookInvocationId: 'pipeline', hookType: 'preToolUse', success: true, output: { permissionDecision: 'deny' } } },
+  ];
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => records }); await trace.ready;
+  const entries = trace.snapshot().entries; trace.close();
+  for (const replacement of [null, { ...entries[1], evidence: '{}' }, { ...entries[1], agentId: 'another' }]) {
+    const ui = fixture(appSource); ui.render(entries);
+    const opener = byClass(ui.get('#timeline'), 'glossary-term'); reveal(opener); opener.dispatch('click');
+    const card = ui.get('#guidance-examples').children[1];
+    assert.ok(card, 'A hook lesson attaches to retained pipeline evidence.');
+    const button = card.querySelector('button'), body = card.querySelector('pre');
+    const original = body.textContent; button.focus(); ui.document.scrollingElement.scrollTop = 333;
+    ui.render(replacement ? [entries[0], replacement] : [entries[0]]);
+    assert.match(card.textContent, /no longer available|evidence changed/i);
+    assert.equal(body.textContent, original); assert.equal(ui.document.activeElement, button);
+    button.dispatch('click');
+    assert.equal(ui.get('#glossary-panel').open, true); assert.equal(ui.document.scrollingElement.scrollTop, 333);
+    ui.render(entries); button.dispatch('click'); assert.equal(ui.get('#glossary-panel').open, true);
+    ui.get('#glossary-concept').dispatch('change');
+    ui.get('#guidance-examples').children[1].querySelector('button').dispatch('click');
+    assert.equal(ui.get('#glossary-panel').open, false, 'Explicit reselection can use current evidence.');
+  }
+});
+
+test('static guidance comparisons remain authored illustrations until the user explicitly selects again', () => {
+  const ui = fixture(appSource); ui.render([]); ui.get('#glossary-button').dispatch('click');
+  const examples = ui.get('#guidance-examples');
+  assert.equal(examples.children.length, 3);
+  for (const card of examples.children) { assert.match(card.textContent, /Static example.*not from this chat/); assert.equal(card.querySelector('button'), null); }
+  const original = examples.textContent;
+  ui.render([{ id: 'new-skill', type: 'skill.invoked', timestamp: '', agentId: '', evidence: '{}' }]);
+  assert.equal(examples.textContent, original);
+  ui.get('#glossary-concept').value = 'skill'; ui.get('#glossary-concept').dispatch('change');
+  assert.match(examples.children[0].textContent, /Current chat example/);
 });
 
 test('glossary dismissal uses the visible footer fallback when its event is filtered or collapsed', () => {

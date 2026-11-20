@@ -1,4 +1,4 @@
-import { describeActor, explainStep, skillInstructions, retrievalLedger, toolExtents, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, observerScope, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
+import { describeActor, explainStep, skillInstructions, guidanceComparison, retrievalLedger, toolExtents, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, observerScope, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -61,6 +61,7 @@ const glossaryConcept = document.querySelector('#glossary-concept');
 const glossarySource = document.querySelector('#glossary-source');
 let glossaryTarget;
 let glossaryExpired = false;
+let guidanceExamples = [];
 for (const [id, concept] of Object.entries(vocabulary)) {
   const option = element('option', concept.label); option.value = id; glossaryConcept.append(option);
 }
@@ -92,7 +93,39 @@ function selectGlossary(id, preferred) {
     ? `Current chat example: ${glossaryTarget.type} · ${glossaryTarget.agentId ? `Agent ${glossaryTarget.agentId}` : 'Main chat'} · ${glossaryTarget.timestamp || 'Time unavailable'}`
     : `Static example — not from this chat: ${concept.example}`;
   glossarySource.hidden = !glossaryTarget;
+  selectGuidance(preferred);
   updateGlossary();
+}
+
+function selectGuidance(preferred) {
+  const container = document.querySelector('#guidance-examples');
+  container.replaceChildren();
+  document.querySelector('#guidance-comparison').open = false;
+  guidanceExamples = guidanceComparison(lastSnapshot?.entries || [], preferred).map(card => {
+    const row = element('section', '', 'guidance-example');
+    row.append(element('h3', card.label), element('p', card.lesson), element('p', card.example));
+    for (const fact of card.facts) row.append(element('p', fact));
+    for (const report of card.reported) row.append(element('p', report.field === 'additionalContext'
+      ? 'Supplied context recorded (additionalContext). Supplied text is not a permission decision.' : `${report.label}: ${report.value}`));
+    if (card.body !== null) {
+      const body = element('details', '', 'glossary-depth');
+      body.append(element('summary', card.bodyLabel), element('pre', card.body)); row.append(body);
+    }
+    const status = element('p'); status.setAttribute('role', 'status'); status.setAttribute('aria-atomic', 'true');
+    const selection = { card, status, expired: false };
+    if (card.target) {
+      const button = element('button', `Open ${card.concept} example`); button.type = 'button';
+      button.addEventListener('click', () => {
+        updateGlossary();
+        if (selection.expired) return;
+        footerPanels.closePanel('glossary-panel', { restoreFocus: false });
+        showBoundary(card.target.id, 'Showing the comparison’s original retained example. Follow live is paused.', card.target);
+      });
+      selection.button = button; row.append(button);
+    }
+    row.append(status); container.append(row);
+    return selection;
+  });
 }
 
 function updateGlossary() {
@@ -104,6 +137,18 @@ function updateGlossary() {
   const status = document.querySelector('#glossary-status');
   if (status.textContent !== message) status.textContent = message;
   glossarySource.textContent = glossaryExpired ? 'Example unavailable' : 'Open current chat example';
+  for (const selection of guidanceExamples) {
+    const { card, status, button } = selection;
+    if (card.evidence.some(entry => !retainedExample(lastSnapshot?.entries || [], entry))) selection.expired = true;
+    const message = !card.target ? 'Authored illustration; no retained example was available when selected.'
+      : selection.expired ? 'This example or its supporting evidence is no longer available or changed. The lesson remains as selected; choose a concept again to select current evidence.'
+      : 'Retained evidence when selected. The lesson does not link these examples to each other.';
+    if (status.textContent !== message) status.textContent = message;
+    if (button) {
+      button.textContent = selection.expired ? `${card.concept} example unavailable` : `Open ${card.concept} example`;
+      button.setAttribute('aria-disabled', String(selection.expired));
+    }
+  }
 }
 eventOrder.addEventListener('change', () => {
   follow.checked = false;

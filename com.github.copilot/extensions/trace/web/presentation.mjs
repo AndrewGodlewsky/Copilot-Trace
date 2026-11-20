@@ -1,4 +1,4 @@
-import { vocabulary, conceptForEntry } from './glossary.mjs';
+import { vocabulary, conceptForEntry, glossaryExample } from './glossary.mjs';
 import { retainedHostOutput } from './host-output.mjs';
 export { vocabulary, conceptForEntry, glossaryExample, retainedExample } from './glossary.mjs';
 
@@ -320,6 +320,49 @@ export function hookInvocations(entries) {
     }
   }
   return [...invocations.values()];
+}
+
+export function guidanceComparison(entries, preferred) {
+  return ['skill', 'hook', 'permission'].map(concept => {
+    const definition = vocabulary[concept], target = glossaryExample(entries, concept, preferred);
+    const card = { concept, label: concept === 'skill' ? 'Instructions and skills: guidance'
+      : concept === 'hook' ? 'Hooks: configured automation' : 'Permissions: authorization',
+      lesson: definition.comparison, target, evidence: target ? [target] : [], facts: [], reported: [], body: null,
+      example: target ? `Current chat example: ${target.type} · ${target.agentId ? `Agent ${target.agentId}` : 'Main chat'} · ${target.timestamp || 'Time unavailable'}`
+        : `Static example — not from this chat: ${definition.example}` };
+    if (!target) return card;
+    const entry = entries.find(item => item.id === target.id);
+    if (concept === 'skill') {
+      const skill = skillInstructions(entry);
+      card.facts = [skill.name === null ? 'Skill name unavailable in complete matching evidence.' : `Recorded skill: ${skill.name}`,
+        skill.previewTruncated ? 'Preview shortened to 600 characters; open the skill example for exact retained instructions.' : skill.note];
+      card.body = skill.preview;
+      card.bodyLabel = 'Retained instruction preview';
+    } else if (concept === 'hook') {
+      const call = hookInvocations(entries).find(item => item.entries.includes(entry));
+      card.evidence = call.entries.map(item => {
+        const frozen = glossaryExample(entries, 'hook', item);
+        return frozen?.id === item.id ? frozen : null;
+      });
+      if (card.evidence.includes(null)) {
+        card.facts = ['Hook output and outcome are unknown: supporting original evidence is unavailable or ambiguous.'];
+        return card;
+      }
+      card.facts = [`Recorded hook type: ${call.title}. Pipeline outcome: ${call.outcome}.`, call.timing, ...call.notes,
+        'A recorded hook request does not establish the applied permission decision or an operation’s effect.'];
+      card.reported = call.reported;
+      if (!call.reported.some(item => item.field !== 'additionalContext')) {
+        card.facts.push('No supported decision request is recorded in this pipeline output. Effects remain unknown.');
+      }
+      if (call.output === null) card.facts.push('Output is unavailable or was not recorded; this does not prove that the hook did nothing.');
+      card.body = call.output;
+      card.bodyLabel = 'Retained pipeline output';
+    } else {
+      const explanation = explainStep(entry);
+      card.facts = [explanation.means, explanation.unknown];
+    }
+    return card;
+  });
 }
 
 export function groupSteps(entries, chronological = false) {

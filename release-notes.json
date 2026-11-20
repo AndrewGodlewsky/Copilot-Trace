@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.31",
+    "summary": "Compare instruction guidance, configured hooks and permission controls, with examples from retained events. Recorded decisions stay separate from general explanations and task correctness."
+  },
+  {
     "version": "0.1.30",
     "summary": "Explore host-reported instruction sources and their declared scope alongside recorded skill loads. Current source text stays separate from historical load evidence."
   },

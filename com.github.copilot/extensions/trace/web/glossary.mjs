@@ -18,6 +18,7 @@ export const vocabulary = Object.freeze(Object.fromEntries(Object.entries({
     definition: 'An automation entry point at a lifecycle moment, such as before a tool call.',
     deeper: 'Trace records hook pipeline boundaries. A pipeline record does not prove a configured handler or script ran. Missing results leave the outcome unknown, and recorded order alone does not establish that a hook caused a later action.',
     example: 'A pre-tool hook pipeline is recorded before a tool operation. Its presence alone does not show that a custom script ran.',
+    comparison: 'Configured hooks execute code or callbacks at supported lifecycle moments. They may observe, supply context or request a documented decision. A recorded pipeline can have zero or multiple configured callbacks; its presence or success does not prove a rule was enforced.',
     types: ['hook.start', 'hook.end'],
   },
   skill: {
@@ -25,6 +26,7 @@ export const vocabulary = Object.freeze(Object.fromEntries(Object.entries({
     definition: 'A reusable set of instructions that can be loaded to guide an agent’s work.',
     deeper: 'A skill load makes instructions available. Loading does not prove they were followed or that a referenced command or script executed. A recorded trigger can describe how loading was requested; it does not explain the selection reason or grant tool permission.',
     example: 'A review skill is loaded with instructions to examine a diff. The load is evidence of available instructions, not proof a review was performed.',
+    comparison: 'Instructions supply guidance; a loaded skill supplies task-specific instructions and may reference resources or scripts. Use instructions for broad conventions and skills for reusable workflows. Loading does not prove the guidance was followed; script execution needs separate evidence.',
     types: ['skill.invoked'],
   },
   context: {
@@ -46,6 +48,7 @@ export const vocabulary = Object.freeze(Object.fromEntries(Object.entries({
     definition: 'A decision about whether a requested operation may proceed.',
     deeper: 'A request asks for a decision; it is not approval. Approval does not prove the operation executed or had an effect. A recorded decision kind alone does not identify a person, and a missing permission record is unknown rather than assumed approval.',
     example: 'A file-write operation requests permission. An approval would allow it to proceed; separate tool evidence is needed to inspect the reported result.',
+    comparison: 'Permissions are a separate authorization mechanism for requested operations. Approval permits an operation, but does not prove execution, effects or task correctness. A missing decision is unknown, never assumed approval. A hook decision request is not itself the applied permission decision.',
     types: ['permission.requested', 'permission.completed'],
   },
   compaction: {
