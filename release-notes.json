@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.37",
+    "summary": "Permission details now explain recorded approval scope and keep the approver, tool outcome and process exit separate."
+  },
+  {
     "version": "0.1.36",
     "summary": "Inspect a retained overview of recognized validation commands, keeping process outcomes, repeated attempts and unknown test counts distinct."
   },

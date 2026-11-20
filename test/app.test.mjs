@@ -1811,6 +1811,64 @@ test('observed action stages navigate to exact unchanged original evidence from 
   }
 });
 
+test('recorded grant scope is readable in existing stage and event details without revealing target previews', async () => {
+  const entries = await actionFixture();
+  const original = entries[3], raw = JSON.parse(original.evidence);
+  raw.data.result = { kind: 'approved-for-location', approval: { kind: 'extension-env-access',
+    extensionName: 'private-extension', environmentVariables: ['PRIVATE_TOKEN'] }, locationKey: 'private-location' };
+  entries[3] = { ...original, evidence: JSON.stringify(raw) };
+  for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    const ui = fixture(appSource);
+    ui.get('#event-order').value = mode;
+    ui.render(entries);
+    const counts = ui.get('#stat-counts').textContent;
+    const disclosure = byClass(ui.get('#timeline'), 'action-stages');
+    disclosure.open = true;
+    assert.match(disclosure.textContent, /Permission approved/);
+    assert.match(disclosure.textContent, /project-location grant.*named environment variables/);
+    assert.match(disclosure.textContent, /current authority.*storage.*reuse.*not established/i);
+    assert.match(disclosure.textContent, /Tool result: reported failure/);
+    assert.doesNotMatch(disclosure.textContent, /private-|PRIVATE_TOKEN/);
+    assert.equal(walk(ui.get('#timeline')).filter(node => node.className === 'action-stages').length, 1);
+    filterMode(ui, 'problems');
+    assert.ok(visibleWalk(ui.get('#timeline')).includes(disclosure));
+    const button = walk(disclosure).find(node => node.tagName === 'button' && /Permission approved/.test(node.textContent));
+    button.focus(); button.dispatch('click');
+    const row = ui.get('#timeline').children[3];
+    assert.equal(ui.document.activeElement, row.firstElementChild.firstElementChild);
+    assert.equal(byClass(row, 'recorded-evidence').open, true);
+    assert.match(row.textContent, /project-location grant.*named environment variables/);
+    assert.deepEqual(visibleEvidence(ui), entries.map(entry => entry.evidence));
+    assert.equal(ui.get('#stat-counts').textContent, counts);
+    assert.equal(ui.get('#follow').checked, false);
+    assert.ok(walk(ui.get('#timeline')).every(node => !['img', 'script', 'a'].includes(node.tagName)));
+  }
+});
+
+test('updated or evicted grant evidence loses its old scope while retained stage controls keep focus', async () => {
+  const entries = await actionFixture(), original = entries[3], raw = JSON.parse(original.evidence);
+  raw.data.result = { kind: 'approved-for-session', approval: { kind: 'read' } };
+  entries[3] = { ...original, evidence: JSON.stringify(raw) };
+  const ui = fixture(appSource);
+  ui.render(entries);
+  const disclosure = byClass(ui.get('#timeline'), 'action-stages');
+  disclosure.open = true;
+  const button = walk(disclosure).find(node => node.tagName === 'button' && /Permission approved/.test(node.textContent));
+  button.focus(); ui.document.scrollingElement.scrollTop = 333;
+  delete raw.data.result.approval;
+  ui.render(entries.map(entry => entry.id === 'decision' ? { ...entry, evidence: JSON.stringify(raw) } : entry));
+  assert.equal(ui.document.activeElement, button); assert.equal(ui.document.scrollingElement.scrollTop, 333);
+  assert.equal(disclosure.open, true); assert.match(disclosure.textContent, /grant scope unknown/i);
+  assert.doesNotMatch(disclosure.textContent, /reusable session grant/);
+  ui.render(entries.filter(entry => entry.id !== 'decision'), { omitted: 1 });
+  assert.equal(button.isConnected, false); assert.ok(ui.document.activeElement.isConnected);
+  assert.doesNotMatch(disclosure.textContent, /reusable session grant/);
+  assert.equal(ui.document.scrollingElement.scrollTop, 333);
+  button.dispatch('click');
+  assert.match(ui.get('#navigation-status').textContent, /no longer retained/);
+  assert.equal(ui.document.scrollingElement.scrollTop, 333);
+});
+
 test('stage reconciliation preserves focused controls and falls back safely when evidence is evicted', async () => {
   const entries = await actionFixture(), ui = fixture(appSource);
   ui.render(entries.slice(0, 3));

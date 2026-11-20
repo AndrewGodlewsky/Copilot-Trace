@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
-import { actionStages, agentLanes, compactionAttempts, delegationHandoffs, hookInvocations, linkValidationClaim, retainedValidationLink, retrievalLedger, skillInstructions, toolExtents, toolProvenance, summarize, validationChecks, validationClaims, validationOverview } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
+import { actionStages, agentLanes, compactionAttempts, delegationHandoffs, hookInvocations, linkValidationClaim, permissionScope, retainedValidationLink, retrievalLedger, skillInstructions, toolExtents, toolProvenance, summarize, validationChecks, validationClaims, validationOverview } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
 import { compareCapabilities } from '../com.github.copilot/extensions/trace/web/capabilities.mjs';
 import { instructionSources } from '../com.github.copilot/extensions/trace/web/instructions.mjs';
 
@@ -450,6 +450,9 @@ try {
     assert.deepEqual(stages.stages.map(stage => stage.id), [proposed.id, started.id, decided.id, completed.id]);
     assert.equal(stages.permission, `Recorded permission: ${approved ? 'approved' : 'denied'}`);
     assert.equal(stages.stages.find(stage => stage.id === decided.id).decisionSource, null, 'A result kind mentioning user does not establish who decided.');
+    const requestScope = stages.stages.find(stage => stage.id === decided.id).scope;
+    assert.equal(requestScope.kind, approved ? 'request' : 'unknown');
+    assert.equal(requestScope.approvalKind, null);
     assert.equal(stages.stages.find(stage => stage.id === completed.id).label, `Tool result: reported ${approved ? 'success' : 'failure'}`);
     await session.rpc.canvas.close({ instanceId: input.instanceId });
     await until(() => fetch(actionPanel.url).then(() => false, () => true), Boolean, 'permission fixture server shutdown');
@@ -998,7 +1001,7 @@ try {
   await session.disconnect();
   assert.equal(requests, 20, 'Only the twenty expected local synthetic responses are permitted.');
 
-  // An eighth owned session separates an assistant claim, tool outcome and actual process exit.
+  // An eighth owned session separates recorded permission scope, a claim, tool outcome and process exit.
   nestedFixture = undefined;
   validationFixture = { responses: 0, allowCalls: false, permissions: 0,
     command: 'node --test validation.test.mjs', callId: 'fixture-validation-call' };
@@ -1011,7 +1014,7 @@ try {
       assert.equal(request.toolCallId, validationFixture.callId);
       assert.equal(request.fullCommandText, validationFixture.command);
       assert.equal(++validationFixture.permissions, 1);
-      return { kind: 'approve-once' };
+      return { kind: 'approve-for-session', approval: { kind: 'commands', commandIdentifiers: ['node'] } };
     },
     model: 'fixture', provider: { type: 'openai', baseUrl: `http://127.0.0.1:${fixture.address().port}/v1`, apiKey: 'fixture', wireApi: 'completions' } });
   const validationEvents = [];
@@ -1027,14 +1030,17 @@ try {
   assert.equal(validationFixture.responses, 2);
   assert.equal(validationFixture.permissions, 1);
   const validationCall = validationEvents.find(event => event.type === 'tool.execution_start' && event.data.toolCallId === validationFixture.callId);
+  const validationPermission = validationEvents.find(event => event.type === 'permission.completed' && event.data.toolCallId === validationFixture.callId);
   const validationResult = validationEvents.find(event => event.type === 'tool.execution_complete' && event.data.toolCallId === validationFixture.callId);
   const validationClaim = validationEvents.find(event => event.type === 'assistant.message' && event.data.content === 'Tests passed.');
-  assert.ok(validationCall && validationResult && validationClaim);
+  assert.ok(validationCall && validationPermission && validationResult && validationClaim);
+  assert.deepEqual(validationPermission.data.result, { kind: 'approved-for-session', approval: { kind: 'commands', commandIdentifiers: ['node'] } });
+  assert.equal(validationPermission.data.decisionSource, undefined, 'A programmatic session grant does not imply a human response.');
   assert.equal(validationCall.data.arguments.command, validationFixture.command);
   assert.equal(validationResult.data.success, true, 'Tool protocol success does not establish process or test success.');
   const validationExit = validationResult.data.result.contents.find(item => item.type === 'shell_exit');
   assert.equal(validationExit.exitCode, 1, 'The owned test deliberately fails despite the fixed assistant claim.');
-  const validationBoundaries = [validationCall, validationResult, validationClaim];
+  const validationBoundaries = [validationCall, validationPermission, validationResult, validationClaim];
   const validationSnapshot = await until(() => fetch(validationPanel.url + 'events').then(response => response.json()),
     value => validationBoundaries.every(event => value.entries.some(entry => entry.id === event.id)), 'validation claim projection');
   for (const raw of validationBoundaries) {
@@ -1044,6 +1050,17 @@ try {
     assert.equal(projected.truncated, false);
     assert.deepEqual(JSON.parse(projected.evidence).data, raw.data);
   }
+  const validationStages = actionStages(validationSnapshot.entries, validationSnapshot).get(validationCall.id);
+  const grantStage = validationStages.stages.find(stage => stage.id === validationPermission.id);
+  assert.ok(grantStage, 'The session grant links only through the exact original call and source identity.');
+  assert.equal(grantStage.outcome, 'approved');
+  assert.equal(grantStage.decisionSource, null);
+  assert.equal(grantStage.scope.kind, 'session');
+  assert.equal(grantStage.scope.approvalKind, 'commands');
+  assert.deepEqual(grantStage.scope, permissionScope(validationSnapshot.entries.find(entry => entry.id === validationPermission.id)));
+  assert.match(grantStage.detail, /current authority/i);
+  assert.match(grantStage.detail, /reuse/);
+  assert.equal(validationStages.stages.find(stage => stage.id === validationResult.id).label, 'Tool result: reported success');
   const observedChecks = validationChecks(validationSnapshot.entries);
   const observedClaims = validationClaims(validationSnapshot.entries, validationSnapshot);
   assert.equal(observedChecks.length, 1);

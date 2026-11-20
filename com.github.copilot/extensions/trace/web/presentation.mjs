@@ -290,7 +290,7 @@ export function explainStep(entry = {}) {
   if (entry.type === 'permission.completed') {
     const kind = data?.result && typeof data.result === 'object' && !Array.isArray(data.result) ? data.result.kind : null;
     if (permissionApprovals.has(kind)) {
-      means = `The recorded decision kind is ${kind}. Approval permits an operation; it does not prove it executed.`;
+      means = `The recorded decision kind is ${kind}. Approval permits an operation; it does not prove it executed. ${permissionResultScope(data.result).detail}`;
     } else if (permissionDenials.has(kind) || kind === 'cancelled') {
       means = `The recorded decision kind is ${kind}. This records a refusal or cancellation, not a successful operation.`;
     }
@@ -1258,12 +1258,79 @@ const permissionDenials = new Set(['denied-by-rules', 'denied-no-approval-rule-a
   'denied-interactively-by-user', 'denied-by-content-exclusion-policy', 'denied-by-permission-request-hook']);
 const decisionSources = new Set(['assisted_approval', 'human_response', 'host_policy', 'unattended_fallback', 'authorization_carry_forward']);
 
+function permissionResultScope(result) {
+  const unknown = { kind: 'unknown', approvalKind: null, detail: 'Recorded grant scope unknown; no supported complete approval scope is recorded.' };
+  const text = value => typeof value === 'string' && value.trim().length > 0 && value.length <= 12000;
+  const list = value => Array.isArray(value) && value.length > 0 && value.length <= 300 && value.every(text);
+  const fields = (value, required, optional = {}) => value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).every(key => key === 'kind' || Object.hasOwn(required, key) || Object.hasOwn(optional, key))
+    && Object.entries(required).every(([key, valid]) => valid(value[key]))
+    && Object.entries(optional).every(([key, valid]) => !Object.hasOwn(value, key) || valid(value[key]));
+  const managed = { managedApprovalHandled: value => typeof value === 'boolean' };
+  const limits = 'Current authority, successful storage and later reuse are not established.';
+  if (result?.kind === 'approved' && fields(result, {}, managed)) return { kind: 'request', approvalKind: null,
+    detail: 'Recorded scope: single request, without an added approval rule. Existing authority is not described.' };
+  if (result?.kind === 'approved-read-only-for-session' && fields(result, { directories: list })) {
+    return { kind: 'session-read-only', approvalKind: null,
+      detail: `Recorded scope: reusable read-only directory grant for this session. ${limits}` };
+  }
+  if (!['approved-for-session', 'approved-for-location'].includes(result?.kind)) return unknown;
+  const location = result.kind === 'approved-for-location';
+  if (!fields(result, { approval: value => value && typeof value === 'object' && !Array.isArray(value),
+    ...(location ? { locationKey: text } : {}) }, managed)) return unknown;
+  const approval = result.approval;
+  let category;
+  switch (approval.kind) {
+    case 'commands':
+      if (fields(approval, { commandIdentifiers: list })) category = 'command identifiers';
+      break;
+    case 'read':
+      if (fields(approval, {})) category = 'read-only filesystem operations';
+      break;
+    case 'write':
+      if (fields(approval, {})) category = 'filesystem write operations';
+      break;
+    case 'mcp':
+      if (fields(approval, { serverName: text, toolName: value => value === null || text(value) })) {
+        category = approval.toolName === null ? 'all tools on one MCP server' : 'one MCP server tool';
+      }
+      break;
+    case 'memory':
+      if (fields(approval, {})) category = 'long-term memory writes';
+      break;
+    case 'custom-tool':
+      if (fields(approval, { toolName: text })) category = 'one custom tool';
+      break;
+    case 'extension-management':
+      if (fields(approval, {}, { operation: text })) category = approval.operation ? 'one extension-management operation' : 'extension-management operations';
+      break;
+    case 'workflow':
+      if (fields(approval, {}, { approvalKey: text })) category = approval.approvalKey ? 'one workflow approval key' : 'workflow operations';
+      break;
+    case 'extension-permission-access':
+      if (fields(approval, { extensionName: text })) category = "one extension's permission-gated access";
+      break;
+    case 'extension-env-access':
+      if (fields(approval, { extensionName: text, environmentVariables: list })) category = 'named environment variables for one extension';
+      break;
+  }
+  return category ? { kind: location ? 'location' : 'session', approvalKind: approval.kind,
+    detail: `Recorded scope: reusable ${location ? 'project-location' : 'session'} grant for ${category}. ${limits}` } : unknown;
+}
+
+export function permissionScope(entry = {}) {
+  return permissionResultScope(entry.type === 'permission.completed' ? explanationData(entry)?.result : null);
+}
+
 // One bounded parse per retained event; neither chronology nor recovery ownership is a correlation key.
 export function actionStages(entries, { history = 'ready', omitted = 0 } = {}) {
   const usableId = value => typeof value === 'string' && value.length > 0 && value.length <= 256;
   const object = value => value && typeof value === 'object' && !Array.isArray(value);
   const identity = (entry, call) => toolIdentity({ agentId: entry.agentId, toolCallId: call });
-  const records = new Map(entries.map(entry => [entry.id, explanationData(entry)]));
+  const counts = new Map();
+  for (const entry of entries) counts.set(entry.id, (counts.get(entry.id) || 0) + 1);
+  const unique = entry => counts.get(entry.id) === 1;
+  const records = new Map(entries.map(entry => [entry, explanationData(entry)]));
   const proposals = new Map(), permissions = new Map();
   const add = (map, key, value) => {
     if (key === null) return;
@@ -1271,10 +1338,10 @@ export function actionStages(entries, { history = 'ready', omitted = 0 } = {}) {
     map.get(key).push(value);
   };
   for (const entry of entries) {
-    const data = records.get(entry.id);
+    const data = records.get(entry);
     if (!data) continue;
     if (entry.type === 'assistant.message' && Array.isArray(data.toolRequests)) {
-      const valid = data.toolRequests.length <= 300 && data.toolRequests.every(request => object(request)
+      const valid = unique(entry) && data.toolRequests.length <= 300 && data.toolRequests.every(request => object(request)
         && usableId(request.toolCallId) && typeof request.name === 'string' && request.name.length > 0 && request.name.length <= 180);
       for (const request of data.toolRequests) {
         if (object(request)) add(proposals, identity(entry, request.toolCallId), { entry, name: request.name, valid });
@@ -1292,7 +1359,7 @@ export function actionStages(entries, { history = 'ready', omitted = 0 } = {}) {
     const requestCall = request?.permissionRequest?.toolCallId, decisionCall = decision?.toolCallId;
     const calls = [...new Set(bucket.map(({ entry, data }) => entry.type === 'permission.requested'
       ? data.permissionRequest?.toolCallId : data.toolCallId).filter(usableId))];
-    const valid = requests.length <= 1 && decisions.length <= 1 && calls.length === 1
+    const valid = bucket.every(({ entry }) => unique(entry)) && requests.length <= 1 && decisions.length <= 1 && calls.length === 1
       && (!request || (object(request.permissionRequest) && (requestCall === undefined || usableId(requestCall))
         && request.ownerAgentId === undefined && request.ownerSessionId === undefined))
       && (!decision || decisionCall === undefined || usableId(decisionCall));
@@ -1304,8 +1371,8 @@ export function actionStages(entries, { history = 'ready', omitted = 0 } = {}) {
     const starts = boundaries.filter(entry => entry.type === 'tool.execution_start');
     const ends = boundaries.filter(entry => entry.type === 'tool.execution_complete');
     const linked = key !== null && starts.length <= 1 && ends.length <= 1 && boundaries.every(entry => {
-      const data = records.get(entry.id);
-      return toolIdentity(entry) === key && data?.toolCallId === entry.toolCallId;
+      const data = records.get(entry);
+      return unique(entry) && toolIdentity(entry) === key && data?.toolCallId === entry.toolCallId;
     });
     const selected = new Map();
     const notes = ['Recorded order only; these stages are not a required sequence.',
@@ -1314,8 +1381,8 @@ export function actionStages(entries, { history = 'ready', omitted = 0 } = {}) {
     const stage = (entry, label, detail = '', extra = {}) => selected.set(entry.id,
       { id: entry.id, type: entry.type, timestamp: entry.timestamp, label, detail, ...extra });
     for (const entry of boundaries) {
-      const data = records.get(entry.id);
-      if (!data || data.toolCallId !== entry.toolCallId) continue;
+      const data = records.get(entry);
+      if (!unique(entry) || !data || data.toolCallId !== entry.toolCallId) continue;
       if (entry.type === 'tool.execution_start') stage(entry, 'Tool invocation entered');
       else stage(entry, data.success === true && entry.success === true ? 'Tool result: reported success'
         : data.success === false && entry.success === false ? 'Tool result: reported failure' : 'Tool result: outcome unknown');
@@ -1323,7 +1390,7 @@ export function actionStages(entries, { history = 'ready', omitted = 0 } = {}) {
     if (!linked) notes.push('Call boundaries are conflicting or unavailable; other stages are not linked to this card.');
     if (linked) {
       const candidates = proposals.get(key) || [], proposal = candidates[0];
-      const startData = starts[0] && records.get(starts[0].id);
+      const startData = starts[0] && records.get(starts[0]);
       if (candidates.length === 1 && proposal.valid && (!startData || proposal.name === startData.toolName)) {
         stage(proposal.entry, 'Assistant requested a tool');
       } else if (candidates.length) notes.push('Assistant tool requests are duplicated, conflicting or unusable; their original rows remain separate.');
@@ -1333,15 +1400,17 @@ export function actionStages(entries, { history = 'ready', omitted = 0 } = {}) {
           continue;
         }
         for (const { entry, data } of bucket) {
-          if (entry.type === 'permission.requested') stage(entry, 'Permission requested', 'A request is not a decision.');
+          if (entry.type === 'permission.requested') stage(entry, 'Permission requested', 'A request is not a decision.', { requestId: data.requestId });
           else {
             const kind = object(data.result) ? data.result.kind : null;
             const outcome = permissionApprovals.has(kind) ? 'approved' : permissionDenials.has(kind) ? 'denied'
               : kind === 'cancelled' ? 'cancelled' : 'unknown';
             const decisionSource = decisionSources.has(data.decisionSource) ? data.decisionSource : null;
+            const scope = permissionResultScope(data.result);
             const detail = `Recorded kind: ${usableId(kind) ? kind : 'unknown'}. `
-              + (decisionSource ? `Recorded decision source: ${decisionSource}.` : 'Decision source unknown; the kind does not identify a person.');
-            stage(entry, `Permission ${outcome}`, detail, { outcome, decisionSource });
+              + (decisionSource ? `Recorded decision source: ${decisionSource}.` : 'Decision source unknown; the kind does not identify a person.')
+              + ` ${scope.detail}`;
+            stage(entry, `Permission ${outcome}`, detail, { outcome, decisionSource, scope, requestId: data.requestId });
           }
         }
       }
@@ -1349,10 +1418,10 @@ export function actionStages(entries, { history = 'ready', omitted = 0 } = {}) {
     const stages = entries.filter(entry => selected.has(entry.id)).map(entry => selected.get(entry.id));
     const decisions = stages.filter(stage => stage.type === 'permission.completed');
     const requests = stages.filter(stage => stage.type === 'permission.requested');
-    const settled = new Set(decisions.map(stage => records.get(stage.id).requestId));
+    const settled = new Set(decisions.map(stage => stage.requestId));
     let permission = decisions.length === 1 ? `Recorded permission: ${decisions[0].outcome}`
       : decisions.length ? 'Multiple permission decisions; no overall authorization inferred' : 'Permission unknown';
-    if (requests.some(stage => !settled.has(records.get(stage.id).requestId))
+    if (requests.some(stage => !settled.has(stage.requestId))
       || (permissionCalls.get(key) || []).some(record => !record.valid)) permission = 'Permission unknown';
     if (!stages.some(stage => stage.type === 'assistant.message')) notes.push('Assistant tool request not linked in retained evidence.');
     if (!requests.length) notes.push('Permission request unknown; no request is linked in retained evidence.');

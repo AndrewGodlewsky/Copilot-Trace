@@ -1,6 +1,6 @@
 # Trace
 
-Current version: **0.1.36**
+Current version: **0.1.37**
 
 A GitHub Copilot desktop plugin for understanding the activity inside your current chat. `/trace` opens a live timeline with turn markers and expandable recorded evidence. This is an initial proof of concept: explanations describe what events mean; they do not infer why the model made a decision.
 
@@ -18,7 +18,7 @@ A **Model turn** heading marks one iteration of the agent loop. Activity recorde
 
 The panel supports user messages, model turn boundaries, assistant messages/intent/reported reasoning, tool starts/results, skill invocations, subagents, hooks, permissions, compaction and host diagnostics when the host supplies them. Skill triggers distinguish user invocation, agent invocation and context loading; an absent trigger stays unknown. Tool results use agent identity and tool-call IDs to find retained starts. Chronological neighbors are not treated as causes.
 
-Tool cards include **Observed action stages and category limits** with links to the original assistant request, permission records, invocation and result when their IDs and ownership can be matched. Invocation entry and approval do not prove that an operation executed; missing permission evidence stays unknown. See [action stages](docs/action-stages.md) for live/history differences and supported fallbacks.
+Tool cards include **Observed action stages and category limits** with links to the original assistant request, permission records, invocation and result when their IDs and ownership can be matched. Permission details distinguish a single-request approval from a validated recorded session or project-location grant. Recorded scope does not establish current authority or actual reuse, and an absent decision source does not identify a human approver. Invocation entry and approval do not prove that an operation executed; missing permission evidence stays unknown. See [action stages](docs/action-stages.md) for live/history differences and supported fallbacks.
 
 Tool provenance shows recorded MCP provider details when the invocation supplies them. An absent or unverified origin stays **Unknown**, including built-in or plugin tools without a reliable origin field. Provider labels do not establish network activity or trust. See [tool provenance](docs/tool-provenance.md) for the metadata basis and limitations.
 
