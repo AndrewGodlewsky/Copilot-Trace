@@ -89,6 +89,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     '#glossary-concept', '#glossary-definition', '#glossary-deeper', '#glossary-example', '#glossary-source', '#glossary-status',
     '#guidance-comparison', '#guidance-examples',
     '#retrieval-ledger', '#retrieval-summary', '#retrieval-scope', '#retrieval-list', '#retrieval-unclassified', '#retrieval-unknown-list',
+    '#validation-overview', '#validation-summary', '#validation-scope', '#validation-list',
     '#instruction-sources', '#instruction-refresh', '#instruction-status', '#instruction-scope', '#instruction-window', '#instruction-current', '#instruction-loads',
     '#instruction-inspector', '#instruction-title', '#instruction-detail', '#instruction-body', '#instruction-original', '#instruction-selection-status',
     '#statistics-panel', '#statistics-button', '#evidence-scope', '#scope-summary', '#scope-view', '#stat-evidence-scope', '#stat-scope-summary']) {
@@ -110,6 +111,8 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   selectors.get('#retrieval-unclassified').tagName = 'details';
   selectors.get('#retrieval-unclassified').append(new Element('summary'));
   selectors.get('#retrieval-unclassified').append(selectors.get('#retrieval-unknown-list'));
+  const validation = selectors.get('#validation-overview'); validation.tagName = 'details'; statistics.append(validation);
+  for (const id of ['summary', 'scope', 'list']) validation.append(selectors.get(`#validation-${id}`));
   const instruction = selectors.get('#instruction-sources'); instruction.tagName = 'details'; statistics.append(instruction);
   for (const id of ['refresh', 'status', 'scope', 'window', 'current', 'loads', 'inspector']) instruction.append(selectors.get(`#instruction-${id}`));
   for (const id of ['title', 'detail', 'body', 'original', 'selection-status']) selectors.get('#instruction-inspector').append(selectors.get(`#instruction-${id}`));
@@ -1033,6 +1036,88 @@ async function claimFixture({ count = 1, output = 'PASS <script>日🧪</script>
   const trace = createTrace({ on() { return () => {}; }, getEvents: async () => raw.map(entry => ({ timestamp: '2026-11-20T12:00:00Z', ...entry })) });
   await trace.ready; const entries = trace.snapshot().entries; trace.close(); return entries;
 }
+
+test('validation overview remains optional and shows literal command, typed failure, tool success and unknown assertion counts', async () => {
+  const entries = await claimFixture(), ui = fixture(appSource); ui.render(entries);
+  const overview = ui.get('#validation-overview'), list = ui.get('#validation-list');
+  assert.equal(overview.open, false); assert.equal(list.children.length, 1);
+  assert.match(ui.get('#validation-summary').textContent, /1 recognized validation operation/);
+  assert.match(list.textContent, /node --test suite-0.test.mjs.*Process exit: 1.*Tool protocol: success/s);
+  assert.match(list.textContent, /Main chat.*validation-0.*2026-11-20T12:00:00Z/s);
+  assert.match(list.textContent, /Latest retained result.*exact source and literal command/i);
+  assert.match(list.textContent, /assertion counts.*skipped tests.*coverage.*unknown/i);
+  assert.equal(byClass(list, 'validation-output').textContent, 'PASS <script>日🧪</script>\n');
+  assert.equal(walk(list).some(node => ['script', 'img', 'a'].includes(node.tagName)), false);
+  overview.open = true; overview.dispatch('toggle'); assert.equal(ui.get('#follow').checked, false);
+  assert.deepEqual(visibleEvidence(ui), entries.map(entry => entry.evidence));
+});
+
+test('validation late completion and live view/filter changes preserve disclosure, focus and reading positions', async () => {
+  const entries = await claimFixture({ output: '日'.repeat(4000) }), ui = fixture(appSource); ui.render(entries.slice(0, 1));
+  const list = ui.get('#validation-list'), row = list.firstElementChild, details = row.querySelector('details');
+  assert.match(row.textContent, /Completion not retained.*unknown/s); assert.match(row.textContent, /Process exit: unknown/);
+  reveal(details); details.open = true; details.dispatch('toggle'); details.querySelector('summary').focus();
+  list.scrollTop = 31; ui.get('#statistics-panel').scrollTop = 80; ui.document.scrollingElement.scrollTop = 247;
+  ui.render(entries);
+  assert.equal(list.firstElementChild, row); assert.equal(details.open, true); assert.equal(ui.document.activeElement, details.querySelector('summary'));
+  const output = byClass(row, 'validation-output'); output.focus(); output.scrollTop = 44;
+  for (const mode of ['chronological', 'chapters', 'lanes', 'grouped']) {
+    ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change'); filterMode(ui, 'automation');
+    assert.equal(list.firstElementChild, row); assert.equal(ui.document.activeElement, output); assert.equal(output.scrollTop, 44);
+    assert.equal(details.open, true); assert.equal(list.scrollTop, 31); assert.equal(ui.get('#statistics-panel').scrollTop, 80);
+    assert.equal(ui.document.scrollingElement.scrollTop, 247); assert.equal(ui.get('#follow').checked, false);
+  }
+  ui.render(entries.slice(1), { omitted: 1, history: 'unavailable' });
+  assert.equal(row.isConnected, false); assert.equal(ui.document.activeElement, list);
+  assert.match(ui.get('#validation-summary').textContent, /No validation observed here/);
+  assert.match(ui.get('#validation-scope').textContent, /1 unclassified tool call.*unknown validation status/s);
+  assert.match(ui.get('#validation-scope').textContent, /history.*unavailable.*1 older events.*omitted/s);
+});
+
+test('validation original buttons reset filters and reject changed, evicted or duplicate evidence targets', async () => {
+  const entries = await claimFixture(), ui = fixture(appSource); ui.render(entries); filterMode(ui, 'automation');
+  const list = ui.get('#validation-list'), original = list.querySelectorAll('button').find(button => button.textContent === 'Original result');
+  original.dispatch('click');
+  assert.equal(ui.get('#statistics-panel').open, false); assert.equal(ui.get('#activity-filter').value, 'everything');
+  assert.equal(ui.get('#event-order').value, 'chronological'); assert.equal(ui.get('#follow').checked, false);
+  ui.render(await claimFixture({ output: 'Changed same-ID result' }));
+  ui.document.scrollingElement.scrollTop = 333; ui.get('#follow').checked = true; original.dispatch('click');
+  assert.match(ui.get('#navigation-status').textContent, /no longer retained/);
+  assert.equal(ui.document.scrollingElement.scrollTop, 333); assert.equal(ui.get('#follow').checked, true);
+  const replacement = list.querySelectorAll('button').find(button => button.textContent === 'Original result');
+  ui.render([...entries, entries[1]]); replacement.dispatch('click');
+  assert.equal(list.children.length, 0); assert.match(ui.get('#navigation-status').textContent, /no longer retained/);
+  ui.render(entries); ui.closePage(); assert.equal(list.children.length, 0);
+});
+
+test('empty validation overview names retained scope without treating unsupported commands as failed validation', async () => {
+  const ui = fixture(appSource); ui.render([], { history: 'unsupported', omitted: 40 });
+  assert.equal(ui.get('#validation-summary').textContent, 'No validation observed here.');
+  assert.match(ui.get('#validation-scope').textContent, /300 retained events.*40 older events/s);
+  assert.doesNotMatch(ui.get('#validation-overview').textContent, /no validation performed/i);
+  ui.render([boundary('unknown-command', 'start')]);
+  assert.equal(ui.get('#validation-list').children.length, 0);
+  assert.match(ui.get('#validation-scope').textContent, /1 unclassified tool call.*unknown validation status/s);
+});
+
+test('validation attempts keep prior failures visible and label invalid recorded times without inventing chronology', async () => {
+  const entries = await claimFixture({ count: 2 }), ui = fixture(appSource);
+  for (const [index, change] of [[2, raw => { raw.data.arguments.command = 'node --test suite-0.test.mjs'; }],
+    [3, raw => { raw.data.result.contents[0].exitCode = 0; }]]) {
+    const raw = JSON.parse(entries[index].evidence); change(raw); raw.timestamp = 'unknown recorded time';
+    entries[index].evidence = JSON.stringify(raw); entries[index].timestamp = raw.timestamp;
+  }
+  ui.render(entries);
+  const rows = ui.get('#validation-list').children;
+  assert.equal(rows.length, 2); assert.match(rows[0].textContent, /Process exit: 1/);
+  assert.doesNotMatch(rows[0].textContent, /Latest retained result/);
+  assert.match(rows[1].textContent, /Process exit: 0.*Latest retained result/s);
+  assert.match(rows[1].textContent, /Time unknown \(recorded: unknown recorded time\)/);
+  const result = rows[1].querySelectorAll('button').find(button => button.textContent === 'Original result');
+  ui.render(entries.slice(0, 3), { omitted: 2 }); result.dispatch('click');
+  assert.match(ui.get('#navigation-status').textContent, /no longer retained/);
+  assert.match(rows[0].textContent, /Latest retained result/); assert.match(rows[1].textContent, /Completion not retained/);
+});
 
 test('claim disclosure keeps candidates literal and separate until the user links a result, with neutral conflicting exit', async () => {
   const entries = await claimFixture({ count: 6 }), ui = fixture(appSource); ui.render(entries);

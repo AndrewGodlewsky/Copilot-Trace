@@ -6,7 +6,7 @@ import { createFollow } from './follow.mjs';
 import { initCapabilities } from './capabilities.mjs';
 import { initInstructionSources } from './instructions.mjs';
 import { vocabulary, conceptForEntry, glossaryExample, retainedExample } from './glossary.mjs';
-import { validationClaims, validationChecks, linkValidationClaim, retainedValidationLink } from './presentation.mjs';
+import { validationClaims, validationChecks, validationOverview, linkValidationClaim, retainedValidationLink } from './presentation.mjs';
 
 const diagnostics = createDiagnostics();
 diagnostics.record('panel_started');
@@ -31,6 +31,8 @@ const statValues = new Map();
 const retrievalRows = new Map(), retrievalUnknown = new Map();
 const retrievalDisclosure = document.querySelector('#retrieval-ledger');
 retrievalDisclosure.addEventListener('toggle', () => { if (retrievalDisclosure.open) follow.checked = false; });
+const validationRows = new Map(), validationDisclosure = document.querySelector('#validation-overview');
+validationDisclosure.addEventListener('toggle', () => { if (validationDisclosure.open) follow.checked = false; });
 for (const [key, label] of [['turns', 'Model turns'], ['hooks', 'Hook pipelines'], ['tools', 'Tool calls'], ['skills', 'Skill loads']]) {
   const cell = element('div');
   cell.dataset.metric = key;
@@ -291,6 +293,7 @@ function renderStatistics(snapshot) {
   capabilityView.update(snapshot);
   instructionView.update(snapshot);
   renderRetrieval(snapshot);
+  renderValidation(snapshot);
   const stats = summarize(snapshot.entries);
   for (const [selector, values] of [['#stat-hooks', stats.hookNames], ['#stat-skills', stats.skillNames]]) {
     const list = document.querySelector(selector);
@@ -300,6 +303,69 @@ function renderStatistics(snapshot) {
       list.replaceChildren(...rows.map(text => element('li', text)));
     }
   }
+}
+
+function renderValidation(snapshot) {
+  const overview = validationOverview(snapshot.entries, snapshot), list = document.querySelector('#validation-list');
+  const panel = document.querySelector('#statistics-panel'), focused = document.activeElement;
+  const inspected = validationDisclosure.contains(focused), scroll = panel.scrollTop;
+  const summary = overview.checks.length ? `${overview.checks.length} recognized validation operation${overview.checks.length === 1 ? '' : 's'} in retained evidence.`
+    : 'No validation observed here.';
+  const scope = `${overview.unclassifiedCalls} unclassified tool call${overview.unclassifiedCalls === 1 ? '' : 's'} with unknown validation status. `
+    + `${overview.unlinkedBoundaries} tool boundaries have unusable identities and are not counted as calls. ${overview.notes.join(' ')}`;
+  for (const [selector, text] of [['#validation-summary', summary], ['#validation-scope', scope]]) {
+    const target = document.querySelector(selector); if (target.textContent !== text) target.textContent = text;
+  }
+  let previous;
+  for (const check of overview.checks) {
+    let node = validationRows.get(check.id);
+    if (node && !retainedExample([check.start], node.start)) { node.item.remove(); validationRows.delete(check.id); node = null; }
+    if (!node) {
+      const item = element('li'), details = element('details'), title = element('summary'), status = element('p');
+      const identity = element('p'), command = element('pre'), latest = element('p'), notes = element('p');
+      const output = element('pre', '', 'validation-output'), links = element('div', undefined, 'boundary-links');
+      command.tabIndex = 0; command.setAttribute('aria-label', 'Exact recorded validation command');
+      output.tabIndex = 0; output.setAttribute('aria-label', 'Literal retained validation output');
+      links.setAttribute('role', 'group'); links.setAttribute('aria-label', 'Original validation evidence');
+      details.append(title, status, identity, command, latest, notes, output, links); item.append(details);
+      details.addEventListener('toggle', () => { if (details.open) follow.checked = false; });
+      node = { item, title, status, identity, command, latest, notes, output, links, start: check.start, buttons: new Map() };
+      validationRows.set(check.id, node);
+    }
+    const exit = check.exitCode === null ? 'unknown' : `${check.exitCode} (${check.exitCode === 0 ? 'zero exit' : 'nonzero exit'})`;
+    const timestamp = value => value && Number.isFinite(Date.parse(value)) ? value : `Time unknown${value ? ` (recorded: ${value})` : ''}`;
+    const values = [[node.title, `${check.command} · Process exit: ${exit}`],
+      [node.status, `Tool protocol: ${check.toolSuccess === null ? 'unknown' : check.toolSuccess ? 'success' : 'failure'}. Test assertions: unknown.`],
+      [node.identity, `${check.source ? `Agent ${check.source}` : 'Main chat'} · Call ${check.start.toolCallId} · Start: ${timestamp(check.timestamp)} · Result: ${timestamp(check.resultTimestamp)}`],
+      [node.command, check.command], [node.latest, check.latestResult ? 'Latest retained result for this exact source and literal command.' : ''],
+      [node.notes, check.notes.join(' ')], [node.output, check.output ?? 'Literal result.content unavailable; no output is reconstructed.']];
+    for (const [target, text] of values) if (target.textContent !== text) target.textContent = text;
+    node.latest.hidden = !check.latestResult;
+    let previousButton;
+    const linked = [check.start, check.result].filter(entry => entry && retainedExample(snapshot.entries, entry));
+    for (const entry of linked) {
+      let button = node.buttons.get(entry.id);
+      if (button && !retainedExample([entry], button.entry)) { button.remove(); node.buttons.delete(entry.id); button = null; }
+      if (!button) {
+        button = element('button', entry === check.start ? 'Original command and arguments' : 'Original result'); button.type = 'button';
+        button.entry = entry;
+        button.addEventListener('click', () => {
+          if (!retainedExample(lastSnapshot?.entries || [], entry)) { showBoundary(entry.id, undefined, entry); return; }
+          footerPanels.closePanel('statistics-panel', { restoreFocus: false });
+          showBoundary(entry.id, 'Showing the validation overview’s original retained evidence. Follow live is paused.', entry);
+        });
+        node.buttons.set(entry.id, button);
+      }
+      previousButton = place(node.links, button, previousButton);
+    }
+    const ids = new Set(linked.map(entry => entry.id));
+    for (const [id, button] of node.buttons) if (!ids.has(id)) { button.remove(); node.buttons.delete(id); }
+    previous = place(list, node.item, previous);
+  }
+  const ids = new Set(overview.checks.map(check => check.id));
+  for (const [id, node] of validationRows) if (!ids.has(id)) { node.item.remove(); validationRows.delete(id); }
+  if (inspected && !unhidden(focused)) { follow.checked = false; list.focus({ preventScroll: true }); }
+  panel.scrollTop = scroll;
 }
 
 function renderRetrieval(snapshot) {
@@ -1374,6 +1440,8 @@ window.addEventListener('pagehide', () => {
   claimsClosed = true;
   for (const view of claimViews.values()) { view.link = null; view.results.clear(); view.details.remove(); }
   claimViews.clear();
+  for (const node of validationRows.values()) { node.buttons.clear(); node.item.remove(); }
+  validationRows.clear();
 });
 renderObserverScope();
 void poller.refresh();

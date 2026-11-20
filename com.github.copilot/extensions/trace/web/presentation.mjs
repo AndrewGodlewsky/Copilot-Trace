@@ -1001,7 +1001,7 @@ function validationCommand(data) {
     initial_wait: value => typeof value === 'number' && value >= 30 && value <= 600 };
   if (!args || typeof args !== 'object' || Array.isArray(args) || !argumentText(args.command) || !fields.description(args.description)
     || !Object.entries(args).every(([key, value]) => Object.hasOwn(fields, key) && fields[key](value))) return null;
-  const kind = new Map([['npm test', 'tests'], ['npm run build', 'build'], ['npm run check', 'checks']]).get(args.command)
+  const kind = new Map([['npm test', 'tests'], ['npm run build', 'build'], ['npm run check', 'checks'], ['npm run lint', 'lint']]).get(args.command)
     || (/^node --test(?: [A-Za-z0-9_.][A-Za-z0-9_./\\-]*)?$/.test(args.command) ? 'tests' : null);
   return kind ? { kind, command: args.command } : null;
 }
@@ -1021,33 +1021,59 @@ function validationExit(data) {
 }
 
 // These literal requests describe scope only; neither a tool name nor exit zero verifies a suite.
-export function validationChecks(entries) {
+export function validationChecks(entries, { includeIncomplete = false } = {}) {
   const counts = new Map(), positions = new Map(entries.map((entry, index) => [entry, index]));
   for (const entry of entries) counts.set(entry.id, (counts.get(entry.id) || 0) + 1);
   const checks = [];
   for (const { boundaries, start } of toolBuckets(entries)) {
     const starts = boundaries.filter(entry => entry.type === 'tool.execution_start');
     const ends = boundaries.filter(entry => entry.type === 'tool.execution_complete'), result = ends[0];
-    if (starts.length !== 1 || ends.length !== 1 || positions.get(start) >= positions.get(result)
+    if (starts.length !== 1 || ends.length > 1 || (!includeIncomplete && ends.length !== 1)
+      || (result && positions.get(start) >= positions.get(result))
       || boundaries.some(entry => counts.get(entry.id) !== 1 || !identityText(entry.id) || !identityText(entry.toolCallId)
         || typeof entry.truncated !== 'boolean' || !(entry.agentId === '' || identityText(entry.agentId)))) continue;
-    const data = explanationData(start), end = explanationData(result), request = validationCommand(data);
-    if (!request || data.toolCallId !== start.toolCallId || data.toolName !== start.toolName
-      || (!result.truncated && (!end || end.toolCallId !== result.toolCallId || typeof end.success !== 'boolean'
-        || end.success !== result.success || (end.toolName !== undefined && end.toolName !== data.toolName)))
-      || (end && [...mcpFields, 'origin', 'overridesBuiltInTool'].some(field => Object.hasOwn(end, field)))
-      || (result.toolName !== '' && result.toolName !== data.toolName)) continue;
+    const data = explanationData(start), recordedEnd = result && explanationData(result), request = validationCommand(data);
+    if (!request || data.toolCallId !== start.toolCallId || data.toolName !== start.toolName) continue;
+    const validEnd = result && (result.truncated || (recordedEnd && recordedEnd.toolCallId === result.toolCallId
+      && typeof recordedEnd.success === 'boolean' && recordedEnd.success === result.success
+      && (recordedEnd.toolName === undefined || recordedEnd.toolName === data.toolName)))
+      && !(recordedEnd && [...mcpFields, 'origin', 'overridesBuiltInTool'].some(field => Object.hasOwn(recordedEnd, field)))
+      && (result.toolName === '' || result.toolName === data.toolName);
+    if (!includeIncomplete && !validEnd) continue;
+    const end = validEnd ? recordedEnd : null;
     const shell = validationExit(end), output = typeof end?.result?.content === 'string' ? end.result.content : null;
-    checks.push({ id: result.id, source: start.agentId, ...request, start, result, output,
+    checks.push({ id: validEnd ? result.id : start.id, source: start.agentId, ...request, start, result: validEnd ? result : null, output,
       exitCode: shell?.exitCode ?? null, toolSuccess: typeof end?.success === 'boolean' ? end.success : null,
       notes: ['Literal command scope only; package scripts, selected suites, assertion counts and suite coverage are not inspected. Provider / implementation origin remains unknown.',
         'Tool success describes the tool protocol. A typed process exit describes this command only; exit zero does not prove tests or the whole task correct. Output text is not authoritative assertion counts.',
         'Only result.content is displayed literally. Complete capture of process output is unknown, even when no shortening flag is present.',
-        ...(shell?.outputTruncated === true || retainedHostOutput(result) ? ['Host-shortened output: the recorded shell preview is incomplete.'] : []),
-        ...(result.truncated ? ['Trace clipped the raw result; literal output and process status are unavailable.'] : []),
+        ...(validEnd && (shell?.outputTruncated === true || retainedHostOutput(result)) ? ['Host-shortened output: the recorded shell preview is incomplete.'] : []),
+        ...(validEnd && result.truncated ? ['Trace clipped the raw result; literal output and process status are unavailable.'] : []),
+        ...(!result ? ['Completion not retained; outcome unknown, not necessarily still running.']
+          : !validEnd ? ['Result evidence is incomplete or conflicting; it is not linked to this request. Tool status, process exit and output are unknown; inspect the original timeline boundaries.'] : []),
         ...(!shell ? ['Process exit unknown: a unique valid typed shell_exit is absent, malformed or conflicts with another recorded status.'] : [])] });
   }
   return checks;
+}
+
+export function validationOverview(entries, { history = 'ready', omitted = 0 } = {}) {
+  const positions = new Map(entries.map((entry, index) => [entry, index])), latest = new Map();
+  const checks = validationChecks(entries, { includeIncomplete: true }).map(check => ({ ...check,
+    id: check.start.id, timestamp: check.start.timestamp, resultTimestamp: check.result?.timestamp ?? null,
+    assertionCounts: null, latestResult: false,
+    notes: [...check.notes, 'Test and suite assertion counts, skipped tests and coverage remain unknown; no authoritative complete result schema is inspected.'] }));
+  for (const check of checks.filter(check => check.result).sort((a, b) => positions.get(a.result) - positions.get(b.result))) {
+    latest.set(JSON.stringify([check.source, check.command]), check);
+  }
+  for (const check of latest.values()) check.latestResult = true;
+  const buckets = toolBuckets(entries), unlinkedBoundaries = buckets.filter(bucket => toolIdentity(bucket.boundaries[0]) === null).length;
+  return { checks, unclassifiedCalls: buckets.length - unlinkedBoundaries - checks.length, unlinkedBoundaries,
+    notes: [`Only up to 300 retained events are considered (${entries.length} here); no checks are run by Trace.`,
+      'One recognized operation per exact usable source and call ID, not per start/result boundary. Conflicting identities stay unclassified; unusable IDs leave separate boundaries, not an inferred operation count.',
+      'Unclassified tool calls have unknown validation status: unsupported commands or schemas, wrappers, missing starts, clipped or conflicting evidence may conceal validation.',
+      'Latest result means the last compatible retained completion for this exact source and literal command in recorded order. It does not establish the same shell, environment, package script or suite. Inspect original arguments for differences; missing or invalid timestamps leave chronological time unknown.',
+      ...(history !== 'ready' ? ['Earlier history is unavailable or still loading.'] : []),
+      ...(omitted ? [`${omitted} older events were omitted from the retained window.`] : [])] };
 }
 
 export function validationClaims(entries, { history = 'ready', omitted = 0 } = {}) {

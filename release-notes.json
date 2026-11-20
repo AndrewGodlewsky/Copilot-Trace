@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.36",
+    "summary": "Inspect a retained overview of recognized validation commands, keeping process outcomes, repeated attempts and unknown test counts distinct."
+  },
+  {
     "version": "0.1.35",
     "summary": "Compare a reported check result with retained evidence through explicit user links, keeping candidates and process outcomes distinct."
   },

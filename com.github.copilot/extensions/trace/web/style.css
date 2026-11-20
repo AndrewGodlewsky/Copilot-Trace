@@ -240,6 +240,13 @@ body:has(.footer-panel[open]) { overflow: hidden; }
 .retrieval-ledger pre { max-height: min(16rem, 35vh); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 #retrieval-list { max-height: min(28rem, 50vh); overflow: auto; overscroll-behavior: contain; padding-right: 4px; }
 #retrieval-unknown-list { max-height: min(20rem, 40vh); overflow: auto; overscroll-behavior: contain; }
+.validation-overview { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 10px; overflow-wrap: anywhere; }
+.validation-overview summary { cursor: pointer; padding: 6px 0; color: var(--model); }
+.validation-overview > summary { font-weight: 600; }
+.validation-overview li { margin-block: 8px; }
+.validation-overview button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.validation-overview pre { max-height: min(16rem, 35vh); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+#validation-list { max-height: min(28rem, 50vh); overflow: auto; overscroll-behavior: contain; padding: 0 4px 0 22px; }
 #capability-list { max-height: min(24rem, 45vh); overflow: auto; overscroll-behavior: contain; padding: 6px 8px 6px 24px; }
 #capability-list li { white-space: pre-wrap; margin-bottom: 10px; }
 .footer-panel label { flex-wrap: wrap; font-size: inherit; }
