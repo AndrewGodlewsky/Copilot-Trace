@@ -63,6 +63,70 @@ export function groupSteps(entries, chronological = false) {
   return sections;
 }
 
+// Chapters describe retained time intervals, not causal ownership or request completion.
+export function requestChapters(entries, { history = 'ready', omitted = 0 } = {}) {
+  const usableId = value => typeof value === 'string' && value.length > 0 && value.length <= 256;
+  const inputCounts = new Map();
+  for (const entry of entries) {
+    if ((entry.agentId === '' || !usableId(entry.agentId)) && entry.type === 'user.message' && usableId(entry.interactionId)) {
+      inputCounts.set(entry.interactionId, (inputCounts.get(entry.interactionId) || 0) + 1);
+    }
+  }
+  const chapters = [], queued = new Map(), seenInteractions = new Set(), linkedInputs = new Set();
+  let current;
+  function begin(entry, boundary = 'unknown', prompt = null) {
+    current = { id: `chapter:${entry.id}`, boundary, prompt, entries: [], notes: [],
+      partial: chapters.length === 0 && (boundary === 'unknown' || history !== 'ready' || omitted > 0) };
+    if (boundary === 'unknown') current.notes.push('Request boundary unknown; attribution unavailable.');
+    if (boundary === 'idle') current.notes.push('Idle input begins this interval.');
+    if (boundary === 'queued') current.notes.push('Queued interaction starts here; preview refers to an earlier input record.');
+    chapters.push(current);
+  }
+  for (const entry of entries) {
+    const root = entry.agentId === '';
+    if (root && entry.type === 'user.message' && entry.delivery === 'idle') begin(entry, 'idle', entry);
+    if (root && entry.type === 'assistant.turn_start' && usableId(entry.interactionId)) {
+      const prompt = queued.get(entry.interactionId);
+      if (prompt && !seenInteractions.has(entry.interactionId)) {
+        begin(entry, 'queued', prompt);
+        linkedInputs.add(prompt.id);
+        queued.delete(entry.interactionId);
+      }
+      seenInteractions.add(entry.interactionId);
+    }
+    if (!current) begin(entry);
+    current.entries.push(entry);
+    if (root && entry.type === 'user.message' && entry.delivery === 'queued'
+      && inputCounts.get(entry.interactionId) === 1 && !seenInteractions.has(entry.interactionId)) {
+      queued.set(entry.interactionId, entry);
+    }
+    if (entry.type === 'abort' && (root || entry.agentId === null)) {
+      current.notes.push('Interruption recorded; request outcome unknown.');
+      current = null;
+    }
+  }
+  for (const chapter of chapters) {
+    const notes = new Set(chapter.notes);
+    for (const entry of chapter.entries) {
+      if (entry.type === 'user.message') {
+        if (entry.delivery === 'steering') notes.add('Steering input remains within this interval.');
+        if (entry.agentId === '' && entry.delivery === 'queued') notes.add(linkedInputs.has(entry.id)
+          ? 'Queued input stays here in event order; its interaction begins in a later chapter.'
+          : 'Queued input retained here; its own interaction start is not linked in this window.');
+        if (entry.agentId === null || (entry.agentId === '' && !['idle', 'steering', 'queued'].includes(entry.delivery))) {
+          notes.add('Input delivery or source unavailable; later request boundaries may be unknown.');
+        }
+      }
+      if (entry.type === 'assistant.turn_start' && entry.agentId === '' && !usableId(entry.interactionId)) {
+        notes.add('Interaction linkage unavailable; interval only.');
+      }
+    }
+    chapter.notes = [...notes];
+    chapter.stats = summarize(chapter.entries);
+  }
+  return chapters;
+}
+
 function timestampMilliseconds(value) {
   if (typeof value !== 'string') return NaN;
   const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(value);
@@ -101,7 +165,10 @@ export function turnContext(entries) {
   for (const entry of entries) {
     const agent = entry.agentId ?? '';
     if (entry.type === 'abort') { active.clear(); continue; }
-    if (entry.type === 'user.message') { active.delete(agent); continue; }
+    if (entry.type === 'user.message') {
+      if (!['steering', 'queued'].includes(entry.delivery)) active.delete(agent);
+      continue;
+    }
     if (entry.agentId === null) continue;
     if (entry.type === 'assistant.turn_start') {
       active.delete(agent);
@@ -212,7 +279,12 @@ function actionTitle(entry) {
 
 export function describeStep(entry) {
   const type = entry.type;
-  if (type === 'user.message') return { kind: 'You', title: entry.preview || 'User message', subtitle: 'Message sent', tone: 'user' };
+  if (type === 'user.message') {
+    const delivery = { idle: 'Idle input · Starts its own run', steering: 'Steering input · Injected into an in-flight run',
+      queued: 'Queued input · Own run follows later' };
+    return { kind: 'You', title: entry.preview || 'User message',
+      subtitle: Object.hasOwn(delivery, entry.delivery) ? delivery[entry.delivery] : 'Delivery unknown · Request boundary unavailable', tone: 'user' };
+  }
   if (entry.category === 'tool') {
     const subtitle = type === 'tool.execution_start' ? 'Started'
       : entry.success === false ? 'Failed' : entry.success === true ? 'Completed' : 'Result recorded';

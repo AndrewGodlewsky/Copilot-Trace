@@ -63,6 +63,8 @@ function project(event) {
     timestamp: clip(event.timestamp, 80),
     agentId: event.agentId === undefined ? '' : identifier(event.agentId) || null,
     turnId: identifier(data.turnId), hookInvocationId: identifier(data.hookInvocationId),
+    delivery: ['idle', 'steering', 'queued'].includes(data.delivery) ? data.delivery : '',
+    interactionId: identifier(data.interactionId),
     toolCallId: identifier(data.toolCallId), toolName: clip(data.toolName, 180),
     success: typeof data.success === 'boolean' ? data.success : null,
     evidence: clip(evidence, EVIDENCE_LIMIT), truncated: evidence.length > EVIDENCE_LIMIT,

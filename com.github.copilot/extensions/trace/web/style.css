@@ -84,6 +84,13 @@ input { accent-color: var(--model); margin: 0; }
 .hook-events .step + .step::before, .tool-events .step + .step::before { height: 19px; top: -20px; }
 .tool-group > .node > summary .node-subtitle { display: block; overflow: visible; }
 .group-note { margin: 0; padding: 12px 14px 6px; color: var(--muted); font-size: .857rem; }
+.step.request-chapter { max-width: 100%; }
+.request-chapter > .node > summary .node-title { white-space: pre-wrap; }
+.request-chapter > .node > summary .node-subtitle { display: block; overflow: visible; }
+.chapter-status { display: block; margin-top: 6px; color: var(--muted); font-size: .786rem; }
+.chapter-events { display: flex; flex-direction: column; align-items: center; list-style: none; margin: 0; padding: 18px 12px; }
+.chapter-events > .step { max-width: 100%; }
+.chapter-events > .step[data-turn='inside'] { width: calc(100% - 12px); margin-left: 12px; }
 .boundary-links { display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 14px 12px; }
 .boundary-links button { font-size: .857rem; }
 .node { border: 1px solid var(--node-color); border-left-width: 3px; border-radius: 9px; background: var(--surface); }

@@ -24,9 +24,11 @@
         <select id="event-order" aria-describedby="order-help">
           <option value="grouped">Grouped tool calls</option>
           <option value="chronological">Chronological events</option>
+          <option value="chapters">Request chapters</option>
         </select>
       </label>
       <p id="order-help">Tool cards sit at their first retained boundary, with later results inside. Use Chronological events or a card’s boundary buttons to see intervening activity. Event order uses recorded timestamps; ties keep history/arrival order, and missing or unparseable times appear last.</p>
+      <p>Request chapters collect chronological intervals beneath recorded input previews. Steering stays in the current interval; queued input starts a chapter only when its interaction is linked. Unknown boundaries remain labeled.</p>
     </div>
     <details id="actor-legend" class="legend">
       <summary>Actor labels and sources</summary>
@@ -55,6 +57,7 @@
         <summary>About this view</summary>
         <p>A model turn is one iteration of the agent loop, not an entire user request. Its heading and closing marker share a recorded turn ID. Indented events were recorded between those markers for the same agent; this shows timing, not why an action happened. Tool cards can span turns; their individual boundary events show their own turn context.</p>
         <p>Tool boundaries share a card only with the exact same usable source-agent and call IDs. Missing boundaries remain partial: a missing completion does not mean a tool is still running. Conflicting boundaries keep their evidence but have no combined outcome. Elapsed time requires one start, one result and valid timestamps in that order; it measures the recorded interval, not model thinking or billable time.</p>
+        <p>Request chapters begin at main-chat idle input or a turn start linked to earlier queued input by its exact interaction ID. They show timing, not which input caused an action. Input can be host-supplied. Steering never starts a new chapter; missing delivery or linkage leaves boundaries unknown. Original events stay in order, and Chronological events removes the chapter headers. A new chapter or an interruption does not establish success or completion.</p>
         <p>Recorded evidence only, with up to 300 recent supported events. Long evidence is shortened. Some host activity and earlier streaming updates may be unavailable. Trace keeps its copy of chat content in memory and makes no model calls.</p>
       </details>
       <dialog id="statistics-panel" class="footer-panel statistics-drawer" aria-labelledby="statistics-title">

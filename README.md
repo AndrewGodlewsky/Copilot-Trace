@@ -1,6 +1,6 @@
 # Trace
 
-Current version: **0.1.13**
+Current version: **0.1.14**
 
 A GitHub Copilot desktop plugin for understanding the activity inside your current chat. `/trace` opens a live timeline with turn markers and expandable recorded evidence. This is an initial proof of concept: explanations describe what events mean; they do not infer why the model made a decision.
 
@@ -80,7 +80,7 @@ npm run e2e
 
 For the installation inspected during setup, use `copilot.exe` beside the `copilot-sdk` directory. The lower-level `copilot-runtime.exe` failed extension startup with "No extension launch provider is registered". See [runtime selection](docs/copilot-integration.md#runtime-and-plugin-layout).
 
-The fixture checks native SDK registration, plugin ownership, actual session history and live event delivery, opening/reopening/closing and local assets. It emits deterministic informational events in a disposable Copilot home and uses an anonymous loopback provider that rejects inference; zero model requests are required. It does not operate a browser, install into your profile or use an existing chat. Per-event projection and attribution are covered by unit fixtures; the runtime fixture does not simulate a real model choosing tools or skills.
+The fixture checks native SDK registration, plugin ownership, actual session history and live event delivery, opening/reopening/closing and local assets. That phase requires zero model requests. A second phase explicitly sends three synthetic inputs to an anonymous loopback provider with fixed local responses, verifying the host's actual delivery and interaction fields against Trace's projections. Both phases use a disposable Copilot home, no paid inference and no existing chat. The fixture does not operate a browser or install into your profile. Unit fixtures cover additional event and attribution cases; fixed responses do not establish real model quality or tool/skill choices.
 
 Manual acceptance after installation:
 

@@ -67,8 +67,8 @@ function fixture(source) {
   });
   vm.runInContext(source.replace(/^import .*;\r?\n/gm, ''), context);
   return { document, get: selector => selectors.get(selector),
-    render(entries) {
-      context.fixtureSnapshot = { entries, history: 'ready', omitted: 0 };
+    render(entries, extra = {}) {
+      context.fixtureSnapshot = { entries, history: 'ready', omitted: 0, ...extra };
       vm.runInContext('lastSnapshot = fixtureSnapshot; render(lastSnapshot);', context);
     } };
 }
@@ -177,4 +177,152 @@ test('chronological retention moves focus to the surviving boundary and keeps co
   assert.equal(ui.get('#timeline').firstElementChild, endRow);
   assert.equal(ui.document.activeElement, endRow.firstElementChild.firstElementChild);
   assert.equal(ui.get('#stat-counts').textContent, groupedCounts);
+});
+
+const request = (id, extra = {}) => ({ id, type: 'user.message', category: 'chat', agentId: '',
+  delivery: 'idle', interactionId: id, preview: '<img> 日本語😀\n  exact text', evidence: JSON.stringify({ id }), ...extra });
+const requestTurn = (id, interactionId) => ({ id, type: 'assistant.turn_start', category: 'turn', agentId: '',
+  turnId: '0', interactionId, evidence: JSON.stringify({ id }) });
+const chapterRows = chapter => byClass(chapter, 'chapter-events').children;
+function chapterMode(ui) {
+  ui.get('#event-order').value = 'chapters';
+  ui.get('#event-order').dispatch('change');
+}
+
+test('request chapters keep collapsed state and summary focus as live events and earlier history arrive', () => {
+  const ui = fixture(appSource);
+  const input = request('input'), turn = requestTurn('turn', 'input');
+  ui.render([input, turn, start]);
+  chapterMode(ui);
+  const chapter = ui.get('#timeline').firstElementChild;
+  assert.ok(chapter.className.includes('request-chapter'));
+  const details = chapter.firstElementChild;
+  assert.equal(details.open, false);
+  details.firstElementChild.focus();
+  ui.render([request('earlier'), input, turn, start, end]);
+  assert.equal(ui.get('#timeline').children[1], chapter);
+  assert.equal(details.open, false, 'Updating a focused collapsed header must not open it.');
+  assert.equal(ui.document.activeElement, details.firstElementChild);
+  assert.equal(byClass(chapter, 'node-title').textContent, input.preview);
+  assert.match(chapter.textContent, /4 retained events.*1 model turns.*1 tool calls/);
+  assert.equal(chapterRows(chapter).length, 4);
+  details.open = true;
+  details.dispatch('toggle');
+  assert.equal(ui.get('#follow').checked, false);
+});
+
+test('request chapters retain original evidence rows, tool cards and focus across view changes', () => {
+  const ui = fixture(appSource);
+  const input = request('input');
+  ui.render([input, start, end]);
+  const tool = ui.get('#timeline').children[1];
+  tool.firstElementChild.open = true;
+  const [startRow, endRow] = evidenceRows(tool);
+  chapterMode(ui);
+  const chapter = ui.get('#timeline').firstElementChild;
+  assert.ok(chapter.className.includes('request-chapter'));
+  assert.deepEqual(chapterRows(chapter).slice(1), [startRow, endRow]);
+  chapter.firstElementChild.open = true;
+  endRow.firstElementChild.open = true;
+  const evidence = walk(endRow).find(node => node.tagName === 'pre');
+  evidence.focus();
+  const counts = ui.get('#stat-counts').textContent;
+  ui.get('#event-order').value = 'grouped';
+  ui.get('#event-order').dispatch('change');
+  assert.equal(ui.get('#timeline').children[1], tool);
+  assert.equal(tool.firstElementChild.open, true);
+  assert.equal(ui.document.activeElement, evidence);
+  chapterMode(ui);
+  assert.equal(ui.get('#timeline').firstElementChild, chapter);
+  assert.equal(chapter.firstElementChild.open, true);
+  assert.equal(ui.document.activeElement, evidence);
+  assert.equal(ui.get('#stat-counts').textContent, counts);
+  assert.equal(evidence.textContent, end.evidence);
+  ui.get('#event-order').value = 'chronological';
+  ui.get('#event-order').dispatch('change');
+  assert.deepEqual(ui.get('#timeline').children.slice(1), [startRow, endRow]);
+  assert.ok(endRow.textContent.includes(end.timestamp));
+});
+
+test('queued chapter boundaries do not move earlier input and eviction retains surviving chapter focus', () => {
+  const ui = fixture(appSource);
+  const input = request('input'), queued = request('queued', { delivery: 'queued' });
+  const turn = requestTurn('queued-turn', 'queued');
+  ui.render([input, queued, start]);
+  chapterMode(ui);
+  const first = ui.get('#timeline').firstElementChild;
+  assert.ok(first.className.includes('request-chapter'));
+  const queuedRow = chapterRows(first)[1];
+  ui.render([input, queued, start, turn, end]);
+  assert.equal(ui.get('#timeline').children.length, 2);
+  assert.equal(chapterRows(first)[1], queuedRow);
+  const second = ui.get('#timeline').children[1];
+  second.firstElementChild.open = true;
+  const turnRow = chapterRows(second)[0];
+  turnRow.firstElementChild.open = true;
+  turnRow.firstElementChild.firstElementChild.focus();
+  ui.render([end], { omitted: 4 });
+  assert.equal(ui.get('#timeline').firstElementChild, second);
+  assert.equal(second.firstElementChild.open, true);
+  assert.equal(ui.document.activeElement, second.firstElementChild.firstElementChild);
+  assert.match(second.textContent, /Partial first chapter/);
+  assert.match(second.textContent, /boundary unknown/);
+  ui.render([]);
+  assert.equal(ui.document.activeElement, ui.get('#event-order'), 'When nothing survives, focus returns to the view control.');
+});
+
+test('history splitting an unknown interval retains its disclosure state for surviving event spans', () => {
+  const ui = fixture(appSource);
+  const one = requestTurn('one-turn', 'one'), two = requestTurn('two-turn', 'two');
+  ui.render([one, two]);
+  chapterMode(ui);
+  const original = ui.get('#timeline').firstElementChild;
+  assert.ok(original.className.includes('request-chapter'));
+  original.firstElementChild.open = true;
+  ui.render([request('one'), one, request('two'), two]);
+  assert.equal(ui.get('#timeline').children.length, 2);
+  assert.ok(ui.get('#timeline').children.every(chapter => chapter.firstElementChild.open));
+});
+
+test('evicting queued input merges uncertain intervals and restores chapter-summary focus', () => {
+  const ui = fixture(appSource);
+  const one = request('one'), queued = request('queued', { delivery: 'queued' });
+  const before = requestTurn('before', 'one'), after = requestTurn('after', 'queued');
+  ui.render([one, queued, before, after]);
+  chapterMode(ui);
+  const second = ui.get('#timeline').children[1];
+  second.firstElementChild.firstElementChild.focus();
+  ui.render([before, after], { omitted: 2 });
+  assert.equal(ui.get('#timeline').children.length, 1);
+  const merged = ui.get('#timeline').firstElementChild;
+  assert.equal(ui.document.activeElement, merged.firstElementChild.firstElementChild);
+  assert.equal(chapterRows(merged).length, 2);
+  assert.match(merged.textContent, /boundary unknown/);
+});
+
+test('merging chapters preserves expanded retained evidence without relying on keyboard focus', () => {
+  const ui = fixture(appSource);
+  const one = request('one'), queued = request('queued', { delivery: 'queued' });
+  const before = requestTurn('before', 'one'), after = requestTurn('after', 'queued');
+  ui.render([one, queued, before, after]);
+  chapterMode(ui);
+  const [first, second] = ui.get('#timeline').children;
+  assert.equal(first.firstElementChild.open, false);
+  second.firstElementChild.open = true;
+  const retainedRow = chapterRows(second)[0];
+  retainedRow.firstElementChild.open = true;
+  assert.equal(ui.document.activeElement, ui.document.body, 'Mouse reading has no focused descendant.');
+
+  ui.render([before, after], { omitted: 2 });
+  const merged = ui.get('#timeline').firstElementChild;
+  assert.equal(ui.get('#timeline').children.length, 1);
+  assert.equal(merged.firstElementChild.open, true, 'Any overlapping open chapter keeps retained evidence visible.');
+  assert.equal(chapterRows(merged)[1], retainedRow);
+  assert.equal(retainedRow.firstElementChild.open, true);
+  assert.equal(ui.document.activeElement, ui.document.body);
+
+  merged.firstElementChild.open = false;
+  ui.render([before, after, requestTurn('later', 'queued')], { omitted: 2 });
+  assert.equal(ui.get('#timeline').firstElementChild, merged);
+  assert.equal(merged.firstElementChild.open, false, 'A subsequent one-to-one update preserves an explicit collapse.');
 });

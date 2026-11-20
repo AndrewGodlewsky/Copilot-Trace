@@ -3,6 +3,23 @@ import { test } from 'node:test';
 import { createTrace } from '../com.github.copilot/extensions/trace/trace.mjs';
 
 const event = (id, type, data = {}, extra = {}) => ({ id, type, data, timestamp: '2026-11-19T12:00:00.000Z', parentId: null, ...extra });
+
+test('request delivery and interaction identity are validated without changing their evidence', async t => {
+  const values = ['idle', 'steering', 'queued', '', 'future', '__proto__', null, 7];
+  const history = values.map((delivery, i) => event(String(i), 'user.message', { delivery,
+    interactionId: i < 3 ? '日本語😀' : i === 3 ? 'x'.repeat(256) : i === 4 ? 'x'.repeat(257) : null }));
+  history.push(event('turn', 'assistant.turn_start', { interactionId: 'exact interaction', turnId: '0' }));
+  const fixture = host(Promise.resolve(history));
+  const trace = createTrace(fixture.session);
+  t.after(() => trace.close());
+  await trace.ready;
+  const entries = trace.snapshot().entries;
+  assert.deepEqual(entries.slice(0, values.length).map(entry => entry.delivery), ['idle', 'steering', 'queued', '', '', '', '', '']);
+  assert.deepEqual(entries.slice(0, values.length).map(entry => entry.interactionId), ['日本語😀', '日本語😀', '日本語😀', 'x'.repeat(256), '', '', '', '']);
+  assert.equal(entries.at(-1).interactionId, 'exact interaction');
+  assert.equal(entries.at(-1).turnId, '0');
+  assert.equal(JSON.parse(entries[4].evidence).data.interactionId, 'x'.repeat(257));
+});
 function host(history = Promise.resolve([])) {
   let listener;
   let subscriptions = 0;

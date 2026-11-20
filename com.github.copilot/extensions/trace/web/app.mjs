@@ -1,4 +1,4 @@
-import { describeActor, describeHookGroup, describeToolGroup, describeStep, describeTurn, groupSteps, turnContext, summarize } from './presentation.mjs';
+import { describeActor, describeHookGroup, describeToolGroup, describeStep, describeTurn, groupSteps, requestChapters, turnContext, summarize } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -28,6 +28,7 @@ for (const [key, label] of [['turns', 'Model turns'], ['hooks', 'Hook calls'], [
 }
 const nodes = new Map();
 let groups = [];
+let chapters = [];
 let etag;
 let lastSnapshot;
 eventOrder.addEventListener('change', () => {
@@ -161,11 +162,48 @@ function showBoundary(id) {
   node.item.scrollIntoView({ block: 'center' });
 }
 
+function reconcileChapters(snapshot, visible) {
+  const next = [];
+  const old = chapters.map(chapter => ({ chapter, id: chapter.id, ids: chapter.ids, open: chapter.details.open }));
+  for (const section of requestChapters(snapshot.entries, snapshot)) {
+    const overlaps = old.filter(previous => section.entries.some(entry => previous.ids.has(entry.id)));
+    const prior = old.find(previous => previous.id === section.id) || overlaps[0];
+    let chapter = prior && !next.includes(prior.chapter) ? prior.chapter : null;
+    const { stats } = section;
+    const title = section.prompt ? section.prompt.preview || 'Recorded input' : 'Unattributed activity';
+    const subtitle = `${section.entries.length} retained events · ${stats.turns} model turns · ${stats.tools} tool calls · ${stats.hooks} hook calls · ${stats.skills} skill loads`;
+    if (!chapter) {
+      chapter = nodeShell({ kind: 'Request', title, subtitle, tone: 'user' }, { role: 'Request chapter' });
+      chapter.item.classList.add('request-chapter');
+      chapter.context.className = 'chapter-status';
+      chapter.details.append(element('p', 'Chronological interval only: activity here, including other agents, is not attributed to this input. A later chapter does not prove completion. Counts use the same definitions as Statistics on these retained records; calls spanning chapters can appear in both totals, so chapter counts are not additive.', 'group-note'));
+      chapter.children = element('ol', undefined, 'chapter-events');
+      chapter.children.setAttribute('aria-label', 'Original events in chronological order');
+      chapter.details.append(chapter.children);
+    }
+    const open = overlaps.some(previous => previous.open);
+    if (chapter.details.open !== open) chapter.details.open = open;
+    chapter.id = section.id;
+    chapter.ids = new Set(section.entries.map(entry => entry.id));
+    if (chapter.title.textContent !== title) chapter.title.textContent = title;
+    if (chapter.subtitle.textContent !== subtitle) chapter.subtitle.textContent = subtitle;
+    const status = `${section.partial ? 'Partial first chapter · ' : ''}${section.notes.join(' ')}${stats.unlinked ? ` ${stats.unlinked} events lack usable IDs and are excluded from turn/hook/tool totals.` : ''}`;
+    if (chapter.context.textContent !== status) chapter.context.textContent = status;
+    chapter.context.hidden = false;
+    let previous;
+    for (const entry of visible ? section.entries : []) previous = place(chapter.children, nodes.get(entry.id).item, previous);
+    next.push(chapter);
+  }
+  return next;
+}
+
 function render(snapshot) {
   const focused = document.activeElement;
   const focusedId = [...nodes].find(([, node]) => node.item.contains(focused))?.[0];
   const focusedGroup = groups.find(group => group.item.contains(focused) || group.ids.has(focusedId));
-  const chronological = eventOrder.value === 'chronological';
+  const focusedChapter = chapters.find(chapter => chapter.item.contains(focused) || chapter.ids.has(focusedId));
+  const chapterView = eventOrder.value === 'chapters';
+  const chronological = eventOrder.value !== 'grouped';
   const contexts = turnContext(snapshot.entries);
   renderStatistics(snapshot);
   const oldGroups = groups.map(group => ({ group, ids: group.ids, open: group.details.open }));
@@ -238,25 +276,39 @@ function render(snapshot) {
     section.group = group;
     nextGroups.push(group);
   }
+  const nextChapters = reconcileChapters(snapshot, chapterView);
   let previous;
-  for (const section of chronological ? groupSteps(snapshot.entries, true) : sections) {
-    previous = place(timeline, section.group?.item || nodes.get(section.entries[0].id).item, previous);
+  if (chapterView) {
+    for (const chapter of nextChapters) previous = place(timeline, chapter.item, previous);
+  } else {
+    for (const section of chronological ? groupSteps(snapshot.entries, true) : sections) {
+      previous = place(timeline, section.group?.item || nodes.get(section.entries[0].id).item, previous);
+    }
   }
   for (const group of groups) if (chronological || !nextGroups.includes(group)) group.item.remove();
+  for (const chapter of chapters) if (!chapterView || !nextChapters.includes(chapter)) chapter.item.remove();
   for (const group of nextGroups) {
     const wanted = new Set([...group.ids].map(id => nodes.get(id).item));
     for (const item of [...group.children.children]) if (!wanted.has(item)) item.remove();
   }
   groups = nextGroups;
+  chapters = nextChapters;
   // Moving an existing disclosure into a group must not strand keyboard focus.
   let focusTarget = focused?.isConnected ? focused : null;
   if (!focusTarget && focusedGroup) {
     const group = groups.find(group => group === focusedGroup);
     focusTarget = chronological ? nodes.get(group?.ids.values().next().value)?.summary : group?.summary;
   }
+  if (!focusTarget && focusedChapter) {
+    const chapter = chapters.find(chapter => chapter === focusedChapter)
+      || chapters.find(chapter => [...chapter.ids].some(id => focusedChapter.ids.has(id)));
+    focusTarget = chapterView ? chapter?.summary : nodes.get(chapter?.ids.values().next().value)?.summary;
+  }
+  if (!focusTarget && (focusedId || focusedGroup || focusedChapter)) focusTarget = eventOrder;
   if (focusTarget && document.activeElement !== focusTarget) {
     follow.checked = false;
-    let ancestor = focusTarget.parentElement?.closest('details');
+    let ancestor = focusTarget.tagName.toLowerCase() === 'summary'
+      ? focusTarget.parentElement?.parentElement?.closest('details') : focusTarget.parentElement?.closest('details');
     while (ancestor) { ancestor.open = true; ancestor = ancestor.parentElement?.closest('details'); }
     focusTarget.focus({ preventScroll: true });
   }
@@ -268,6 +320,7 @@ function render(snapshot) {
     unsupported: 'This host did not expose the session event API. Reopen in a compatible Copilot desktop session.',
   };
   notice.textContent = messages[snapshot.history] ?? 'History status unavailable.';
+  if (chapterView) notice.textContent += ' Request chapters are chronological intervals, not causal groups or completion reports.';
   if (snapshot.omitted) notice.textContent += ' Older events were omitted; showing the most recent supported events.';
   setConnection(snapshot.history === 'unsupported' ? 'Events unavailable' : `Connected · ${snapshot.entries.length} events`,
     snapshot.history === 'unsupported' ? 'error' : 'connected');
