@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.41",
+    "summary": "Understand what supported read, edit and process results establish, with a route to separately observed validation. Tool status, process exit and overall task correctness remain distinct."
+  },
+  {
     "version": "0.1.40",
     "summary": "Compare two selected retained tool calls with bounded literal argument differences and original evidence links. Protected omissions, incomplete arguments, incompatible calls and expired records remain explicit."
   },

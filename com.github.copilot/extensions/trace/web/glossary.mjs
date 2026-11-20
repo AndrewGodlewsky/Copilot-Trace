@@ -10,7 +10,7 @@ export const vocabulary = Object.freeze(Object.fromEntries(Object.entries({
     label: 'Tool',
     definition: 'A callable operation that lets an agent request work, such as reading a file or running a command.',
     deeper: 'Arguments describe the requested operation. An invocation start does not prove it executed; permission may still be needed. A result reports an outcome, not an independent check that the overall task is correct. A missing result does not mean the tool is still running.',
-    example: 'An agent requests a file read. The invocation records the request; a separate result may report the returned text.',
+    example: 'A successful read reports returned data, whose usefulness is unknown. A successful edit reports a change, whose correctness needs separate evidence. A typed zero process exit describes that command; it does not establish assertion counts or task success.',
     types: ['tool.execution_start', 'tool.execution_complete'],
   },
   hook: {

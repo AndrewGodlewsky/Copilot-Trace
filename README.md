@@ -1,6 +1,6 @@
 # Trace
 
-Current version: **0.1.40**
+Current version: **0.1.41**
 
 A GitHub Copilot desktop plugin for understanding the activity inside your current chat. `/trace` opens a live timeline with turn markers and expandable recorded evidence. This is an initial proof of concept: explanations describe what events mean; they do not infer why the model made a decision.
 
@@ -51,6 +51,8 @@ Subagent handoff details connect the recorded delegated task, child activity and
 Failed-operation details can show later related-attempt suggestions with a disclosed matching rule. Original arguments, results and permission outcomes remain separately inspectable; a suggestion does not establish that an operation was a retry or that a failure was recovered. Missing results and partial retained history stay explicit. See [recovery attempts](docs/recovery-attempts.md).
 
 Recognized assistant check-result statements offer optional comparison with retained validation results. Candidates remain unlinked until you explicitly associate one; a user-linked result does not verify the statement. The exact command, available output and typed process exit stay separate from tool-reported success. Missing evidence is not proof that no check ran. See [claims and recorded results](docs/claim-evidence.md).
+
+For supported result contracts, **Understand this step** explains what a successful read or edit reports and what a typed process exit establishes. Relevance, correctness, assertion results and overall task completion still need separate evidence. Original output remains inspectable, and an optional control opens all retained validation observations without claiming they validated that operation. Unknown or incomplete contracts keep a neutral explanation. See [tool outcomes](docs/tool-outcomes.md).
 
 The optional validation overview in Statistics lists recognized recorded checks with their command, source, time and evidence. Repeated attempts and earlier failures remain visible; missing completion and unknown process status stay explicit. Process exit, tool status and assertion counts have separate meanings. No validation observed here does not mean none was performed. See [validation overview](docs/validation-overview.md).
 

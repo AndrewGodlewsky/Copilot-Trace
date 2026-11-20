@@ -257,7 +257,7 @@ export function compactionAttempts(entries) {
   return attempts;
 }
 
-export function explainStep(entry = {}) {
+export function explainStep(entry = {}, outcome) {
   const lesson = stepLessons.get(entry.type);
   if (!lesson) return {
     happened: 'An unrecognized event type was recorded.',
@@ -270,6 +270,10 @@ export function explainStep(entry = {}) {
   if (['tool.execution_complete', 'hook.end', 'session.compaction_complete'].includes(entry.type)
     && typeof data?.success === 'boolean' && data.success === entry.success) {
     means = `The recorded success field reports ${data.success ? 'success' : 'failure'} for this operation. It is a reported outcome, not an independent check.`;
+  }
+  if (entry.type === 'tool.execution_complete' && outcome) {
+    means = outcome.means;
+    unknown = outcome.unknown;
   }
   if (entry.type === 'subagent.completed' && typeof data?.cancelled === 'boolean') {
     means = data.cancelled ? 'The recorded cancelled field reports cancellation of the delegated work.'
@@ -1018,6 +1022,44 @@ function validationExit(data) {
     || (data.shellExecution !== undefined && (!data.shellExecution || !Number.isSafeInteger(data.shellExecution.exitCode)
       || data.shellExecution.exitCode !== shell.exitCode))) return null;
   return shell;
+}
+
+// Interpret one matched result per invocation; output prose never establishes a process or task outcome.
+export function toolOutcomes(entries) {
+  const outcomes = new Map(), counts = new Map(), positions = new Map(entries.map((entry, index) => [entry, index]));
+  for (const entry of entries) counts.set(entry.id, (counts.get(entry.id) || 0) + 1);
+  for (const { boundaries, start, data } of toolBuckets(entries)) {
+    const result = boundaries.find(entry => entry.type === 'tool.execution_complete');
+    if (!data || !result || positions.get(start) >= positions.get(result)
+      || boundaries.some(entry => counts.get(entry.id) !== 1 || !identityText(entry.id) || !identityText(entry.toolCallId)
+        || !(entry.agentId === '' || identityText(entry.agentId)) || entry.truncated !== false
+        || (Object.hasOwn(entry, 'protectedContentOmitted') && entry.protectedContentOmitted !== false))) continue;
+    const end = explanationData(result);
+    if (!end || typeof end.success !== 'boolean' || end.success !== result.success || Object.hasOwn(end, 'error')
+      || [data, end].some(record => [...mcpFields, 'origin', 'overridesBuiltInTool'].some(field => Object.hasOwn(record, field)))) continue;
+    const operation = requestedOperation(data), validation = validationCommand(data);
+    if (!operation && !validation) continue;
+    const basis = 'This uses an authored argument contract; provider and implementation remain unknown. ';
+    const separate = 'Missing validation is unknown. The validation overview shows separate retained observations, not checks linked to this operation.';
+    let kind, means, unknown;
+    if (data.toolName === 'powershell') {
+      const shell = validationExit(end);
+      if (!shell || (data.arguments.shellId !== undefined && data.arguments.shellId !== shell.shellId)) continue;
+      kind = 'process';
+      means = `The tool protocol reports ${end.success ? 'success' : 'failure'}. The typed process exit ${shell.exitCode} reports ${shell.exitCode === 0 ? 'a zero' : 'a nonzero'} exit for this command only.`;
+      unknown = `Test assertion counts and coverage remain unknown. Output text and assistant assertions do not verify the task. ${basis}${separate}`;
+    } else if (end.success === true && typeof end.result?.content === 'string' && !Array.isArray(end.result)) {
+      if (operation.categories.includes('Read')) {
+        kind = 'read'; means = 'For this supported read contract, tool success reports returned data. Inspect the literal result for what was returned.';
+        unknown = `Whether the returned data is relevant, useful or sufficient for the request remains unknown. ${basis}${separate}`;
+      } else if (operation.categories.includes('Edit')) {
+        kind = 'edit'; means = 'Tool success for this supported edit contract means the operation reported a change. Inspect the literal result for its report.';
+        unknown = `The change’s correctness and the overall task outcome remain unknown. ${basis}${separate}`;
+      }
+    }
+    if (kind) outcomes.set(result.id, { kind, means, unknown });
+  }
+  return outcomes;
 }
 
 function canonicalArguments(value) {

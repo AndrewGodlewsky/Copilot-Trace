@@ -18,6 +18,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
       this.tagName = tagName; this.children = []; this.parentElement = null; this.dataset = {};
       this.attributes = {}; this.listeners = new Map(); this.style = { setProperty() {} };
       this.className = ''; this._text = ''; this.open = false; this.checked = false;
+      this.scrollTop = 0; this.clientTop = 0;
       this.classList = {
         add: name => { if (!this.className.split(' ').includes(name)) this.className += ` ${name}`; },
         toggle: (name, value) => {
@@ -68,7 +69,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
       this.followAtScroll = selectors.get('#follow').checked;
       document.scrollingElement.scrollTop = 120;
     }
-    getBoundingClientRect() { return { height: 0 }; }
+    getBoundingClientRect() { return { top: 0, bottom: 0, height: 0 }; }
   }
   document = { body: new Element('body'), createElement: tag => new Element(tag),
     createElementNS: (_, tag) => new Element(tag) };
@@ -114,7 +115,8 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   }
   statistics.append(selectors.get('#stat-evidence-scope'));
   statistics.tagName = 'dialog'; statistics.className = 'footer-panel';
-  const statisticsClose = new Element('button'); statisticsClose.textContent = 'Close'; statisticsClose.dataset.closePanel = ''; statistics.append(statisticsClose);
+  const statisticsHeading = new Element('div'); statisticsHeading.className = 'panel-heading'; statistics.append(statisticsHeading);
+  const statisticsClose = new Element('button'); statisticsClose.textContent = 'Close'; statisticsClose.dataset.closePanel = ''; statisticsHeading.append(statisticsClose);
   selectors.get('#statistics-button').dataset.panel = 'statistics-panel';
   const retrieval = selectors.get('#retrieval-ledger'); retrieval.tagName = 'details'; statistics.append(retrieval);
   for (const id of ['summary', 'scope', 'list', 'unclassified']) retrieval.append(selectors.get(`#retrieval-${id}`));
@@ -122,6 +124,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   selectors.get('#retrieval-unclassified').append(new Element('summary'));
   selectors.get('#retrieval-unclassified').append(selectors.get('#retrieval-unknown-list'));
   const validation = selectors.get('#validation-overview'); validation.tagName = 'details'; statistics.append(validation);
+  validation.append(new Element('summary'));
   for (const id of ['summary', 'scope', 'list']) validation.append(selectors.get(`#validation-${id}`));
   const repeated = selectors.get('#repeated-activity'); repeated.tagName = 'details'; statistics.append(repeated);
   for (const id of ['summary', 'scope', 'list']) repeated.append(selectors.get(`#repeated-${id}`));
@@ -936,7 +939,7 @@ test('an open glossary never rebinds an evicted or changed example and falls bac
     ui.get('#glossary-source').dispatch('click');
     assert.equal(ui.get('#glossary-panel').open, true, 'A later reused identity cannot revive an expired example.');
     ui.get('#glossary-panel').dispatch('cancel');
-    assert.equal(ui.document.activeElement, replacement ? opener : ui.get('#glossary-button'));
+    assert.equal(ui.document.activeElement, replacement && replacement.type === start.type ? opener : ui.get('#glossary-button'));
     assert.equal(ui.get('#follow').checked, false);
   }
 });
@@ -1357,6 +1360,113 @@ async function claimFixture({ count = 1, output = 'PASS <script>日🧪</script>
   await trace.ready; const entries = trace.snapshot().entries; trace.close(); return entries;
 }
 
+test('outcome lesson preserves literal output and routes explicitly to all retained validation without linking it to the edit', async () => {
+  const checks = await claimFixture({ count: 2, exitCode: 0, output: 'FAIL assertions <script>日🧪</script>' });
+  const editTrace = createTrace({ on() { return () => {}; }, getEvents: async () => [
+    { id: 'edit-start', type: 'tool.execution_start', data: { toolCallId: 'edit', toolName: 'edit', arguments: { path: 'file', old_str: 'old', new_str: 'wrong' } } },
+    { id: 'edit-end', type: 'tool.execution_complete', data: { toolCallId: 'edit', success: true, result: { content: 'Changed <script>日🧪</script>' } } },
+  ] });
+  await editTrace.ready; const edit = editTrace.snapshot().entries; editTrace.close();
+  const ui = fixture(appSource); ui.render(edit);
+  const result = walk(ui.get('#timeline')).find(node => node.className.split(' ').includes('evidence') && node.textContent.includes(edit[1].evidence));
+  assert.match(byClass(result, 'step-means').textContent, /reported a change/i);
+  assert.match(byClass(result, 'step-unknown').textContent, /missing validation.*unknown/i);
+  assert.ok(result.querySelectorAll('pre').some(pre => pre.textContent === edit[1].evidence));
+  const button = result.querySelectorAll('button').find(item => /Inspect validation/.test(item.textContent));
+  assert.ok(button); assert.match(button.textContent, /all retained/i);
+  reveal(button); button.focus(); ui.document.scrollingElement.scrollTop = 261;
+  ui.render([...edit, ...checks]);
+  assert.equal(ui.document.activeElement, button); assert.equal(ui.document.scrollingElement.scrollTop, 261);
+  button.dispatch('click');
+  assert.equal(ui.get('#statistics-panel').open, true); assert.equal(ui.get('#validation-overview').open, true);
+  assert.equal(ui.document.activeElement, ui.get('#validation-overview').querySelector('summary'));
+  assert.equal(ui.get('#follow').checked, false); assert.equal(ui.get('#validation-list').children.length, 2);
+  assert.match(byClass(result, 'step-unknown').textContent, /separate.*not.*linked/i);
+  ui.get('#statistics-panel').close(); assert.equal(ui.document.activeElement, button);
+  for (const mode of ['chronological', 'chapters', 'lanes', 'grouped']) {
+    ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change'); filterMode(ui, 'tools');
+    assert.equal(ui.document.activeElement, button); assert.equal(ui.get('#follow').checked, false);
+    assert.equal(ui.document.scrollingElement.scrollTop, 261);
+    button.dispatch('click'); assert.equal(ui.get('#validation-list').children.length, 2); ui.get('#statistics-panel').close();
+  }
+  filterMode(ui, 'everything');
+  const processLesson = walk(ui.get('#timeline')).find(node => node.className.split(' ').includes('evidence') && node.textContent.includes(checks[1].evidence));
+  assert.match(byClass(processLesson, 'step-means').textContent, /protocol reports success.*exit 0/s);
+  assert.doesNotMatch(byClass(processLesson, 'step-means').textContent, /FAIL assertions|assertions passed/);
+  assert.deepEqual(visibleEvidence(ui), [...edit, ...checks].map(entry => entry.evidence));
+});
+
+test('outcome lesson recomputes after invocation eviction and rejects stale, detached and closed-page validation buttons', async () => {
+  const entries = await claimFixture(), ui = fixture(appSource); ui.render(entries);
+  const result = walk(ui.get('#timeline')).find(node => node.className.split(' ').includes('evidence') && node.textContent.includes(entries[1].evidence));
+  const button = result.querySelectorAll('button').find(item => /Inspect validation/.test(item.textContent)); assert.ok(button);
+  reveal(button); button.focus(); ui.get('#follow').checked = false; ui.document.scrollingElement.scrollTop = 233;
+  ui.render(entries.slice(1), { omitted: 1 });
+  assert.doesNotMatch(byClass(result, 'step-means').textContent, /process exit/i);
+  assert.equal(ui.document.activeElement, button); assert.equal(ui.document.scrollingElement.scrollTop, 233);
+  const changed = await claimFixture({ output: 'Replacement same-ID output' }); ui.render(changed);
+  ui.get('#follow').checked = true; button.dispatch('click');
+  assert.equal(ui.get('#statistics-panel').open, false); assert.equal(ui.get('#follow').checked, true);
+  const fresh = walk(ui.get('#timeline')).filter(node => node.tagName === 'button' && /Inspect validation/.test(node.textContent));
+  ui.render([], { omitted: entries.length }); fresh[0].dispatch('click');
+  assert.equal(ui.get('#statistics-panel').open, false);
+  ui.render(entries); const last = walk(ui.get('#timeline')).find(node => node.tagName === 'button' && /Inspect validation/.test(node.textContent));
+  ui.closePage(); last.dispatch('click'); assert.equal(ui.get('#statistics-panel').open, false);
+});
+
+test('validation navigation clears the measured sticky header in a scrolled drawer with nested offsets without scrolling the timeline', async () => {
+  const entries = await claimFixture();
+  for (const [panelTop, panelHeight, initialScroll, headerHeight, contentTop, offsetTop, summaryHeight] of [
+    [0, 300, 0, 64, 511, 500, 32],
+    [170, 360, 230, 96, 900, 80, 48],
+    [40, 240, 980, 104, 650, 12, 48],
+  ]) {
+    const ui = fixture(appSource); ui.render(entries);
+    const panel = ui.get('#statistics-panel'), header = panel.querySelector('.panel-heading');
+    const disclosure = ui.get('#validation-overview'), summary = disclosure.querySelector('summary');
+    const nested = ui.document.createElement('div'); panel.append(nested); nested.append(disclosure);
+    disclosure.offsetParent = nested; disclosure.offsetTop = offsetTop;
+    panel.clientTop = 2; panel.scrollTop = initialScroll;
+    panel.getBoundingClientRect = () => ({ top: panelTop, bottom: panelTop + panelHeight, height: panelHeight });
+    header.getBoundingClientRect = () => {
+      const top = panelTop + panel.clientTop + Math.max(0, 13 - panel.scrollTop);
+      return { top, bottom: top + headerHeight, height: headerHeight };
+    };
+    summary.getBoundingClientRect = () => {
+      const top = panelTop + panel.clientTop + contentTop - panel.scrollTop;
+      return { top, bottom: top + summaryHeight, height: summaryHeight };
+    };
+    const button = walk(ui.get('#timeline')).find(node => node.tagName === 'button' && /Inspect validation/.test(node.textContent));
+    reveal(button); button.focus(); ui.document.scrollingElement.scrollTop = 317;
+    button.dispatch('click');
+    const target = summary.getBoundingClientRect(), heading = header.getBoundingClientRect();
+    assert.ok(target.top >= heading.bottom + 6, 'Focused summary and its focus outline clear the current sticky header.');
+    assert.ok(target.bottom <= panelTop + panelHeight, 'Summary remains inside the drawer viewport.');
+    assert.notEqual(panel.scrollTop, initialScroll); assert.equal(ui.document.scrollingElement.scrollTop, 317);
+    assert.equal(ui.document.activeElement, summary); assert.equal(ui.get('#follow').checked, false);
+    panel.close(); assert.equal(ui.document.activeElement, button); assert.equal(ui.document.scrollingElement.scrollTop, 317);
+  }
+});
+
+test('changed result type or omission marker cannot leave an active stale outcome route', async () => {
+  const entries = await claimFixture(), ui = fixture(appSource); ui.render(entries);
+  const button = walk(ui.get('#timeline')).find(node => node.tagName === 'button' && /Inspect validation/.test(node.textContent));
+  ui.render(entries.map(entry => entry.id === entries[1].id ? { ...entry, protectedContentOmitted: true } : entry));
+  assert.equal(button.isConnected, false); button.dispatch('click'); assert.equal(ui.get('#statistics-panel').open, false);
+  const marked = walk(ui.get('#timeline')).find(node => node.tagName === 'button' && /Inspect validation/.test(node.textContent));
+  reveal(marked); marked.focus(); ui.document.scrollingElement.scrollTop = 233;
+  ui.render(entries.map(entry => entry.id === entries[1].id ? { ...entry, type: 'session.info' } : entry));
+  assert.equal(marked.isConnected, false); marked.dispatch('click'); assert.equal(ui.get('#statistics-panel').open, false);
+  assert.equal(ui.document.activeElement.tagName, 'summary'); assert.equal(ui.document.activeElement.isConnected, true);
+  assert.equal(ui.document.scrollingElement.scrollTop, 233); assert.equal(ui.get('#follow').checked, false);
+  ui.render(entries);
+  const restored = walk(ui.get('#timeline')).find(node => node.tagName === 'button' && /Inspect validation/.test(node.textContent));
+  reveal(restored); restored.focus();
+  ui.render(entries.map(entry => entry.id === entries[1].id ? { ...entry, type: 'tool.execution_start' } : entry));
+  assert.equal(restored.isConnected, false); restored.dispatch('click'); assert.equal(ui.get('#statistics-panel').open, false);
+  assert.equal(ui.document.activeElement.tagName, 'summary'); assert.equal(ui.document.scrollingElement.scrollTop, 233);
+});
+
 test('validation overview remains optional and shows literal command, typed failure, tool success and unknown assertion counts', async () => {
   const entries = await claimFixture(), ui = fixture(appSource); ui.render(entries);
   const overview = ui.get('#validation-overview'), list = ui.get('#validation-list');
@@ -1729,7 +1839,8 @@ test('conflicting compaction boundaries keep only local evidence links and chang
   const row = ui.get('#timeline').firstElementChild, section = byClass(row, 'compaction');
   assert.equal(byClass(section, 'compaction-summary').hidden, false);
   ui.render([{ ...entries[0], type: 'session.info' }]);
-  assert.equal(byClass(row, 'compaction'), undefined);
+  assert.equal(row.isConnected, false);
+  assert.equal(byClass(ui.get('#timeline'), 'compaction'), undefined);
 });
 
 async function hookFixture() {

@@ -1,4 +1,4 @@
-import { describeActor, explainStep, skillInstructions, compactionAttempts, delegationHandoffs, recoveryAttempts, guidanceComparison, retrievalLedger, toolExtents, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, observerScope, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
+import { describeActor, explainStep, toolOutcomes, skillInstructions, compactionAttempts, delegationHandoffs, recoveryAttempts, guidanceComparison, retrievalLedger, toolExtents, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, observerScope, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -686,7 +686,7 @@ function renderRetrieval(snapshot) {
   panel.scrollTop = scroll;
 }
 
-function row(entry) {
+function row(entry, outcome) {
   const actor = describeActor(entry);
   const node = nodeShell(describeStep(entry), actor);
   const body = element('div', undefined, 'evidence');
@@ -700,7 +700,7 @@ function row(entry) {
     node.activityBox.append(element('p', 'Recorded assistant statement, not a verified reason or a summary of all work in this turn.'), node.activityLink);
     body.append(node.activityBox);
   }
-  const lesson = explainStep(entry);
+  const lesson = explainStep(entry, outcome);
   body.append(element('h3', 'Understand this step'));
   const concept = conceptForEntry(entry);
   if (concept) {
@@ -722,6 +722,7 @@ function row(entry) {
   node.explanation = element('p', lesson.general);
   general.append(element('summary', 'General definition'), node.explanation);
   body.append(general);
+  node.general = general;
   renderSkillInstructions(node, entry);
   const metadata = element('dl', undefined, 'metadata');
   node.metadata = new Map();
@@ -744,6 +745,32 @@ function row(entry) {
   body.append(node.recordedEvidence);
   node.details.append(body);
   return node;
+}
+
+function renderValidationRoute(node, entry) {
+  if (entry.type !== 'tool.execution_complete') {
+    node.validationRoute?.remove(); node.validationRoute = null; return;
+  }
+  const matches = expected => retainedExample([entry], expected)
+    && ['toolCallId', 'toolName', 'success', 'protectedContentOmitted'].every(key => entry[key] === expected[key]);
+  if (node.validationRoute && matches(node.validationRoute.entry)) return;
+  node.validationRoute?.remove();
+  const button = element('button', 'Inspect validation observations (all retained)'); button.type = 'button'; button.entry = entry;
+  button.setAttribute('aria-haspopup', 'dialog'); button.setAttribute('aria-controls', 'statistics-panel'); button.setAttribute('aria-expanded', 'false');
+  button.addEventListener('click', () => {
+    if (panelClosed || !button.isConnected || !retainedExample(lastSnapshot?.entries || [], entry)
+      || !['toolCallId', 'toolName', 'success', 'protectedContentOmitted'].every(key => node.entry[key] === entry[key])) return;
+    if (!footerPanels.openPanel('statistics-panel', button, document.querySelector('#statistics-button'))) return;
+    validationDisclosure.open = true;
+    const panel = document.querySelector('#statistics-panel'), summary = validationDisclosure.querySelector('summary');
+    summary.focus({ preventScroll: true });
+    const headerHeight = panel.querySelector('.panel-heading').getBoundingClientRect().height;
+    // Keep the summary and its focus outline below the sticky header without scrolling the timeline.
+    const visibleTop = panel.getBoundingClientRect().top + panel.clientTop + headerHeight + 8;
+    panel.scrollTop = Math.max(0, panel.scrollTop + summary.getBoundingClientRect().top - visibleTop);
+  });
+  node.body.insertBefore(button, node.general);
+  node.validationRoute = button;
 }
 
 function renderExtent(node, extent) {
@@ -1440,6 +1467,7 @@ function render(snapshot) {
   for (const [id, view] of recoveryViews) if (!recoveryIds.has(id)) { view.details.remove(); recoveryViews.delete(id); }
   const provenance = toolProvenance(snapshot.entries);
   const operations = toolOperations(snapshot.entries);
+  const outcomes = toolOutcomes(snapshot.entries);
   const extents = toolExtents(snapshot.entries, snapshot);
   const claims = claimsClosed ? [] : validationClaims(snapshot.entries, snapshot), checks = claims.length ? validationChecks(snapshot.entries) : [];
   const claimByEvent = new Map(claims.map(claim => [claim.id, claim]));
@@ -1464,8 +1492,10 @@ function render(snapshot) {
   }
   for (const entry of snapshot.entries) {
     let node = nodes.get(entry.id);
-    if (!node) { node = row(entry); nodes.set(entry.id, node); }
+    if (node && node.entry.type !== entry.type) { node.item.remove(); nodes.delete(entry.id); node = null; }
+    if (!node) { node = row(entry, outcomes.get(entry.id)); nodes.set(entry.id, node); }
     node.entry = entry;
+    renderValidationRoute(node, entry);
     renderExtent(node, extents.get(entry.id));
     renderCompaction(node, compactionByEvent.get(entry.id));
     if (recoveryByEvent.has(entry.id)) renderRecovery(node, recoveryByEvent.get(entry.id));
@@ -1495,7 +1525,7 @@ function render(snapshot) {
     for (const [label, value] of metadataValues(entry)) {
       if (node.metadata.get(label).textContent !== value) node.metadata.get(label).textContent = value;
     }
-    const lesson = explainStep(entry);
+    const lesson = explainStep(entry, outcomes.get(entry.id));
     for (const [key, paragraph] of node.lesson) if (paragraph.textContent !== lesson[key]) paragraph.textContent = lesson[key];
     if (node.explanation.textContent !== lesson.general) node.explanation.textContent = lesson.general;
     renderSkillInstructions(node, entry);
