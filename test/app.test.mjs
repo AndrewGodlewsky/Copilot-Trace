@@ -103,6 +103,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     '#capability-scope', '#capability-window', '#capability-list', '#glossary-button', '#glossary-panel',
     '#glossary-concept', '#glossary-definition', '#glossary-deeper', '#glossary-example', '#glossary-source', '#glossary-status',
     '#guidance-comparison', '#guidance-examples',
+    '#prompt-panel', '#prompt-button', '#prompt-draft',
     '#arguments-button', '#arguments-panel', '#arguments-first', '#arguments-second', '#arguments-first-detail', '#arguments-second-detail',
     '#arguments-status', '#arguments-limits', '#arguments-diff', '#arguments-scope',
     '#retrieval-ledger', '#retrieval-summary', '#retrieval-scope', '#retrieval-list', '#retrieval-unclassified', '#retrieval-unknown-list',
@@ -116,6 +117,10 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     element.id = selector.slice(1); selectors.set(selector, element); document.body.append(element);
   }
   const glossary = selectors.get('#glossary-panel');
+  const prompt = selectors.get('#prompt-panel'); prompt.tagName = 'dialog'; prompt.className = 'footer-panel';
+  const promptClose = new Element('button'); promptClose.dataset.closePanel = ''; prompt.append(promptClose);
+  prompt.append(selectors.get('#prompt-draft')); selectors.get('#prompt-draft').value = '';
+  selectors.get('#prompt-button').tagName = 'button'; selectors.get('#prompt-button').dataset.panel = 'prompt-panel';
   const plausible = selectors.get('#plausible-actions'); plausible.tagName = 'details';
   selectors.get('#plausible-summary').tagName = 'summary';
   for (const id of ['summary', 'scope', 'list']) plausible.append(selectors.get(`#plausible-${id}`));
@@ -366,6 +371,30 @@ test('synthetic lessons reveal only their prefix, label all viewers and preserve
   ui.get('#prediction-live').dispatch('click'); ui.get('#examples-open').dispatch('click');
   assert.equal(ui.get('#example-banner').hidden, true); ui.get('#prediction-exit').dispatch('click');
   ui.closePage();
+});
+
+test('prompt inspection pauses playback and Follow without revealing hidden lesson or live evidence', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close()); data.response('private live answer');
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot()), undefined, Date, async () => exampleResponse(exampleText));
+  await ui.refreshFeed(); ui.get('#examples-load').dispatch('click'); await ui.settleExamples();
+  ui.get('#examples-select').value = 'bug-fix'; ui.get('#examples-open').dispatch('click');
+  const before = ui.get('#timeline').textContent;
+  ui.get('#playback-play').dispatch('click'); assert.equal(ui.playbackTimers.size, 1);
+  ui.document.scrollingElement.scrollTop = 137;
+  ui.get('#prompt-button').dispatch('click');
+  assert.equal(ui.get('#prompt-panel').open, true); assert.equal(ui.playbackTimers.size, 0);
+  assert.equal(ui.get('#follow').checked, false); assert.equal(ui.document.scrollingElement.scrollTop, 137);
+  assert.equal(ui.get('#prompt-draft').value, ''); assert.doesNotMatch(ui.get('#prompt-panel').textContent, /Synthetic demonstration|private live|return a \+ b/);
+  data.response('private arrival while drafting'); await ui.refreshFeed();
+  assert.equal(ui.get('#timeline').textContent, before); assert.equal(ui.get('#prompt-draft').value, '');
+  assert.match(ui.get('#learning-activity').textContent, /1 newly received/);
+  ui.get('#prompt-panel').dispatch('cancel'); assert.equal(ui.document.activeElement, ui.get('#prompt-button'));
+  assert.equal(ui.get('#follow').checked, false); assert.equal(ui.playbackTimers.size, 0);
+  ui.get('#playback-exit').dispatch('click');
+  assert.match(ui.get('#timeline').textContent, /private arrival while drafting/);
+  ui.get('#prediction-replay').dispatch('click'); const predictionView = ui.get('#timeline').textContent;
+  ui.get('#prompt-button').dispatch('click'); assert.equal(ui.get('#timeline').textContent, predictionView);
+  assert.equal(ui.get('#prompt-draft').value, ''); ui.closePage();
 });
 
 test('lesson loading failures, bounded data and stale completions never replace or freeze live state', async t => {

@@ -1,6 +1,6 @@
 const get = id => document.getElementById(id);
 
-export function initPanels({ onInspect, onOpen = () => {}, document = globalThis.document }) {
+export function initPanels({ onInspect, onOpen = () => {}, onClose = () => {}, document = globalThis.document }) {
   const panels = [...document.querySelectorAll('.footer-panel')];
   const states = new Map();
   function available(node) {
@@ -25,23 +25,72 @@ export function initPanels({ onInspect, onOpen = () => {}, document = globalThis
     const panel = document.getElementById(id);
     const state = states.get(panel);
     if (state) state.restoreFocus = restoreFocus;
-    if (panel?.open) panel.close();
+    if (panel?.open) { panel.close(); finishClose(panel); }
   }
-  for (const panel of panels) panel.addEventListener('close', () => {
-    if (panel.open) return;
+  function finishClose(panel) {
     const state = states.get(panel);
     if (!state) return;
+    states.delete(panel);
+    onClose(panel.id);
     state.opener.setAttribute('aria-expanded', 'false');
     if (state.restoreFocus && !panels.some(other => other.open)) {
       const target = available(state.opener) ? state.opener : state.fallback;
       if (available(target)) target.focus({ preventScroll: true });
     }
-  });
+  }
+  for (const panel of panels) {
+    panel.addEventListener('close', () => { if (!panel.open) finishClose(panel); });
+    panel.addEventListener('cancel', event => { event.preventDefault(); closePanel(panel.id); });
+  }
   for (const toggle of document.querySelectorAll('[data-panel]')) {
     toggle.addEventListener('click', () => openPanel(toggle.dataset.panel, toggle));
   }
-  for (const button of document.querySelectorAll('[data-close-panel]')) button.addEventListener('click', () => button.closest('dialog').close());
+  for (const button of document.querySelectorAll('[data-close-panel]')) button.addEventListener('click', () => closePanel(button.closest('dialog').id));
   return { openPanel, closePanel };
+}
+
+const promptCopyLimit = 16000;
+const promptOutline = 'Desired outcome:\n\nRelevant files or examples:\n\nConstraints:\n\nAllowed actions:\n\nEvidence of success:\n';
+
+export function preparePromptCopy(draft) {
+  if (typeof draft !== 'string' || draft.length > promptCopyLimit) return null;
+  return draft.length === 0 ? promptOutline : draft;
+}
+
+function initPromptPreparation() {
+  const panel = get('prompt-panel'), draft = get('prompt-draft'), copy = get('prompt-copy');
+  const status = get('prompt-status'), fallback = get('prompt-fallback'), output = get('prompt-output');
+  let generation = 0, dialogIdentity = null, disposed = false;
+  function clearResult() { output.value = ''; fallback.hidden = true; status.textContent = ''; }
+  function clear() {
+    generation++; dialogIdentity = null;
+    draft.value = ''; clearResult(); copy.disabled = false; copy.textContent = 'Copy outline';
+  }
+  function edited() {
+    generation++; clearResult();
+    copy.disabled = draft.value.length > promptCopyLimit;
+    copy.textContent = draft.value.length === 0 ? 'Copy outline' : 'Copy draft';
+    if (copy.disabled) status.textContent = 'This draft exceeds the 16,000 text-unit copy limit. All text is still here. Shorten it, or select text in the draft and use your copy shortcut.';
+  }
+  draft.addEventListener('input', edited);
+  copy.addEventListener('click', async () => {
+    if (disposed || !dialogIdentity || !panel.open || draft.value.length > promptCopyLimit) return;
+    const operation = ++generation, identity = dialogIdentity;
+    const current = () => !disposed && panel.open && dialogIdentity === identity && operation === generation;
+    clearResult(); status.textContent = 'Copying…';
+    try {
+      // Keep private strings in the editor, not in our pending continuation.
+      await navigator.clipboard.writeText(preparePromptCopy(draft.value));
+      if (current()) status.textContent = 'Copied. Nothing was sent to the chat.';
+    } catch {
+      if (!current()) return;
+      output.value = preparePromptCopy(draft.value);
+      fallback.hidden = false; output.focus({ preventScroll: true }); output.select();
+      status.textContent = 'Clipboard access is unavailable or blocked. The exact text is selected below; use your copy shortcut.';
+    }
+  });
+  window.addEventListener('pagehide', () => { disposed = true; clear(); });
+  return { clear, open() { clear(); if (!disposed) { dialogIdentity = {}; edited(); } } };
 }
 
 export function initFooter({ diagnostics, refresh, onInspect }) {
@@ -51,9 +100,13 @@ export function initFooter({ diagnostics, refresh, onInspect }) {
   let serverLogs;
   let serverCapturedAt;
   let logsRequest;
+  const prompt = initPromptPreparation();
   const panels = initPanels({ onInspect, onOpen(id) {
+    if (id === 'prompt-panel') prompt.open();
     if (id === 'releases-panel') void loadMetadata();
     if (id === 'logs-panel') void loadLogs();
+  }, onClose(id) {
+    if (id === 'prompt-panel') prompt.clear();
   } });
   const say = message => { get('footer-status').textContent = message; };
   async function read(route) {

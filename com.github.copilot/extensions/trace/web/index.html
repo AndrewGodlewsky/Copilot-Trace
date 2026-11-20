@@ -266,6 +266,29 @@
         </details>
         <p>Definitions are authored teaching material. Examples cover retained events only, not the whole chat or the model’s full context.</p>
       </dialog>
+      <dialog id="prompt-panel" class="footer-panel" aria-labelledby="prompt-title" aria-describedby="prompt-purpose prompt-discard">
+        <div class="panel-heading"><h2 id="prompt-title">Prepare a prompt</h2><button type="button" data-close-panel>Close and discard</button></div>
+        <p id="prompt-purpose">Use any of these questions before asking for work. This authored checklist is optional; you do not need to fill in every part.</p>
+        <ul class="prompt-checklist">
+          <li><strong>Desired outcome:</strong> What should change? <span>Example: “Show a useful error when an upload fails.”</span></li>
+          <li><strong>Relevant files or examples:</strong> Where should work begin? <span>Example: “Start with upload.ts and this failing test.”</span></li>
+          <li><strong>Constraints:</strong> What must hold? <span>Example: “Keep the public API and avoid new dependencies.”</span></li>
+          <li><strong>Allowed actions:</strong> What may the agent do? <span>Example: “Edit the upload code and tests; ask before deployment.”</span></li>
+          <li><strong>Evidence of success:</strong> How can the result be checked? <span>Example: “Run the upload tests and report remaining failures.”</span></li>
+        </ul>
+        <p>Detail can clarify a request. It cannot guarantee an action sequence or a correct outcome. These examples are suggestions, not instructions to your agent.</p>
+        <label for="prompt-draft">Optional draft</label>
+        <p id="prompt-draft-help">Write freely, or leave this empty to copy a blank outline. Your draft is separate from live activity and learning examples. Nothing here reads, edits or sends chat messages.</p>
+        <textarea id="prompt-draft" rows="5" spellcheck="false" autocomplete="off" aria-describedby="prompt-draft-help prompt-limit prompt-discard"></textarea>
+        <p id="prompt-limit">Copy supports up to 16,000 text units (UTF-16; some emoji use two). Longer pasted text stays intact and editable; use the draft’s copy shortcut or shorten it. Spaces and line breaks are kept.</p>
+        <p id="prompt-discard">This draft stays only in memory. Close, Escape, switching panels or leaving Trace discards it. Copying puts text on your clipboard; closing cannot undo a copy already requested.</p>
+        <div class="panel-actions"><button id="prompt-copy" type="button">Copy outline</button></div>
+        <p id="prompt-status" role="status" aria-atomic="true"></p>
+        <div id="prompt-fallback" hidden>
+          <label for="prompt-output">Text to copy manually</label>
+          <textarea id="prompt-output" readonly rows="5" spellcheck="false" aria-describedby="prompt-status"></textarea>
+        </div>
+      </dialog>
       <dialog id="releases-panel" class="footer-panel" aria-labelledby="releases-title">
         <div class="panel-heading"><h2 id="releases-title">What changed</h2><button type="button" data-close-panel>Close</button></div>
         <div id="release-list"><p>Loading release notes…</p></div>
@@ -299,6 +322,7 @@
         <button id="refresh" type="button">↻ Refresh</button>
         <button id="arguments-button" type="button" aria-controls="arguments-panel" aria-haspopup="dialog" aria-expanded="false">Compare arguments</button>
         <button id="glossary-button" type="button" aria-controls="glossary-panel" aria-haspopup="dialog" aria-expanded="false">Glossary</button>
+        <button id="prompt-button" type="button" data-panel="prompt-panel" aria-controls="prompt-panel" aria-haspopup="dialog" aria-expanded="false">Prompt prep</button>
         <button type="button" data-panel="settings-panel" aria-controls="settings-panel" aria-haspopup="dialog" aria-expanded="false">Settings</button>
         <button type="button" data-panel="logs-panel" aria-controls="logs-panel" aria-haspopup="dialog" aria-expanded="false">Show logs</button>
         <a id="feedback" href="https://github.com/AndrewGodlewsky/Copilot-Trace/issues/new" target="_blank" rel="noopener noreferrer">Feedback</a>

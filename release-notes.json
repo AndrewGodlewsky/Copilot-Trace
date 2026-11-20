@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.46",
+    "summary": "Prepare a prompt with an optional developer checklist and a temporary draft. Copy an outline without sending it to the chat; closing discards the draft."
+  },
+  {
     "version": "0.1.45",
     "summary": "Explore plausible next actions for supported observations, with conditions and evidence links. These optional teaching scenarios stay separate from recorded activity."
   },

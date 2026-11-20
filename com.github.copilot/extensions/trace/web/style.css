@@ -280,6 +280,14 @@ body:has(.footer-panel[open]) { overflow: hidden; }
 .guidance-example { border-top: 1px solid var(--line); padding-block: 12px; min-width: 0; }
 .guidance-example h3 { margin: 0; font-size: 1rem; }
 .guidance-example pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: min(18rem, 40vh); overflow: auto; }
+#prompt-panel { overflow-wrap: anywhere; }
+.prompt-checklist { padding-left: 22px; }
+.prompt-checklist li { margin-block: 10px; }
+.prompt-checklist span { display: block; }
+#prompt-panel label { display: block; margin-block: 12px 6px; font-weight: 600; }
+#prompt-panel button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+#prompt-draft, #prompt-output { display: block; width: 100%; min-width: 0; max-height: 45vh; resize: vertical; background: var(--code); color: inherit; border: 1px solid var(--line); border-radius: 5px; padding: 10px; font: inherit; }
+#prompt-status:empty { display: none; }
 #release-list { max-height: min(24rem, 55vh); overflow: auto; }
 .release + .release { border-top: 1px solid var(--line); }
 .release summary { padding: 8px 0; cursor: pointer; color: var(--model); font-weight: 600; }
