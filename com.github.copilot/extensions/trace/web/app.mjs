@@ -4,6 +4,7 @@ import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
 import { createFollow } from './follow.mjs';
 import { initCapabilities } from './capabilities.mjs';
+import { vocabulary, conceptForEntry, glossaryExample, retainedExample } from './glossary.mjs';
 
 const diagnostics = createDiagnostics();
 diagnostics.record('panel_started');
@@ -42,6 +43,56 @@ let etag;
 let lastSnapshot;
 const capabilityView = initCapabilities({ onInspect: () => { follow.checked = false; } });
 let navigationState;
+const glossaryButton = document.querySelector('#glossary-button');
+const glossaryPanel = document.querySelector('#glossary-panel');
+const glossaryConcept = document.querySelector('#glossary-concept');
+const glossarySource = document.querySelector('#glossary-source');
+let glossaryTarget;
+let glossaryExpired = false;
+for (const [id, concept] of Object.entries(vocabulary)) {
+  const option = element('option', concept.label); option.value = id; glossaryConcept.append(option);
+}
+glossaryButton.addEventListener('click', () => openGlossary('model-turn', null, glossaryButton));
+glossaryConcept.addEventListener('change', () => selectGlossary(glossaryConcept.value));
+glossarySource.addEventListener('click', () => {
+  updateGlossary();
+  if (!glossaryTarget || glossaryExpired) return;
+  footerPanels.closePanel('glossary-panel', { restoreFocus: false });
+  showBoundary(glossaryTarget.id, 'Showing the glossary’s original retained example. Follow live is paused.', glossaryTarget);
+});
+
+function openGlossary(concept, preferred, opener) {
+  if (!footerPanels.openPanel('glossary-panel', opener, glossaryButton)) return;
+  selectGlossary(concept, preferred);
+}
+
+function selectGlossary(id, preferred) {
+  if (!Object.hasOwn(vocabulary, id)) return;
+  const concept = vocabulary[id];
+  glossaryConcept.value = id;
+  document.querySelector('#glossary-definition').textContent = concept.definition;
+  const deeper = document.querySelector('#glossary-deeper');
+  deeper.textContent = concept.deeper;
+  deeper.closest('details').open = false;
+  glossaryTarget = glossaryExample(lastSnapshot?.entries || [], id, preferred);
+  glossaryExpired = false;
+  document.querySelector('#glossary-example').textContent = glossaryTarget
+    ? `Current chat example: ${glossaryTarget.type} · ${glossaryTarget.agentId ? `Agent ${glossaryTarget.agentId}` : 'Main chat'} · ${glossaryTarget.timestamp || 'Time unavailable'}`
+    : `Static example — not from this chat: ${concept.example}`;
+  glossarySource.hidden = !glossaryTarget;
+  updateGlossary();
+}
+
+function updateGlossary() {
+  if (!glossaryPanel.open) return;
+  if (glossaryTarget && !retainedExample(lastSnapshot?.entries || [], glossaryTarget)) glossaryExpired = true;
+  const message = !glossaryTarget ? 'No retained example is available for this concept. The example is authored teaching material.'
+    : glossaryExpired ? 'This example is no longer available or its evidence changed. Reading position unchanged. Choose a concept again to look for a current example.'
+    : 'Retained event from this chat. Open its original evidence to inspect what was recorded.';
+  const status = document.querySelector('#glossary-status');
+  if (status.textContent !== message) status.textContent = message;
+  glossarySource.textContent = glossaryExpired ? 'Example unavailable' : 'Open current chat example';
+}
 eventOrder.addEventListener('change', () => {
   follow.checked = false;
   if (lastSnapshot) render(lastSnapshot);
@@ -191,6 +242,16 @@ function row(entry) {
   }
   const lesson = explainStep(entry);
   body.append(element('h3', 'Understand this step'));
+  const concept = conceptForEntry(entry);
+  if (concept) {
+    node.glossary = element('button', `Learn about ${vocabulary[concept].label.toLowerCase()}`, 'glossary-term');
+    node.glossary.type = 'button';
+    node.glossary.setAttribute('aria-haspopup', 'dialog');
+    node.glossary.setAttribute('aria-controls', 'glossary-panel');
+    node.glossary.setAttribute('aria-expanded', 'false');
+    node.glossary.addEventListener('click', () => openGlossary(conceptForEntry(node.entry), node.entry, node.glossary));
+    body.append(node.glossary);
+  }
   node.lesson = new Map();
   for (const [key, heading] of [['happened', 'What happened'], ['means', 'What the recorded result means'], ['unknown', 'What remains unknown']]) {
     const paragraph = element('p', lesson[key], `step-${key}`);
@@ -455,9 +516,10 @@ function place(parent, item, previous) {
   return item;
 }
 
-function showBoundary(id, message = 'Showing original retained event. Follow live is paused.') {
+function showBoundary(id, message = 'Showing original retained event. Follow live is paused.', expected) {
   const node = nodes.get(id);
-  if (typeof id !== 'string' || !id.length || id.length > 256 || !node || !lastSnapshot?.entries.some(entry => entry.id === id)) {
+  if (typeof id !== 'string' || !id.length || id.length > 256 || !node || !lastSnapshot?.entries.some(entry => entry.id === id)
+    || (expected && !retainedExample(lastSnapshot.entries, expected))) {
     navigationStatus.textContent = 'That event is no longer retained. Reading position unchanged.';
     return;
   }
@@ -626,6 +688,7 @@ function reconcileLanes(snapshot, visible) {
 }
 
 function render(snapshot) {
+  updateGlossary();
   const focused = document.activeElement;
   const focusedId = [...nodes].find(([, node]) => node.item.contains(focused))?.[0];
   const focusedGroup = groups.find(group => group.item.contains(focused) || group.ids.has(focusedId));
@@ -653,6 +716,12 @@ function render(snapshot) {
   for (const entry of snapshot.entries) {
     let node = nodes.get(entry.id);
     if (!node) { node = row(entry); nodes.set(entry.id, node); }
+    node.entry = entry;
+    if (node.glossary) {
+      const concept = conceptForEntry(entry);
+      node.glossary.hidden = !concept;
+      if (concept) node.glossary.textContent = `Learn about ${vocabulary[concept].label.toLowerCase()}`;
+    }
     const context = contexts.get(entry.id);
     const display = describeTurn(entry, context, operations.get(entry.id));
     if (node.title.textContent !== display.title) node.title.textContent = display.title;
@@ -871,6 +940,6 @@ const poller = createPoller({
     setConnection('Disconnected · retrying', 'error');
   },
 });
-initFooter({ diagnostics, refresh: poller.refresh, onInspect: () => { follow.checked = false; } });
+const footerPanels = initFooter({ diagnostics, refresh: poller.refresh, onInspect: () => { follow.checked = false; } });
 window.addEventListener('pagehide', () => { poller.stop(); capabilityView.close(); pageSize.disconnect(); });
 void poller.refresh();

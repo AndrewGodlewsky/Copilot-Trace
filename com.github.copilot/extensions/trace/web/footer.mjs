@@ -1,5 +1,49 @@
 const get = id => document.getElementById(id);
 
+export function initPanels({ onInspect, onOpen = () => {}, document = globalThis.document }) {
+  const panels = [...document.querySelectorAll('.footer-panel')];
+  const states = new Map();
+  function available(node) {
+    if (!node?.isConnected) return false;
+    for (let ancestor = node; ancestor; ancestor = ancestor.parentElement) {
+      if (ancestor.hidden) return false;
+      if (ancestor !== node && ancestor.tagName.toLowerCase() === 'details' && !ancestor.open) return false;
+    }
+    return true;
+  }
+  function openPanel(id, opener, fallback = opener) {
+    const panel = document.getElementById(id);
+    if (!panels.includes(panel) || panels.some(other => other.open)) return false;
+    states.set(panel, { opener, fallback, restoreFocus: true });
+    onInspect(); panel.showModal();
+    opener.setAttribute('aria-expanded', 'true');
+    panel.querySelector('button').focus({ preventScroll: true });
+    onOpen(id);
+    return true;
+  }
+  function closePanel(id, { restoreFocus = true } = {}) {
+    const panel = document.getElementById(id);
+    const state = states.get(panel);
+    if (state) state.restoreFocus = restoreFocus;
+    if (panel?.open) panel.close();
+  }
+  for (const panel of panels) panel.addEventListener('close', () => {
+    if (panel.open) return;
+    const state = states.get(panel);
+    if (!state) return;
+    state.opener.setAttribute('aria-expanded', 'false');
+    if (state.restoreFocus && !panels.some(other => other.open)) {
+      const target = available(state.opener) ? state.opener : state.fallback;
+      if (available(target)) target.focus({ preventScroll: true });
+    }
+  });
+  for (const toggle of document.querySelectorAll('[data-panel]')) {
+    toggle.addEventListener('click', () => openPanel(toggle.dataset.panel, toggle));
+  }
+  for (const button of document.querySelectorAll('[data-close-panel]')) button.addEventListener('click', () => button.closest('dialog').close());
+  return { openPanel, closePanel };
+}
+
 export function initFooter({ diagnostics, refresh, onInspect }) {
   let version = 'unknown';
   let metadata;
@@ -7,8 +51,10 @@ export function initFooter({ diagnostics, refresh, onInspect }) {
   let serverLogs;
   let serverCapturedAt;
   let logsRequest;
-  const panels = [...document.querySelectorAll('.footer-panel')];
-  const toggles = [...document.querySelectorAll('[data-panel]')];
+  const panels = initPanels({ onInspect, onOpen(id) {
+    if (id === 'releases-panel') void loadMetadata();
+    if (id === 'logs-panel') void loadLogs();
+  } });
   const say = message => { get('footer-status').textContent = message; };
   async function read(route) {
     const response = await fetch(route, { signal: AbortSignal.timeout(5000) });
@@ -45,24 +91,6 @@ export function initFooter({ diagnostics, refresh, onInspect }) {
     })();
     return metadataRequest;
   }
-  for (const toggle of toggles) {
-    const panel = get(toggle.dataset.panel);
-    toggle.addEventListener('click', () => {
-      if (panel.open) return;
-      for (const other of panels) if (other.open) other.close();
-      onInspect(); panel.showModal();
-      toggle.setAttribute('aria-expanded', 'true');
-      panel.querySelector('button').focus({ preventScroll: true });
-      if (panel.id === 'releases-panel') void loadMetadata();
-      if (panel.id === 'logs-panel') void loadLogs();
-    });
-    panel.addEventListener('close', () => {
-      if (panel.open) return;
-      toggle.setAttribute('aria-expanded', 'false');
-      if (!panels.some(other => other.open)) toggle.focus({ preventScroll: true });
-    });
-  }
-  for (const button of document.querySelectorAll('[data-close-panel]')) button.addEventListener('click', () => button.closest('dialog').close());
   get('text-size').addEventListener('change', () => {
     const value = get('text-size').value;
     if (['100', '115', '130', '150'].includes(value)) document.documentElement.dataset.textSize = value;
@@ -141,4 +169,5 @@ export function initFooter({ diagnostics, refresh, onInspect }) {
     } finally { if (url) setTimeout(() => URL.revokeObjectURL(url), 60000); }
   });
   void loadMetadata();
+  return panels;
 }

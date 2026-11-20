@@ -11,6 +11,7 @@ export async function startServer(session) {
     ['style.css', 'style.css', 'text/css; charset=utf-8'],
     ['app.mjs', 'app.mjs', 'text/javascript; charset=utf-8'],
     ['presentation.mjs', 'presentation.mjs', 'text/javascript; charset=utf-8'],
+    ['glossary.mjs', 'glossary.mjs', 'text/javascript; charset=utf-8'],
     ['diagnostics.mjs', 'diagnostics.mjs', 'text/javascript; charset=utf-8'],
     ['polling.mjs', 'polling.mjs', 'text/javascript; charset=utf-8'],
     ['footer.mjs', 'footer.mjs', 'text/javascript; charset=utf-8'],

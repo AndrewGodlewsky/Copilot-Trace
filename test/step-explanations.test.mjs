@@ -35,7 +35,9 @@ test('each supported event explains its recorded boundary, teaching meaning and 
     for (const section of ['happened', 'means', 'unknown']) {
       assert.ok(explanation[section].length > 20 && explanation[section].length < 500, `${type}: ${section} is concise and meaningful.`);
     }
-    assert.equal(explanation.general, entry.explanation, `${type}: Preserve the authored definition.`);
+    const concept = presentation.conceptForEntry(entry);
+    assert.equal(explanation.general, concept ? presentation.vocabulary[concept].definition : entry.explanation,
+      `${type}: Use the shared concept definition or preserve the event-specific authored explanation.`);
   }
 });
 

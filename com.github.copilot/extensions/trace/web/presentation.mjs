@@ -1,3 +1,6 @@
+import { vocabulary, conceptForEntry } from './glossary.mjs';
+export { vocabulary, conceptForEntry, glossaryExample, retainedExample } from './glossary.mjs';
+
 const actorRoles = new Map(Object.entries({
   'user.message': 'User',
   'assistant.turn_start': 'Assistant',
@@ -63,7 +66,7 @@ const stepLessons = new Map(Object.entries({
     'Input supplies a request or context; the event is a record of delivery, not a response.',
     'This event does not show whether the assistant read, acted on or correctly answered the input.'],
   'assistant.turn_start': ['The host recorded a model turn starting.',
-    'A turn is one iteration of the agent loop; a request can involve several turns.',
+    vocabulary['model-turn'].definition,
     'The end, outcome and reason for this iteration are not established by its start.'],
   'assistant.turn_end': ['The host recorded a model turn ending.',
     'This iteration ended; more turns or tool calls may follow.',
@@ -84,10 +87,10 @@ const stepLessons = new Map(Object.entries({
     'The reported outcome is unavailable; a result event alone does not establish success.',
     'A tool result does not establish that the user’s task is correct or complete. Missing boundaries leave the call record partial.'],
   'skill.invoked': ['The host recorded a skill being loaded.',
-    'A skill supplies instructions or context. The recorded trigger is unavailable or unrecognized.',
+    `${vocabulary.skill.definition} The recorded trigger is unavailable or unrecognized.`,
     'Loading does not prove the instructions were followed or that a referenced script or command ran. The selection reason remains unknown; skill metadata does not establish tool approval.'],
   'subagent.started': ['The host recorded a delegated agent starting.',
-    'Delegation gives another agent a piece of work; the event records its start.',
+    `${vocabulary.subagent.definition} This event records its start.`,
     'The outcome is not established here. A missing outcome does not mean the agent is still running.'],
   'subagent.completed': ['The host recorded a delegated agent outcome.',
     'Cancellation status is unavailable; the event type alone does not distinguish completion from cancellation.',
@@ -96,7 +99,7 @@ const stepLessons = new Map(Object.entries({
     'This is a failure report for delegated work; the evidence may provide a recorded error.',
     'The root cause, recovery and effect on the overall task are not established by this event alone.'],
   'hook.start': ['The harness recorded a hook pipeline starting.',
-    'Hooks attach automation to lifecycle points. A pipeline record does not prove a configured handler ran.',
+    `${vocabulary.hook.definition} A pipeline record does not prove a configured handler ran.`,
     'This start does not establish the result, what changed or why the assistant chose a related operation. A missing end does not mean it is still running.'],
   'hook.end': ['The harness recorded a hook result.',
     'The reported outcome is unavailable; a result event alone does not establish success.',
@@ -108,7 +111,7 @@ const stepLessons = new Map(Object.entries({
     'The recorded decision result is unavailable or unrecognized.',
     'The decision source is unavailable; the result kind alone does not identify a person.'],
   'session.compaction_start': ['The harness recorded context compaction starting.',
-    'Compaction attempts to reduce conversation context for later turns.',
+    vocabulary.compaction.definition,
     'This start does not establish success or which information later turns will receive.'],
   'session.compaction_complete': ['The harness recorded a context compaction result.',
     'The reported outcome is unavailable; the event type alone does not establish successful compaction.',
@@ -197,7 +200,7 @@ export function explainStep(entry = {}) {
   }
   if (entry.type === 'skill.invoked') {
     const skill = skillInstructions(entry);
-    means = `A skill supplies instructions or context. ${skillTriggers.has(skill.trigger)
+    means = `${vocabulary.skill.definition} ${skillTriggers.has(skill.trigger)
       ? `The recorded trigger is ${skill.trigger}. ` : ''}${skill.triggerExplanation}`;
   }
   if (entry.type === 'user.message' && ['idle', 'steering', 'queued'].includes(data?.delivery) && data.delivery === entry.delivery) {
@@ -220,7 +223,8 @@ export function explainStep(entry = {}) {
   }
   if (!data) unknown += ' Complete, matching event data is unavailable; only the recorded event type is described.';
   return { happened, means, unknown,
-    general: typeof entry.explanation === 'string' && entry.explanation ? entry.explanation : 'No further general definition is available.' };
+    general: vocabulary[conceptForEntry(entry)]?.definition
+      || (typeof entry.explanation === 'string' && entry.explanation ? entry.explanation : 'No further general definition is available.') };
 }
 
 function toolIdentity(entry) {

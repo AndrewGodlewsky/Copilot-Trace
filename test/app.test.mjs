@@ -6,6 +6,7 @@ import * as presentation from '../com.github.copilot/extensions/trace/web/presen
 import { createFollow } from '../com.github.copilot/extensions/trace/web/follow.mjs';
 import { createTrace } from '../com.github.copilot/extensions/trace/trace.mjs';
 import * as capabilities from '../com.github.copilot/extensions/trace/web/capabilities.mjs';
+import * as footer from '../com.github.copilot/extensions/trace/web/footer.mjs';
 
 // A small DOM boundary double exercises reconciliation, not browser layout or native focus behavior.
 function fixture(source, inventoryLoad = async () => { throw new Error('Unexpected inventory request'); }) {
@@ -44,8 +45,21 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     contains(element) { return this === element || this.children.some(child => child.contains(element)); }
     closest(selector) { return this.tagName === selector ? this : this.parentElement?.closest(selector) || null; }
     setAttribute(name, value) { this.attributes[name] = value; }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+    querySelectorAll(selector) {
+      const matches = node => selector.startsWith('.') ? node.className.split(' ').includes(selector.slice(1))
+        : selector === '[data-panel]' ? Boolean(node.dataset.panel)
+        : selector === '[data-close-panel]' ? node.dataset.closePanel !== undefined : node.tagName === selector;
+      return this.children.flatMap(child => [child, ...child.querySelectorAll('*')]).filter(node => selector === '*' || matches(node));
+    }
     addEventListener(name, listener) { if (!this.listeners.has(name)) this.listeners.set(name, []); this.listeners.get(name).push(listener); }
-    dispatch(name) { for (const listener of this.listeners.get(name) || []) listener({ target: this, preventDefault() {} }); }
+    dispatch(name) {
+      let prevented = false;
+      for (const listener of this.listeners.get(name) || []) listener({ target: this, preventDefault() { prevented = true; } });
+      if (name === 'cancel' && !prevented) this.close();
+    }
+    showModal() { this.open = true; }
+    close() { this.open = false; this.dispatch('close'); }
     focus() { assert.ok(this.isConnected, 'Focus target remains connected.'); document.activeElement = this; }
     scrollIntoView() {
       this.scrolled = true;
@@ -69,20 +83,31 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     '#stat-scope', '#stat-unlinked', '#stat-hooks', '#stat-skills', '#statistics-peek', '#footer-dock', '#event-order',
     '#activity-filter', '#reset-filter', '#filter-status', '#filter-empty', '#lane-help',
     '#event-target', '#jump-event', '#navigation-status', '#capabilities', '#capability-refresh', '#capability-status',
-    '#capability-scope', '#capability-window', '#capability-list']) {
+    '#capability-scope', '#capability-window', '#capability-list', '#glossary-button', '#glossary-panel',
+    '#glossary-concept', '#glossary-definition', '#glossary-deeper', '#glossary-example', '#glossary-source', '#glossary-status']) {
     const element = new Element(['#event-order', '#activity-filter', '#event-target'].includes(selector) ? 'select' : selector === '#jump-event' ? 'button' : 'div');
-    selectors.set(selector, element); document.body.append(element);
+    element.id = selector.slice(1); selectors.set(selector, element); document.body.append(element);
   }
+  const glossary = selectors.get('#glossary-panel');
+  glossary.tagName = 'dialog'; glossary.className = 'footer-panel';
+  const close = new Element('button'); close.textContent = 'Close'; close.dataset.closePanel = ''; glossary.append(close);
+  for (const id of ['concept', 'definition', 'deeper', 'example', 'source', 'status']) glossary.append(selectors.get(`#glossary-${id}`));
+  selectors.get('#glossary-concept').tagName = 'select'; selectors.get('#glossary-source').tagName = 'button';
+  selectors.get('#glossary-button').tagName = 'button';
+  const deeper = selectors.get('#glossary-deeper'), more = new Element('details');
+  more.className = 'glossary-depth'; glossary.insertBefore(more, deeper); more.append(deeper);
   selectors.get('#follow').checked = true;
   selectors.get('#event-order').value = 'grouped';
   selectors.get('#activity-filter').value = 'everything';
   selectors.get('#event-target').value = 'failure';
   document.querySelector = selector => selectors.get(selector);
+  document.getElementById = id => selectors.get(`#${id}`);
+  document.querySelectorAll = selector => document.body.querySelectorAll(selector);
   const context = vm.createContext({ ...presentation, document, window: { addEventListener() {} },
     ResizeObserver: class { observe() {} }, createDiagnostics: () => ({ record() {} }),
     createFollow,
     initCapabilities: options => capabilities.initCapabilities({ ...options, document, load: inventoryLoad }),
-    createPoller: () => ({ refresh() {}, stop() {} }), initFooter() {},
+    createPoller: () => ({ refresh() {}, stop() {} }), initFooter: options => footer.initPanels?.({ ...options, document }),
   });
   vm.runInContext(source.replace(/^import .*;\r?\n/gm, ''), context);
   return { document, get: selector => selectors.get(selector),
@@ -225,6 +250,159 @@ function filterMode(ui, value) {
 }
 const byClass = (element, name) => walk(element).find(node => node.className.split(' ').includes(name));
 const evidenceRows = group => byClass(group, 'tool-events').children;
+const reveal = node => {
+  for (let parent = node.parentElement; parent; parent = parent.parentElement) if (parent.tagName === 'details') parent.open = true;
+};
+
+test('glossary offers all concepts with labeled authored fallback and preserves reading state on Close or Escape', () => {
+  const ui = fixture(appSource);
+  ui.render([]);
+  const opener = ui.get('#glossary-button'), panel = ui.get('#glossary-panel'), select = ui.get('#glossary-concept');
+  opener.focus(); ui.document.scrollingElement.scrollTop = 333; opener.dispatch('click');
+  assert.equal(panel.open, true);
+  assert.equal(select.children.length, 8);
+  assert.equal(ui.get('#follow').checked, false);
+  for (const id of ['model-turn', 'tool', 'hook', 'skill', 'context', 'subagent', 'permission', 'compaction']) {
+    select.value = id; select.dispatch('change');
+    assert.equal(ui.get('#glossary-definition').textContent, presentation.vocabulary[id].definition);
+    assert.match(ui.get('#glossary-example').textContent, /Static example.*not from this chat/);
+    assert.match(ui.get('#glossary-status').textContent, /No retained/);
+    assert.equal(ui.get('#glossary-source').hidden, true);
+  }
+  panel.dispatch('cancel');
+  assert.equal(panel.open, false);
+  assert.equal(ui.document.activeElement, opener);
+  assert.equal(ui.document.scrollingElement.scrollTop, 333);
+  assert.equal(ui.get('#follow').checked, false);
+  opener.dispatch('click'); panel.firstElementChild.dispatch('click');
+  assert.equal(panel.open, false); assert.equal(ui.document.activeElement, opener);
+});
+
+test('every relevant event offers its concept and current example without treating source text as markup', () => {
+  const cases = [['assistant.turn_start', 'model-turn'], ['tool.execution_start', 'tool'], ['hook.start', 'hook'],
+    ['skill.invoked', 'skill'], ['user.message', 'context'], ['subagent.started', 'subagent'],
+    ['permission.requested', 'permission'], ['session.compaction_start', 'compaction']];
+  for (const [type, concept] of cases) {
+    const ui = fixture(appSource);
+    const entry = { id: `event-${concept}`, type, agentId: '<img> 日本語 🧪', timestamp: '', evidence: '{}', category: 'host' };
+    ui.render([entry]);
+    const opener = byClass(ui.get('#timeline'), 'glossary-term'); assert.ok(opener, type);
+    reveal(opener); opener.dispatch('click');
+    assert.equal(ui.get('#glossary-concept').value, concept);
+    assert.equal(ui.get('#glossary-definition').textContent, presentation.vocabulary[concept].definition);
+    assert.equal(ui.get('#glossary-source').hidden, false);
+    assert.ok(ui.get('#glossary-example').textContent.includes('<img> 日本語 🧪'));
+    assert.equal(walk(ui.get('#glossary-panel')).some(node => node.tagName === 'img'), false);
+  }
+});
+
+test('live arrival does not replace an authored example until the user chooses a concept again', () => {
+  const ui = fixture(appSource); ui.render([]); ui.get('#glossary-button').dispatch('click');
+  const select = ui.get('#glossary-concept'); select.value = 'tool'; select.dispatch('change');
+  const text = ui.get('#glossary-example').textContent;
+  ui.render([start, end]);
+  assert.equal(ui.get('#glossary-example').textContent, text);
+  assert.equal(ui.get('#glossary-source').hidden, true);
+  select.dispatch('change');
+  assert.equal(ui.get('#glossary-source').hidden, false);
+  assert.match(ui.get('#glossary-example').textContent, /tool.execution_complete/);
+});
+
+test('contextual glossary keeps nested disclosures, view, filter and focus through live updates and ordinary dismissal', () => {
+  for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    const ui = fixture(appSource); ui.get('#event-order').value = mode; ui.render([start, end]); filterMode(ui, 'tools');
+    const opener = byClass(ui.get('#timeline'), 'glossary-term'); assert.ok(opener, mode);
+    for (let parent = opener.parentElement; parent; parent = parent.parentElement) if (parent.tagName === 'details') parent.open = true;
+    const details = opener.closest('details');
+    details.open = true; opener.focus(); ui.document.scrollingElement.scrollTop = 333; opener.dispatch('click');
+    const depth = ui.get('#glossary-deeper').closest('details'); depth.open = true;
+    ui.get('#glossary-source').focus(); ui.get('#glossary-panel').scrollTop = 41;
+    ui.render([start, end, { id: 'later', type: 'session.info', agentId: '', evidence: '{}', timestamp: '' }]);
+    assert.equal(ui.get('#glossary-panel').open, true); assert.equal(depth.open, true);
+    assert.equal(ui.document.activeElement, ui.get('#glossary-source')); assert.equal(ui.get('#glossary-panel').scrollTop, 41);
+    ui.get('#glossary-panel').dispatch('cancel');
+    assert.equal(ui.document.activeElement, opener); assert.equal(details.open, true);
+    assert.equal(ui.get('#event-order').value, mode); assert.equal(ui.get('#activity-filter').value, 'tools');
+    assert.equal(ui.document.scrollingElement.scrollTop, 333); assert.equal(ui.get('#follow').checked, false);
+  }
+});
+
+test('glossary source navigation opens its contextual event from every view and hidden-filter state', () => {
+  for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    const ui = fixture(appSource); ui.get('#event-order').value = mode; ui.render([start, end]);
+    const opener = byClass(ui.get('#timeline'), 'glossary-term'); assert.ok(opener);
+    opener.dispatch('click');
+    assert.match(ui.get('#glossary-example').textContent, /Current chat example/);
+    assert.match(ui.get('#glossary-example').textContent, /tool.execution_start/);
+    filterMode(ui, 'automation');
+    ui.get('#glossary-source').dispatch('click');
+    assert.equal(ui.get('#glossary-panel').open, false);
+    assert.equal(ui.get('#event-order').value, 'chronological'); assert.equal(ui.get('#activity-filter').value, 'everything');
+    const row = ui.get('#timeline').children[0];
+    assert.equal(ui.document.activeElement, row.firstElementChild.firstElementChild);
+    assert.equal(byClass(row, 'recorded-evidence').open, true);
+    assert.equal(byClass(row, 'evidence').textContent.includes(start.evidence), true);
+    assert.equal(ui.get('#follow').checked, false);
+  }
+});
+
+test('an open glossary never rebinds an evicted or changed example and falls back to its stable entry button', () => {
+  for (const replacement of [null, { ...start, agentId: 'other' }, { ...start, timestamp: 'different' },
+    { ...start, type: 'tool.execution_complete' }, { ...start, evidence: '{"replacement":true}' }]) {
+    const ui = fixture(appSource); ui.render([start, end]);
+    const opener = byClass(ui.get('#timeline'), 'glossary-term'); assert.ok(opener); reveal(opener); opener.focus(); opener.dispatch('click');
+    ui.document.scrollingElement.scrollTop = 333;
+    ui.render(replacement ? [replacement, end] : [end], { omitted: 1 });
+    assert.match(ui.get('#glossary-status').textContent, /no longer available|changed/i);
+    ui.get('#glossary-source').dispatch('click');
+    assert.equal(ui.get('#glossary-panel').open, true); assert.equal(ui.document.scrollingElement.scrollTop, 333);
+    ui.render([start, end]);
+    ui.get('#glossary-source').dispatch('click');
+    assert.equal(ui.get('#glossary-panel').open, true, 'A later reused identity cannot revive an expired example.');
+    ui.get('#glossary-panel').dispatch('cancel');
+    assert.equal(ui.document.activeElement, replacement ? opener : ui.get('#glossary-button'));
+    assert.equal(ui.get('#follow').checked, false);
+  }
+});
+
+test('glossary dismissal uses the visible footer fallback when its event is filtered or collapsed', () => {
+  for (const hide of ['filter', 'collapse']) {
+    const ui = fixture(appSource); ui.render([start, end]);
+    const opener = byClass(ui.get('#timeline'), 'glossary-term'); reveal(opener); opener.dispatch('click');
+    if (hide === 'filter') filterMode(ui, 'automation');
+    else opener.closest('details').open = false;
+    ui.get('#glossary-panel').dispatch('cancel');
+    assert.equal(ui.document.activeElement, ui.get('#glossary-button'));
+    assert.equal(ui.get('#follow').checked, false);
+  }
+});
+
+test('the dialog controller keeps the active panel and one focus return when another opener is requested', () => {
+  const ui = fixture(appSource);
+  const other = ui.document.createElement('dialog'); other.id = 'other-panel'; other.className = 'footer-panel';
+  const close = ui.document.createElement('button'); close.dataset.closePanel = ''; other.append(close); ui.document.body.append(other);
+  const otherButton = ui.document.createElement('button'); otherButton.dataset.panel = 'other-panel'; ui.document.body.append(otherButton);
+  const second = ui.document.createElement('dialog'); second.id = 'second-panel'; second.className = 'footer-panel';
+  second.append(ui.document.createElement('button'));
+  // Separate fixture controller: no app listeners are invoked in this lifecycle test.
+  const isolated = ui.document.createElement('body'); isolated.append(otherButton, other, second);
+  const isolatedDocument = { getElementById: id => id === 'other-panel' ? other : second,
+    querySelectorAll: selector => isolated.querySelectorAll(selector) };
+  ui.document.body.append(isolated);
+  let inspected = 0;
+  const control = footer.initPanels({ document: isolatedDocument, onInspect: () => inspected++ });
+  otherButton.dispatch('click');
+  assert.equal(other.open, true); assert.equal(inspected, 1);
+  assert.equal(control.openPanel('second-panel', ui.get('#glossary-button')), false);
+  assert.equal(other.open, true); assert.equal(second.open, false); assert.equal(inspected, 1);
+  close.dispatch('click');
+  assert.equal(other.open, false); assert.equal(ui.document.activeElement, otherButton);
+  assert.equal(other.listeners.get('close').length, 1);
+  assert.equal(control.openPanel('second-panel', ui.get('#glossary-button')), true);
+  control.closePanel('second-panel', { restoreFocus: false });
+  otherButton.focus(); second.dispatch('close');
+  assert.equal(ui.document.activeElement, otherButton, 'A later close event cannot overwrite explicit navigation focus.');
+});
 
 async function skillFixture(content, extra = {}) {
   const trace = createTrace({ on() { return () => {}; }, getEvents: async () => [{
@@ -809,7 +987,8 @@ test('structured explanations and optional literal evidence update without repla
     pre.focus();
     const meaning = byClass(row, 'step-means');
     assert.match(meaning.textContent, /reports success/i);
-    assert.ok(general.textContent.includes('<img> Authored definition 日本語😀'));
+    assert.ok(general.textContent.includes(presentation.vocabulary.tool.definition));
+    assert.equal(general.textContent.includes('<img> Authored definition 日本語😀'), false, 'Legacy copy cannot override the authoritative vocabulary.');
     assert.equal(walk(row).filter(node => node.tagName === 'img').length, 0);
     const replacement = { ...make(false), explanation: 'Updated authored definition.' };
     ui.render([replacement]);
@@ -820,7 +999,7 @@ test('structured explanations and optional literal evidence update without repla
     assert.equal(details.open, true);
     assert.equal(general.open, true);
     assert.equal(evidence.open, true);
-    assert.ok(general.textContent.includes('Updated authored definition.'));
+    assert.ok(general.textContent.includes(presentation.vocabulary.tool.definition));
     ui.render([{ ...replacement, truncated: true }]);
     assert.match(meaning.textContent, /outcome.*unavailable/i);
     assert.match(byClass(row, 'step-unknown').textContent, /complete.*matching.*unavailable/i);

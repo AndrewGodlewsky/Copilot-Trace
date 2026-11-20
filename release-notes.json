@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.26",
+    "summary": "Learn core AI-agent terms through a contextual glossary with retained event examples. Definitions and deeper explanations share one vocabulary."
+  },
+  {
     "version": "0.1.25",
     "summary": "Statistics can compare a current capability snapshot with retained tool and skill use. Scope, freshness and unknown availability stay explicit."
   },

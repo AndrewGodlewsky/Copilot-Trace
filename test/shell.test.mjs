@@ -18,7 +18,7 @@ test('serves only authenticated local assets, with restrictive headers', async t
   assert.equal((await fetch(server.url + 'style.css')).status, 200);
   assert.equal((await fetch(server.url + 'app.mjs')).status, 200);
   assert.equal((await fetch(server.url + 'presentation.mjs')).status, 200);
-  for (const module of ['footer.mjs', 'diagnostics.mjs', 'polling.mjs', 'follow.mjs']) assert.equal((await fetch(server.url + module)).status, 200);
+  for (const module of ['footer.mjs', 'diagnostics.mjs', 'polling.mjs', 'follow.mjs', 'glossary.mjs']) assert.equal((await fetch(server.url + module)).status, 200);
   const metadata = await (await fetch(server.url + 'metadata')).json();
   const manifest = JSON.parse(await readFile(new URL('../plugin.json', import.meta.url), 'utf8'));
   assert.equal(metadata.version, manifest.version);

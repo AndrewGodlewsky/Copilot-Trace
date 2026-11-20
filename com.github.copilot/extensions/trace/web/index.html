@@ -111,6 +111,16 @@
           </details>
         </div>
       </dialog>
+      <dialog id="glossary-panel" class="footer-panel" aria-labelledby="glossary-title">
+        <div class="panel-heading"><h2 id="glossary-title">AI glossary</h2><button type="button" data-close-panel>Close</button></div>
+        <label for="glossary-concept">Concept <select id="glossary-concept"></select></label>
+        <p id="glossary-definition"></p>
+        <details class="glossary-depth"><summary>More about this concept</summary><p id="glossary-deeper"></p></details>
+        <p id="glossary-example"></p>
+        <button id="glossary-source" type="button" hidden>Open current chat example</button>
+        <p id="glossary-status" role="status" aria-atomic="true"></p>
+        <p>Definitions are authored teaching material. Examples cover retained events only, not the whole chat or the model’s full context.</p>
+      </dialog>
       <dialog id="releases-panel" class="footer-panel" aria-labelledby="releases-title">
         <div class="panel-heading"><h2 id="releases-title">What changed</h2><button type="button" data-close-panel>Close</button></div>
         <div id="release-list"><p>Loading release notes…</p></div>
@@ -142,6 +152,7 @@
         <span class="footer-brand">Trace</span>
         <button id="plugin-version" type="button" data-panel="releases-panel" aria-controls="releases-panel" aria-haspopup="dialog" aria-expanded="false">Version…</button>
         <button id="refresh" type="button">↻ Refresh</button>
+        <button id="glossary-button" type="button" aria-controls="glossary-panel" aria-haspopup="dialog" aria-expanded="false">Glossary</button>
         <button type="button" data-panel="settings-panel" aria-controls="settings-panel" aria-haspopup="dialog" aria-expanded="false">Settings</button>
         <button type="button" data-panel="logs-panel" aria-controls="logs-panel" aria-haspopup="dialog" aria-expanded="false">Show logs</button>
         <a id="feedback" href="https://github.com/AndrewGodlewsky/Copilot-Trace/issues/new" target="_blank" rel="noopener noreferrer">Feedback</a>

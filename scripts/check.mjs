@@ -48,7 +48,7 @@ assert.doesNotMatch(logo, /<(script|foreignObject)\b|\b(?:href|onload)=|<linearG
 const skill = await readFile(join(root, 'skills/trace/SKILL.md'), 'utf8');
 assert.match(skill, /^---\r?\nname: trace\r?\n/);
 assert.match(skill, /open_canvas/);
-for (const asset of ['index.html', 'style.css', 'app.mjs', 'presentation.mjs', 'footer.mjs', 'diagnostics.mjs', 'polling.mjs', 'follow.mjs', 'capabilities.mjs']) await readFile(join(root, 'com.github.copilot/extensions/trace/web', asset));
+for (const asset of ['index.html', 'style.css', 'app.mjs', 'presentation.mjs', 'glossary.mjs', 'footer.mjs', 'diagnostics.mjs', 'polling.mjs', 'follow.mjs', 'capabilities.mjs']) await readFile(join(root, 'com.github.copilot/extensions/trace/web', asset));
 async function syntax(folder) {
   for (const entry of await readdir(folder, { withFileTypes: true })) {
     const path = join(folder, entry.name);

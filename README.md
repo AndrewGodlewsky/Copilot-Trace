@@ -1,6 +1,6 @@
 # Trace
 
-Current version: **0.1.25**
+Current version: **0.1.26**
 
 A GitHub Copilot desktop plugin for understanding the activity inside your current chat. `/trace` opens a live timeline with turn markers and expandable recorded evidence. This is an initial proof of concept: explanations describe what events mean; they do not infer why the model made a decision.
 
@@ -29,6 +29,8 @@ Hook summaries explain when a documented hook type runs and distinguish reported
 Skill details preview the instructions supplied in the recorded load event, with the exact retained text available to expand. The recorded trigger distinguishes user invocation, agent invocation and context loading; unavailable or shortened evidence stays explicit. Loading instructions does not prove that referenced scripts ran or that every instruction was followed. Trace does not read the current skill file to replace historical content. See [skill instructions](docs/skill-instructions.md).
 
 Statistics also offers an optional capability comparison. Refresh its snapshot to compare the current main-session tool and skill catalog with retained observed use. The capture time and scope remain visible: not observed here does not mean unused, and today's catalog cannot establish past or child-agent availability. Skill model-invocation availability remains unknown when the host omits it. Refreshing reads existing metadata only. See [capability inventory](docs/capability-inventory.md).
+
+Open **Glossary** from the footer or a term button in an event's details for explanations of model turns, tools, hooks, skills, context, subagents, permissions and compaction. Start with a short definition, expand for more detail, and inspect a retained event example when available. Static teaching examples and expired evidence are labeled explicitly. The glossary shares its vocabulary with event explanations and does not control the agent. See [glossary](docs/glossary.md).
 
 Trace keeps up to 300 recent supported events per panel in memory, with up to 12,000 UTF-16 code units of evidence per event; omissions and shortening are labeled. Token deltas, canvas bookkeeping and replay checkpoint copies are excluded. Encrypted/opaque reasoning fields are omitted. Closing the panel releases its observer and server. Trace makes no model requests, saves no transcripts and reads no project files. The host may retain its own logs; event payloads can contain sensitive chat content, file paths and tool arguments.
 
