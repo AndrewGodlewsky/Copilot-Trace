@@ -1,6 +1,6 @@
 # Trace
 
-Current version: **0.1.29**
+Current version: **0.1.30**
 
 A GitHub Copilot desktop plugin for understanding the activity inside your current chat. `/trace` opens a live timeline with turn markers and expandable recorded evidence. This is an initial proof of concept: explanations describe what events mean; they do not infer why the model made a decision.
 
@@ -30,6 +30,8 @@ Skill details preview the instructions supplied in the recorded load event, with
 
 Statistics also offers an optional capability comparison. Refresh its snapshot to compare the current main-session tool and skill catalog with retained observed use. The capture time and scope remain visible: not observed here does not mean unused, and today's catalog cannot establish past or child-agent availability. Skill model-invocation availability remains unknown when the host omits it. Refreshing reads existing metadata only. See [capability inventory](docs/capability-inventory.md).
 
+The optional instruction-source view separates current host-reported sources and declared scopes from historical skill loads. Refresh requests a source snapshot from the current main session; its text may reflect files changed after a turn, and listed sources are not proof their bodies reached the model. Recorded skill loads keep their original text and evidence links. Missing load times, scope and instruction hierarchy stay unknown. See [instruction sources](docs/instruction-sources.md).
+
 The optional **Retrieval ledger** in Statistics lists recognized recorded reads, searches and web retrieval attempts. It separates requested targets and ranges from successful returned text, failed attempts and missing results, with links to original evidence. Repeated operations and distinct recorded references have separate counts; references are not a count of physical files. Returned information does not prove understanding, use or continued presence in active context. See [retrieval ledger](docs/retrieval-ledger.md).
 
 Partial-evidence labels distinguish requested ranges and excerpts, explicit host-shortened output previews, Trace's own evidence clipping and the retained-history window. Available limits keep their recorded units; unknown coverage stays unknown. Trace does not read a current file or a host output file to fill gaps. See [partial evidence](docs/partial-evidence.md).
@@ -38,7 +40,7 @@ Contextual scope help explains incomplete history, omitted events, shortened evi
 
 Open **Glossary** from the footer or a term button in an event's details for explanations of model turns, tools, hooks, skills, context, subagents, permissions and compaction. Start with a short definition, expand for more detail, and inspect a retained event example when available. Static teaching examples and expired evidence are labeled explicitly. The glossary shares its vocabulary with event explanations and does not control the agent. See [glossary](docs/glossary.md).
 
-Trace keeps up to 300 recent supported events per panel in memory, with up to 12,000 UTF-16 code units of evidence per event; omissions and shortening are labeled. Token deltas, canvas bookkeeping and replay checkpoint copies are excluded. Encrypted/opaque reasoning fields are omitted. Closing the panel releases its observer and server. Trace makes no model requests, saves no transcripts and reads no project files. The host may retain its own logs; event payloads can contain sensitive chat content, file paths and tool arguments.
+Trace keeps up to 300 recent supported events per panel in memory, with up to 12,000 UTF-16 code units of evidence per event; omissions and shortening are labeled. Token deltas, canvas bookkeeping and replay checkpoint copies are excluded. Encrypted/opaque reasoning fields are omitted. Closing the panel releases its observer and server. Trace makes no model requests and saves no transcripts. Instruction refresh requests bounded source content from the host; Trace does not scan project paths. The host may retain its own logs; event payloads and source snapshots can contain sensitive instruction text, chat content, file paths and tool arguments.
 
 ## Footer controls
 

@@ -6,11 +6,12 @@ import * as presentation from '../com.github.copilot/extensions/trace/web/presen
 import { createFollow } from '../com.github.copilot/extensions/trace/web/follow.mjs';
 import { createTrace } from '../com.github.copilot/extensions/trace/trace.mjs';
 import * as capabilities from '../com.github.copilot/extensions/trace/web/capabilities.mjs';
+import * as instructions from '../com.github.copilot/extensions/trace/web/instructions.mjs';
 import * as footer from '../com.github.copilot/extensions/trace/web/footer.mjs';
 import { createPoller } from '../com.github.copilot/extensions/trace/web/polling.mjs';
 
 // A small DOM boundary double exercises reconciliation, not browser layout or native focus behavior.
-function fixture(source, inventoryLoad = async () => { throw new Error('Unexpected inventory request'); }, feedLoad) {
+function fixture(source, inventoryLoad = async () => { throw new Error('Unexpected inventory request'); }, feedLoad, instructionLoad = async () => { throw new Error('Unexpected instruction request'); }) {
   let document;
   class Element {
     constructor(tagName) {
@@ -87,6 +88,8 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     '#capability-scope', '#capability-window', '#capability-list', '#glossary-button', '#glossary-panel',
     '#glossary-concept', '#glossary-definition', '#glossary-deeper', '#glossary-example', '#glossary-source', '#glossary-status',
     '#retrieval-ledger', '#retrieval-summary', '#retrieval-scope', '#retrieval-list', '#retrieval-unclassified', '#retrieval-unknown-list',
+    '#instruction-sources', '#instruction-refresh', '#instruction-status', '#instruction-scope', '#instruction-window', '#instruction-current', '#instruction-loads',
+    '#instruction-inspector', '#instruction-title', '#instruction-detail', '#instruction-body', '#instruction-original', '#instruction-selection-status',
     '#statistics-panel', '#statistics-button', '#evidence-scope', '#scope-summary', '#scope-view', '#stat-evidence-scope', '#stat-scope-summary']) {
     const element = new Element(['#event-order', '#activity-filter', '#event-target'].includes(selector) ? 'select' : selector === '#jump-event' ? 'button' : 'div');
     element.id = selector.slice(1); selectors.set(selector, element); document.body.append(element);
@@ -106,6 +109,11 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   selectors.get('#retrieval-unclassified').tagName = 'details';
   selectors.get('#retrieval-unclassified').append(new Element('summary'));
   selectors.get('#retrieval-unclassified').append(selectors.get('#retrieval-unknown-list'));
+  const instruction = selectors.get('#instruction-sources'); instruction.tagName = 'details'; statistics.append(instruction);
+  for (const id of ['refresh', 'status', 'scope', 'window', 'current', 'loads', 'inspector']) instruction.append(selectors.get(`#instruction-${id}`));
+  for (const id of ['title', 'detail', 'body', 'original', 'selection-status']) selectors.get('#instruction-inspector').append(selectors.get(`#instruction-${id}`));
+  for (const id of ['refresh', 'original']) selectors.get(`#instruction-${id}`).tagName = 'button';
+  selectors.get('#instruction-body').tagName = 'pre';
   glossary.tagName = 'dialog'; glossary.className = 'footer-panel';
   const close = new Element('button'); close.textContent = 'Close'; close.dataset.closePanel = ''; glossary.append(close);
   for (const id of ['concept', 'definition', 'deeper', 'example', 'source', 'status']) glossary.append(selectors.get(`#glossary-${id}`));
@@ -124,6 +132,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     ResizeObserver: class { observe() {} }, createDiagnostics: () => ({ record() {} }),
     createFollow,
     initCapabilities: options => capabilities.initCapabilities({ ...options, document, load: inventoryLoad }),
+    initInstructionSources: options => instructions.initInstructionSources({ ...options, document, load: instructionLoad }),
     fetch: feedLoad, AbortSignal,
     createPoller: options => feedLoad ? createPoller({ ...options, schedule: () => 1, cancel() {} }) : ({ refresh() {}, stop() {} }),
     initFooter: options => footer.initPanels?.({ ...options, document }),
@@ -133,6 +142,8 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     refreshFeed() { return vm.runInContext('poller.refresh();', context); },
     refreshCapabilities() { return vm.runInContext('capabilityView.refresh();', context); },
     closeCapabilities() { vm.runInContext('capabilityView.close();', context); },
+    refreshInstructions() { return vm.runInContext('instructionView.refresh();', context); },
+    closeInstructions() { vm.runInContext('instructionView.close();', context); },
     syncFollowing() { vm.runInContext('following.sync();', context); },
     render(entries, extra = {}) {
       context.fixtureSnapshot = { entries, history: 'ready', omitted: 0, ...extra };
@@ -649,6 +660,152 @@ async function skillFixture(content, extra = {}) {
   trace.close();
   return entry;
 }
+
+const instructionInventory = (content = 'Current <script>🧪</script>', extra = {}) => ({ schemaVersion: 1, scope: 'main-session', capturedAt: '2026-11-20T12:10:00Z',
+  sources: { status: 'ready', omitted: 0, invalid: 0, clipped: 0, items: [{ id: 'file', label: 'Literal <file>', sourcePath: 'nested AGENTS.md',
+    type: 'nested-agents', location: 'working-directory', applyTo: null, defaultDisabled: true, content, contentStatus: 'complete', identityValid: true }], ...extra } });
+
+test('instruction view refreshes only on request and preserves the inspected capture when current sources change', async () => {
+  let calls = 0, current = instructionInventory();
+  const ui = fixture(appSource, undefined, undefined, async () => { calls++; return current; });
+  ui.render([await skillFixture('Old loaded body')]);
+  ui.get('#instruction-sources').open = true; ui.get('#instruction-sources').dispatch('toggle');
+  assert.equal(calls, 0); assert.equal(ui.get('#follow').checked, false);
+  assert.match(ui.get('#instruction-status').textContent, /unknown until.*request/i);
+  await ui.refreshInstructions();
+  assert.equal(calls, 1);
+  const button = walk(ui.get('#instruction-current')).find(node => node.tagName === 'button');
+  assert.ok(button, 'Current source has a captured snapshot inspection control.'); button.dispatch('click');
+  assert.equal(ui.get('#instruction-body').textContent, current.sources.items[0].content);
+  assert.match(ui.get('#instruction-detail').textContent, /starts disabled.*current enabled state unknown/i);
+  assert.match(ui.get('#instruction-detail').textContent, /scope unknown|applicability.*unknown/i);
+  assert.match(ui.get('#instruction-detail').textContent, /Discovery\/index/);
+  const body = ui.get('#instruction-body'); body.scrollTop = 42; body.focus();
+  current = instructionInventory('Changed current body'); await ui.refreshInstructions();
+  assert.equal(body.textContent, 'Current <script>🧪</script>'); assert.equal(body.scrollTop, 42);
+  assert.equal(ui.document.activeElement, body); assert.match(ui.get('#instruction-selection-status').textContent, /earlier snapshot/i);
+  walk(ui.get('#instruction-current')).find(node => node.tagName === 'button').dispatch('click');
+  assert.equal(body.textContent, 'Changed current body');
+  assert.equal(walk(ui.get('#instruction-sources')).some(node => ['script', 'a', 'img'].includes(node.tagName)), false);
+  ui.closeInstructions();
+});
+
+test('skill preview opens historical instruction inspection and exact original evidence without a host refresh', async () => {
+  const entry = await skillFixture('Exact historical <body> 🧪', { source: 'sdk' });
+  const ui = fixture(appSource); ui.render([entry]);
+  const open = walk(ui.get('#timeline')).find(node => node.tagName === 'button' && node.textContent === 'Inspect instruction sources');
+  assert.ok(open, 'Skill preview connects to instruction source inspection.'); open.dispatch('click');
+  assert.equal(ui.get('#statistics-panel').open, true); assert.equal(ui.get('#instruction-sources').open, true);
+  assert.equal(ui.get('#instruction-body').textContent, 'Exact historical <body> 🧪');
+  assert.match(ui.get('#instruction-detail').textContent, /2026-11-20T12:00:00Z/);
+  assert.equal(ui.get('#follow').checked, false);
+  ui.get('#instruction-original').dispatch('click');
+  assert.equal(ui.get('#statistics-panel').open, false); assert.equal(ui.get('#event-order').value, 'chronological');
+  assert.equal(byClass(ui.get('#timeline').firstElementChild, 'recorded-evidence').open, true);
+  ui.closeInstructions();
+});
+
+test('full instruction inspector shows a long retained skill body without the timeline preview expansion instruction', async () => {
+  const content = 'Exact historical <body> 🧪\n'.repeat(40);
+  assert.ok(content.length > 600);
+  const entry = await skillFixture(content, { source: 'sdk' });
+  const ui = fixture(appSource); ui.render([entry]);
+  const preview = byClass(ui.get('#timeline').firstElementChild, 'skill-instructions');
+  assert.match(preview.textContent, /Preview shortened\. Expand Exact retained instructions/);
+  walk(preview).find(node => node.tagName === 'button' && node.textContent === 'Inspect instruction sources').dispatch('click');
+  assert.equal(ui.get('#instruction-body').textContent, content);
+  assert.equal(ui.get('#instruction-body').hidden, false);
+  assert.match(ui.get('#instruction-detail').textContent, /Complete instruction body retained/);
+  assert.doesNotMatch(ui.get('#instruction-detail').textContent, /Preview shortened|Expand Exact retained instructions/);
+  ui.closeInstructions();
+});
+
+test('full instruction inspector preserves empty, missing and shortened-event body explanations', async () => {
+  const complete = await skillFixture('Original body');
+  for (const [entry, note] of [
+    [await skillFixture(''), /recorded an empty instruction body/],
+    [await skillFixture(undefined), /host did not record a text instruction body/],
+    [{ ...complete, truncated: true }, /shortened the event evidence.*cannot recover the complete instruction body/],
+  ]) {
+    const ui = fixture(appSource); ui.render([entry]);
+    walk(ui.get('#instruction-loads')).find(node => node.tagName === 'button').dispatch('click');
+    assert.match(ui.get('#instruction-detail').textContent, note);
+    assert.equal(ui.get('#instruction-body').textContent, '');
+    ui.closeInstructions();
+  }
+});
+
+test('instruction skill links expire on changed evidence and eviction without moving reading position', async () => {
+  const entry = await skillFixture('Frozen original body', { source: 'sdk' });
+  const ui = fixture(appSource); ui.render([entry]);
+  ui.get('#statistics-button').dispatch('click'); ui.get('#instruction-sources').open = true;
+  const button = walk(ui.get('#instruction-loads')).find(node => node.tagName === 'button');
+  assert.ok(button, 'Retained skills are available without a current catalog.'); button.dispatch('click');
+  const body = ui.get('#instruction-body'); body.focus(); body.scrollTop = 33;
+  const changed = await skillFixture('Changed evidence body', { source: 'sdk' });
+  ui.render([changed]);
+  assert.equal(body.textContent, 'Frozen original body'); assert.equal(body.scrollTop, 33); assert.equal(ui.document.activeElement, body);
+  assert.match(ui.get('#instruction-selection-status').textContent, /no longer retained|evidence changed/i);
+  assert.equal(ui.get('#instruction-original').disabled, true);
+  ui.get('#instruction-original').dispatch('click'); assert.equal(ui.get('#statistics-panel').open, true);
+  ui.render([], { omitted: 1 });
+  assert.match(ui.get('#instruction-loads').textContent, /No retained skill loads/);
+  assert.equal(ui.get('#instruction-body').textContent, 'Frozen original body');
+  ui.closeInstructions();
+});
+
+test('instruction source groups preserve open disclosures and recover focus when a retained load disappears', async () => {
+  const entry = await skillFixture('Original body', { source: 'sdk' });
+  const ui = fixture(appSource); ui.render([entry]);
+  const details = walk(ui.get('#instruction-loads')).find(node => node.tagName === 'details');
+  assert.ok(details, 'Skill identity has a repeated-load disclosure.'); details.open = true;
+  const button = walk(details).find(node => node.tagName === 'button'); button.focus();
+  ui.get('#statistics-panel').scrollTop = 80;
+  ui.render([entry, { ...start, id: 'other' }]);
+  assert.equal(details.open, true); assert.equal(ui.document.activeElement, button); assert.equal(ui.get('#statistics-panel').scrollTop, 80);
+  ui.render([]);
+  assert.equal(ui.document.activeElement, ui.get('#instruction-loads')); assert.equal(ui.get('#follow').checked, false);
+  ui.closeInstructions();
+});
+
+test('instruction refresh races, rejected loads and close cannot replace the latest inspection', async () => {
+  const pending = []; const ui = fixture(appSource, undefined, undefined, signal => new Promise(resolve => pending.push({ signal, resolve })));
+  const first = ui.refreshInstructions(), second = ui.refreshInstructions();
+  assert.equal(pending[0].signal.aborted, true); assert.match(ui.get('#instruction-status').textContent, /Reading/);
+  pending[1].resolve(instructionInventory('Newest')); await second;
+  pending[0].resolve(instructionInventory('Stale')); await first;
+  walk(ui.get('#instruction-current')).find(node => node.tagName === 'button').dispatch('click');
+  assert.equal(ui.get('#instruction-body').textContent, 'Newest');
+  const malformed = ui.refreshInstructions(); pending[2].resolve({ schemaVersion: 1 }); await malformed;
+  assert.match(ui.get('#instruction-status').textContent, /Refresh unavailable/); assert.equal(ui.get('#instruction-body').textContent, 'Newest');
+  const last = ui.refreshInstructions(); ui.closeInstructions(); assert.equal(pending[3].signal.aborted, true);
+  pending[3].resolve(instructionInventory('After close')); await last;
+  assert.equal(ui.get('#instruction-body').textContent, 'Newest');
+});
+
+test('empty and unsupported source states retain recorded skill evidence with explicit incompleteness', async () => {
+  for (const state of ['ready', 'unsupported', 'timeout', 'malformed', 'session-mismatch']) {
+    const ui = fixture(appSource, undefined, undefined, async () => instructionInventory('', { status: state, items: [] }));
+    ui.render([await skillFixture(undefined)]); await ui.refreshInstructions();
+    assert.match(ui.get('#instruction-status').textContent, new RegExp(state));
+    assert.match(ui.get('#instruction-current').textContent, state === 'ready' ? /No sources reported.*does not mean/i : /No current source snapshot/i);
+    assert.ok(walk(ui.get('#instruction-loads')).some(node => node.tagName === 'button'));
+    assert.match(ui.get('#instruction-scope').textContent, /empty source list can omit instructions/i);
+    ui.closeInstructions();
+  }
+});
+
+test('instruction inspection labels invalid load timestamps and malformed source metadata as unknown', async () => {
+  const entry = await skillFixture('Exact body', { path: {}, source: [] });
+  entry.timestamp = 'not-a-date'; entry.evidence = JSON.stringify({ ...JSON.parse(entry.evidence), timestamp: entry.timestamp });
+  const ui = fixture(appSource); ui.render([entry]);
+  const button = walk(ui.get('#instruction-loads')).find(node => node.tagName === 'button');
+  assert.match(button.textContent, /time unknown/); button.dispatch('click');
+  assert.match(ui.get('#instruction-detail').textContent, /Recorded skill load: time unknown/);
+  assert.match(ui.get('#instruction-detail').textContent, /Recorded source: unknown/);
+  assert.match(ui.get('#instruction-detail').textContent, /Recorded path: unknown/);
+  ui.closeInstructions();
+});
 
 test('skill rows disclose bounded literal instructions and exact full text without interpreting markup', async () => {
   const content = '# Instructions 🧪\n\n<script>literal</script>\n```sh\n  keep spacing\n```\n' + '日本語 '.repeat(500);

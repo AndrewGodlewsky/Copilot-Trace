@@ -107,6 +107,25 @@
           </details>
           <h3>Recorded hook pipeline types</h3><ul id="stat-hooks"></ul>
           <h3>Skills loaded</h3><ul id="stat-skills"></ul>
+          <details id="instruction-sources" class="instruction-sources">
+            <summary>Instruction sources and recorded loads</summary>
+            <p id="instruction-scope"></p>
+            <h3>Current host-reported sources · Main chat</h3>
+            <p>Refresh reads sources through the attached host session. This can return current file content and discovered indexes; it does not establish which bodies were supplied in a historical turn.</p>
+            <button id="instruction-refresh" type="button">Refresh instruction sources</button>
+            <p id="instruction-status" role="status" aria-atomic="true">Current sources unknown until you request a snapshot.</p>
+            <ul id="instruction-current" tabindex="0" aria-label="Current reported instruction source groups"></ul>
+            <h3>Recorded skill loads</h3>
+            <p id="instruction-window"></p>
+            <ul id="instruction-loads" tabindex="0" aria-label="Retained skill instruction loads"></ul>
+            <section id="instruction-inspector" aria-labelledby="instruction-title" hidden>
+              <h3 id="instruction-title" tabindex="-1"></h3>
+              <p id="instruction-detail"></p>
+              <pre id="instruction-body" tabindex="0" aria-label="Inspected instruction body"></pre>
+              <button id="instruction-original" type="button" hidden>Open original skill load evidence</button>
+              <p id="instruction-selection-status" role="status" aria-atomic="true"></p>
+            </section>
+          </details>
           <details id="retrieval-ledger" class="retrieval-ledger">
             <summary>Information retrieval ledger</summary>
             <p id="retrieval-summary">Waiting for retained events.</p>

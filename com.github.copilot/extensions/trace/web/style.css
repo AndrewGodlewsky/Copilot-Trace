@@ -207,6 +207,14 @@ body:has(.footer-panel[open]) { overflow: hidden; }
 .capabilities { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 10px; overflow-wrap: anywhere; }
 .capabilities > summary { cursor: pointer; padding: 6px 0; font-weight: 600; color: var(--model); }
 .capabilities button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.instruction-sources { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 10px; overflow-wrap: anywhere; }
+.instruction-sources summary { cursor: pointer; padding: 6px 0; color: var(--model); }
+.instruction-sources > summary { font-weight: 600; }
+.instruction-sources button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.instruction-sources li { margin-block: 8px; }
+.instruction-sources ol { padding-left: 20px; }
+#instruction-detail { white-space: pre-wrap; }
+#instruction-body { max-height: min(18rem, 35vh); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .retrieval-ledger { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 10px; overflow-wrap: anywhere; }
 .retrieval-ledger summary { cursor: pointer; padding: 6px 0; color: var(--model); }
 .retrieval-ledger > summary { font-weight: 600; }

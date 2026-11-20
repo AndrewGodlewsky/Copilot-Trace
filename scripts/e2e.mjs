@@ -6,6 +6,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { actionStages, agentLanes, hookInvocations, retrievalLedger, skillInstructions, toolExtents, toolProvenance, summarize } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
 import { compareCapabilities } from '../com.github.copilot/extensions/trace/web/capabilities.mjs';
+import { instructionSources } from '../com.github.copilot/extensions/trace/web/instructions.mjs';
 
 const sdkDirectory = process.env.COPILOT_SDK_DIR;
 const cli = process.env.COPILOT_CLI_PATH;
@@ -84,6 +85,10 @@ const fixture = createServer(async (req, res) => {
     if (provenanceFixture) {
       assert.ok(provenanceFixture.allowCalls && ++provenanceFixture.responses <= 2);
       assert.deepEqual(body.tools.map(tool => tool.function?.name).sort(), provenanceFixture.tools.map(tool => tool.name).sort());
+      const prompt = JSON.stringify(body.messages);
+      assert.ok(prompt.includes(provenanceFixture.instructionText), 'The explicit global source reaches the fixed model request.');
+      assert.ok(prompt.includes(provenanceFixture.organizationText), 'Organization guidance can reach the model while absent from the source catalog.');
+      assert.equal(prompt.includes(provenanceFixture.scopedMarker), false, 'A cataloged conditional body is not necessarily supplied in this turn.');
       if (provenanceFixture.responses === 1) {
         message = { role: 'assistant', content: null, tool_calls: provenanceFixture.tools.map(tool => ({
           id: `fixture-mcp-${tool.mcpServerName}`, type: 'function',
@@ -170,7 +175,7 @@ try {
   assert.match(await page.text(), /<title>Trace<\/title>/);
   assert.equal((await fetch(first.url + 'app.mjs')).status, 200);
   assert.equal((await fetch(first.url + 'presentation.mjs')).status, 200);
-  for (const asset of ['footer.mjs', 'diagnostics.mjs', 'polling.mjs', 'follow.mjs', 'capabilities.mjs', 'host-output.mjs']) assert.equal((await fetch(first.url + asset)).status, 200);
+  for (const asset of ['footer.mjs', 'diagnostics.mjs', 'polling.mjs', 'follow.mjs', 'capabilities.mjs', 'host-output.mjs', 'instructions.mjs']) assert.equal((await fetch(first.url + asset)).status, 200);
   const metadata = await (await fetch(first.url + 'metadata')).json();
   assert.equal(metadata.version, JSON.parse(await readFile(join(root, 'plugin.json'), 'utf8')).version);
   assert.equal(metadata.releases[0].version, metadata.version);
@@ -420,6 +425,17 @@ try {
   // Session creation explicitly starts these owned local MCP fixtures; observing Trace must not.
   permissionFixture = undefined;
   provenanceFixture = { tools: [], responses: 0, allowCalls: false };
+  const instructionRoot = join(temporary, 'instructions');
+  await mkdir(instructionRoot);
+  const instructionPath = join(instructionRoot, 'fixture.instructions.md');
+  const instructionText = 'Owned global instruction fixture: café 🧪 <script>literal</script>.';
+  const organizationText = 'Owned organization guidance fixture: instructions not enumerated by getSources.';
+  const scopedMarker = 'Owned conditional instruction body marker 84e9-scope.';
+  const initialInstructionBody = `---\napplyTo: "**"\n---\n${instructionText}\n`;
+  const scopedInstructionBody = `---\napplyTo: "src/**/*.js"\ndescription: "Owned conditional fixture"\n---\n${scopedMarker}\n`;
+  await writeFile(instructionPath, initialInstructionBody);
+  await writeFile(join(instructionRoot, 'scoped.instructions.md'), scopedInstructionBody);
+  Object.assign(provenanceFixture, { instructionText, organizationText, scopedMarker });
   const mcpEvents = [];
   const hookCalls = [];
   const skillBody = '# Fixture instructions\n\nKeep this exact Unicode text: café 🧪.\n\n<script>literal only</script>\n\n```text\n  preserve whitespace\n```\n';
@@ -435,6 +451,7 @@ try {
     workingDirectory: project, configDirectory: home, availableTools: ['mcp:*'],
     requestExtensions: true, requestCanvasRenderer: true,
     extensionSdkPath: sdkDirectory, pluginDirectories: [root], enableConfigDiscovery: false, enableSkills: true,
+    skipCustomInstructions: false, instructionDirectories: [instructionRoot], organizationCustomInstructions: organizationText,
     skillProvider: {
       listSkills() {
         skillLists++;
@@ -467,6 +484,44 @@ try {
   assert.equal(requests, 10, 'Metadata reads and Trace observation make no inference requests.');
   assert.equal(skillReads, 0, 'Observing Trace must not read a skill body.');
   const beforeInventoryLists = skillLists;
+  const readInstructionSources = async expectedBody => {
+    const response = await fetch(mcpPanel.url + 'instruction-sources');
+    assert.equal(response.status, 200);
+    const inventory = await response.json();
+    assert.equal(inventory.schemaVersion, 1);
+    assert.equal(inventory.scope, 'main-session');
+    assert.ok(Number.isFinite(Date.parse(inventory.capturedAt)));
+    assert.equal(inventory.sources.status, 'ready');
+    assert.equal(inventory.sources.items.length, 2, 'Only the explicit owned instruction files are cataloged.');
+    assert.equal(inventory.sources.omitted, 0);
+    assert.equal(inventory.sources.invalid, 0);
+    assert.equal(inventory.sources.clipped, 0);
+    const globalSource = inventory.sources.items.find(item => item.id === 'vscode-instructions/external/fixture.instructions.md');
+    const scopedSource = inventory.sources.items.find(item => item.id === 'vscode-instructions/external/scoped.instructions.md');
+    assert.ok(globalSource?.identityValid && scopedSource?.identityValid);
+    assert.equal(globalSource.sourcePath, instructionPath);
+    assert.equal(globalSource.type, 'vscode');
+    assert.equal(globalSource.location, 'repository');
+    assert.equal(globalSource.applyTo, null, 'The runtime omits a universal scope field; omission stays unknown.');
+    assert.equal(globalSource.content, expectedBody);
+    assert.equal(globalSource.contentStatus, 'complete');
+    assert.equal(scopedSource.content, scopedInstructionBody);
+    assert.deepEqual(scopedSource.applyTo, ['src/**/*.js']);
+    assert.ok(inventory.sources.items.every(item => item.defaultDisabled === null));
+    assert.equal(JSON.stringify(inventory).includes(organizationText), false);
+    assert.equal(skillLists, beforeInventoryLists, 'Instruction-source reads do not reload skills.');
+    return inventory;
+  };
+  const initialInstructionSources = await readInstructionSources(initialInstructionBody);
+  const initialSourcesView = instructionSources(initialInstructionSources, initialMcpSnapshot);
+  assert.equal(initialSourcesView.current.length, 2);
+  assert.equal(initialSourcesView.loads.length, 0, 'A current source catalog is not a set of historical load occurrences.');
+  assert.equal(initialSourcesView.capturedAt, initialInstructionSources.capturedAt);
+  await readInstructionSources(initialInstructionBody);
+  assert.equal((await fetch(mcpPanel.url + 'instruction-sources', { method: 'HEAD' })).status, 200);
+  assert.equal(mcpRequests, beforeMetadata, 'Instruction inspection never starts or calls MCP services.');
+  assert.equal(requests, 10, 'Instruction inspection makes no model requests.');
+  assert.equal(skillReads, 0, 'Instruction inspection does not invoke skills.');
   const readInventory = async () => {
     const response = await fetch(mcpPanel.url + 'capabilities');
     assert.equal(response.status, 200);
@@ -540,6 +595,28 @@ try {
   assert.equal(instructions.previewTruncated, false);
   assert.equal(instructions.arguments, null, 'Missing arguments stay unknown, not reconstructed from the prompt.');
   const afterToolMcpRequests = mcpRequests;
+  const changedInstructionBody = 'Changed owned source after the recorded turn. This is current source text, not historical evidence.\n';
+  await writeFile(instructionPath, changedInstructionBody);
+  const changedInstructionSources = await readInstructionSources(changedInstructionBody);
+  assert.equal(initialInstructionSources.sources.items.find(item => item.id === 'vscode-instructions/external/fixture.instructions.md').content,
+    initialInstructionBody, 'An earlier captured snapshot is not rewritten by refreshing the host source.');
+  assert.equal(mcpRequests, afterToolMcpRequests);
+  assert.equal(requests, 12, 'Source refresh after a file change makes no inference requests.');
+  assert.equal(skillReads, 1, 'Historical skill instructions are not reread when current host files change.');
+  assert.equal(skillInstructions(projectedSkill).content, skillBody);
+  const sourcesView = instructionSources(changedInstructionSources, mcpSnapshot);
+  assert.equal(sourcesView.current.length, 2);
+  assert.equal(sourcesView.current.find(item => item.id === 'vscode-instructions/external/fixture.instructions.md').content,
+    changedInstructionBody);
+  assert.equal(sourcesView.loads.length, 1);
+  const recordedLoad = sourcesView.loads[0];
+  assert.equal(recordedLoad.name, 'fixture-auto');
+  assert.equal(recordedLoad.agentId, '');
+  assert.equal(recordedLoad.source, 'sdk');
+  assert.equal(recordedLoad.occurrences.length, 1);
+  assert.equal(recordedLoad.occurrences[0].entry.id, projectedSkill.id);
+  assert.equal(recordedLoad.occurrences[0].timestamp, loadedSkill.timestamp);
+  assert.equal(recordedLoad.occurrences[0].content, skillBody, 'The current catalog cannot replace the recorded load body.');
   const observedInventory = await readInventory();
   assert.deepEqual(observedInventory.tools, initialInventory.tools);
   assert.deepEqual(observedInventory.skills, initialInventory.skills);
@@ -740,7 +817,7 @@ try {
   await session.disconnect();
   assert.equal(requests, 14, 'Only the fourteen expected local synthetic responses are permitted.');
   assert.equal(expired, false);
-  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping agents, approved/denied action boundaries, distinct MCP provenance, hook pipelines, historical skill instructions, read-only capability comparison, retrieval ledger and host-shortened preview versus requested limits verified with fourteen fixed local responses across six disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
+  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping agents, approved/denied action boundaries, distinct MCP provenance, hook pipelines, historical skill instructions, read-only capability comparison, retrieval ledger, host-shortened preview and current instruction sources versus recorded loads verified with fourteen fixed local responses across six disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
 } finally {
   clearTimeout(timer);
   releaseFirst();

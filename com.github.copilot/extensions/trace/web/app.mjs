@@ -4,6 +4,7 @@ import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
 import { createFollow } from './follow.mjs';
 import { initCapabilities } from './capabilities.mjs';
+import { initInstructionSources } from './instructions.mjs';
 import { vocabulary, conceptForEntry, glossaryExample, retainedExample } from './glossary.mjs';
 
 const diagnostics = createDiagnostics();
@@ -49,6 +50,10 @@ for (const selector of ['#evidence-scope', '#stat-evidence-scope']) {
   disclosure.addEventListener('toggle', () => { if (disclosure.open) follow.checked = false; });
 }
 const capabilityView = initCapabilities({ onInspect: () => { follow.checked = false; } });
+const instructionView = initInstructionSources({ onInspect: () => { follow.checked = false; }, onOriginal(entry) {
+  footerPanels.closePanel('statistics-panel', { restoreFocus: false });
+  showBoundary(entry.id, 'Showing the instruction view’s original retained skill load. Follow live is paused.', entry);
+} });
 let navigationState;
 const glossaryButton = document.querySelector('#glossary-button');
 const glossaryPanel = document.querySelector('#glossary-panel');
@@ -234,6 +239,7 @@ function renderObserverScope() {
 
 function renderStatistics(snapshot) {
   capabilityView.update(snapshot);
+  instructionView.update(snapshot);
   renderRetrieval(snapshot);
   const stats = summarize(snapshot.entries);
   for (const [selector, values] of [['#stat-hooks', stats.hookNames], ['#stat-skills', stats.skillNames]]) {
@@ -414,7 +420,12 @@ function renderSkillInstructions(node, entry) {
     for (const disclosure of [full, inputs]) disclosure.addEventListener('toggle', () => {
       if (disclosure.open) follow.checked = false;
     });
-    section.append(element('h3', 'Supplied skill instructions'), metadata, explanation, note, preview, full, inputs);
+    const sources = element('button', 'Inspect instruction sources'); sources.type = 'button';
+    sources.setAttribute('aria-haspopup', 'dialog'); sources.setAttribute('aria-controls', 'statistics-panel'); sources.setAttribute('aria-expanded', 'false');
+    sources.addEventListener('click', () => {
+      if (footerPanels.openPanel('statistics-panel', sources, document.querySelector('#statistics-button'))) instructionView.inspectSkill(node.entry);
+    });
+    section.append(element('h3', 'Supplied skill instructions'), metadata, explanation, note, preview, full, inputs, sources);
     node.body.append(section);
     node.skill = { name, trigger, explanation, note, preview, full, content, inputs, inputNote, args };
   }
@@ -1043,6 +1054,6 @@ const poller = createPoller({
   },
 });
 const footerPanels = initFooter({ diagnostics, refresh: poller.refresh, onInspect: () => { follow.checked = false; } });
-window.addEventListener('pagehide', () => { poller.stop(); capabilityView.close(); pageSize.disconnect(); });
+window.addEventListener('pagehide', () => { poller.stop(); capabilityView.close(); instructionView.close(); pageSize.disconnect(); });
 renderObserverScope();
 void poller.refresh();
