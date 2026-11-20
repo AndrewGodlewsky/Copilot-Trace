@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
-import { actionStages, agentLanes, hookInvocations, skillInstructions, toolProvenance, summarize } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
+import { actionStages, agentLanes, hookInvocations, retrievalLedger, skillInstructions, toolProvenance, summarize } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
 import { compareCapabilities } from '../com.github.copilot/extensions/trace/web/capabilities.mjs';
 
 const sdkDirectory = process.env.COPILOT_SDK_DIR;
@@ -21,6 +21,7 @@ let allowSyntheticResponses = false;
 let allowAgentResponses = false;
 let permissionFixture;
 let provenanceFixture;
+let retrievalFixture;
 let mcpRequests = 0;
 const mcpMethods = [];
 let fixtureError;
@@ -61,7 +62,7 @@ const fixture = createServer(async (req, res) => {
     return;
   }
   const number = ++requests;
-  if (!allowSyntheticResponses || number > (provenanceFixture ? 12 : permissionFixture ? 10 : allowAgentResponses ? 7 : 3)) {
+  if (!allowSyntheticResponses || number > (retrievalFixture ? 14 : provenanceFixture ? 12 : permissionFixture ? 10 : allowAgentResponses ? 7 : 3)) {
     req.resume(); res.writeHead(500); res.end('Unexpected fixture inference request.'); return;
   }
   try {
@@ -87,6 +88,15 @@ const fixture = createServer(async (req, res) => {
         message = { role: 'assistant', content: null, tool_calls: provenanceFixture.tools.map(tool => ({
           id: `fixture-mcp-${tool.mcpServerName}`, type: 'function',
           function: { name: tool.name, arguments: '{}' } })) };
+        reason = 'tool_calls';
+      }
+    }
+    if (retrievalFixture) {
+      assert.ok(retrievalFixture.allowCalls && ++retrievalFixture.responses <= 2);
+      assert.deepEqual(body.tools.map(tool => tool.function?.name).sort(), ['grep', 'view']);
+      if (retrievalFixture.responses === 1) {
+        message = { role: 'assistant', content: null, tool_calls: retrievalFixture.calls.map(call => ({
+          id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.arguments) } })) };
         reason = 'tool_calls';
       }
     }
@@ -612,9 +622,97 @@ try {
   await session.rpc.canvas.close({ instanceId: input.instanceId });
   await until(() => fetch(mcpPanel.url).then(() => false, () => true), Boolean, 'provenance fixture server shutdown');
   await session.disconnect();
-  assert.equal(requests, 12, 'Only the twelve expected local synthetic responses are permitted.');
+  assert.equal(requests, 12, 'Only the first twelve expected local synthetic responses are permitted.');
+  provenanceFixture = undefined;
+
+  // Owned retrieval fixtures establish the recorded contract without accessing a user project.
+  const retrievalDirectory = join(project, 'retrieval');
+  await mkdir(retrievalDirectory);
+  const fixturePath = join(retrievalDirectory, 'fixture.txt');
+  const absentPath = join(retrievalDirectory, 'absent.txt');
+  const fixtureLines = Array.from({ length: 30 }, (_, i) => `Line ${i + 1}: fixture café 🧪`);
+  await writeFile(fixturePath, fixtureLines.join('\n') + '\n');
+  const calls = [
+    { id: 'fixture-range-read', name: 'view', arguments: { path: fixturePath, view_range: [3, 5] } },
+    { id: 'fixture-limited-search', name: 'grep', arguments: { pattern: 'fixture', paths: retrievalDirectory,
+      output_mode: 'content', head_limit: 2, '-n': true } },
+    { id: 'fixture-missing-read', name: 'view', arguments: { path: absentPath } },
+  ];
+  retrievalFixture = { calls, responses: 0, allowCalls: false };
+  const retrievalPermissions = [];
+  session = await client.createSession({ workingDirectory: retrievalDirectory, configDirectory: home,
+    availableTools: ['view', 'grep'], requestExtensions: true, requestCanvasRenderer: true,
+    extensionSdkPath: sdkDirectory, pluginDirectories: [root], enableConfigDiscovery: false,
+    onPermissionRequest: request => {
+      retrievalPermissions.push(request);
+      assert.equal(request.kind, 'read');
+      assert.ok([retrievalDirectory, fixturePath, absentPath].includes(request.path));
+      assert.ok(calls.some(call => call.id === request.toolCallId));
+      return { kind: 'approve-once' };
+    },
+    model: 'fixture', provider: { type: 'openai', baseUrl: `http://127.0.0.1:${fixture.address().port}/v1`,
+      apiKey: 'fixture', wireApi: 'completions' } });
+  const retrievalEvents = [];
+  session.on(event => retrievalEvents.push(event));
+  await until(() => session.rpc.canvas.list(), value => value.canvases?.some(canvas => canvas.canvasId === 'trace'), 'retrieval canvas discovery');
+  const retrievalPanel = await session.rpc.canvas.open({ canvasId: 'trace', instanceId: 'trace-retrieval-fixture', input: {} });
+  await until(() => fetch(retrievalPanel.url + 'events').then(response => response.json()), value => value.history === 'ready', 'retrieval history');
+  assert.equal(requests, 12, 'Opening the retrieval ledger does not make model requests.');
+  retrievalFixture.allowCalls = true;
+  await session.sendAndWait({ prompt: 'Only the fixed local retrieval fixture.' }, 25000);
+  if (fixtureError) throw fixtureError;
+  const retrievalBoundaries = retrievalEvents.filter(event => event.type.startsWith('tool.execution'));
+  assert.equal(retrievalFixture.responses, 2);
+  assert.equal(retrievalBoundaries.length, 6);
+  assert.ok(retrievalPermissions.length >= 2);
+  const retrievalSnapshot = await until(() => fetch(retrievalPanel.url + 'events').then(response => response.json()),
+    value => retrievalBoundaries.every(event => value.entries.some(entry => entry.id === event.id)), 'retrieval projection');
+  for (const raw of retrievalBoundaries) {
+    const projected = retrievalSnapshot.entries.find(entry => entry.id === raw.id);
+    assert.equal(projected.toolCallId, raw.data.toolCallId);
+    assert.equal(projected.agentId, raw.agentId ?? '');
+    assert.equal(projected.timestamp, raw.timestamp);
+    assert.deepEqual(JSON.parse(projected.evidence).data, raw.data);
+  }
+  const retrievalResult = id => retrievalBoundaries.find(event => event.type === 'tool.execution_complete' && event.data.toolCallId === id);
+  const readResult = retrievalResult('fixture-range-read');
+  const searchResult = retrievalResult('fixture-limited-search');
+  const missingResult = retrievalResult('fixture-missing-read');
+  assert.equal(readResult.data.success, true);
+  assert.equal(readResult.data.result.content, fixtureLines.slice(2, 5).join('\n'));
+  assert.equal(searchResult.data.success, true);
+  assert.equal(searchResult.data.result.content.split('\n').length, 2);
+  assert.ok(searchResult.data.result.content.includes('café 🧪'));
+  assert.equal(missingResult.data.success, false);
+  assert.equal(typeof missingResult.data.result.content, 'string', 'Failure diagnostics may contain text without retrieving the requested file.');
+  const ledger = retrievalLedger(retrievalSnapshot.entries, retrievalSnapshot);
+  assert.equal(ledger.rows.length, 3, 'The ledger counts three invocations, not their six boundaries.');
+  assert.equal(ledger.references, 3, 'Exact recorded references include the requested missing path and search root, not inferred file contents.');
+  for (const call of calls) {
+    const start = retrievalBoundaries.find(event => event.type === 'tool.execution_start' && event.data.toolCallId === call.id);
+    const complete = retrievalResult(call.id);
+    const row = ledger.rows.find(item => item.id === start.id);
+    assert.ok(row);
+    assert.equal(row.toolName, call.name);
+    assert.deepEqual(row.targets, [call.arguments.path ?? call.arguments.paths]);
+    assert.ok(row.links.some(link => link.id === start.id));
+    assert.ok(row.links.some(link => link.id === complete.id));
+    assert.equal(row.status, complete.data.success ? 'returned' : 'failed');
+    assert.equal(row.content, complete.data.success ? complete.data.result.content : null);
+  }
+  const rangeRow = ledger.rows.find(row => row.targets.includes(fixturePath));
+  const searchRow = ledger.rows.find(row => row.toolName === 'grep');
+  assert.match(rangeRow.request, /3.*5/);
+  assert.equal(rangeRow.partial, true, 'A requested line range has limited scope without proving a complete file.');
+  assert.match(searchRow.request, /content/);
+  assert.match(searchRow.request, /2/);
+  assert.equal(searchRow.partial, true, 'A limited search is an excerpt, not a complete file read.');
+  await session.rpc.canvas.close({ instanceId: 'trace-retrieval-fixture' });
+  await until(() => fetch(retrievalPanel.url).then(() => false, () => true), Boolean, 'retrieval fixture server shutdown');
+  await session.disconnect();
+  assert.equal(requests, 14, 'Only the fourteen expected local synthetic responses are permitted.');
   assert.equal(expired, false);
-  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping agents, approved/denied action boundaries, distinct MCP provenance, hook pipelines, historical skill instructions and read-only capability comparison verified with twelve fixed local responses across five disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
+  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping agents, approved/denied action boundaries, distinct MCP provenance, hook pipelines, historical skill instructions, read-only capability comparison and retrieval ledger verified with fourteen fixed local responses across six disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
 } finally {
   clearTimeout(timer);
   releaseFirst();

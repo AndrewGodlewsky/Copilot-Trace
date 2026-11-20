@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.27",
+    "summary": "Inspect recorded reads, searches and web retrieval attempts in a bounded ledger. Requested scope, returned results and missing evidence stay distinct."
+  },
+  {
     "version": "0.1.26",
     "summary": "Learn core AI-agent terms through a contextual glossary with retained event examples. Definitions and deeper explanations share one vocabulary."
   },

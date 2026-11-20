@@ -201,6 +201,15 @@ body:has(.footer-panel[open]) { overflow: hidden; }
 .capabilities { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 10px; overflow-wrap: anywhere; }
 .capabilities > summary { cursor: pointer; padding: 6px 0; font-weight: 600; color: var(--model); }
 .capabilities button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.retrieval-ledger { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 10px; overflow-wrap: anywhere; }
+.retrieval-ledger summary { cursor: pointer; padding: 6px 0; color: var(--model); }
+.retrieval-ledger > summary { font-weight: 600; }
+.retrieval-ledger ol { margin: 0; padding-left: 22px; }
+.retrieval-ledger li { margin-block: 8px; }
+.retrieval-ledger button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.retrieval-ledger pre { max-height: min(16rem, 35vh); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+#retrieval-list { max-height: min(28rem, 50vh); overflow: auto; overscroll-behavior: contain; padding-right: 4px; }
+#retrieval-unknown-list { max-height: min(20rem, 40vh); overflow: auto; overscroll-behavior: contain; }
 #capability-list { max-height: min(24rem, 45vh); overflow: auto; overscroll-behavior: contain; padding: 6px 8px 6px 24px; }
 #capability-list li { white-space: pre-wrap; margin-bottom: 10px; }
 .footer-panel label { flex-wrap: wrap; font-size: inherit; }

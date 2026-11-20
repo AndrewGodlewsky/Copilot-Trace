@@ -84,11 +84,22 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     '#activity-filter', '#reset-filter', '#filter-status', '#filter-empty', '#lane-help',
     '#event-target', '#jump-event', '#navigation-status', '#capabilities', '#capability-refresh', '#capability-status',
     '#capability-scope', '#capability-window', '#capability-list', '#glossary-button', '#glossary-panel',
-    '#glossary-concept', '#glossary-definition', '#glossary-deeper', '#glossary-example', '#glossary-source', '#glossary-status']) {
+    '#glossary-concept', '#glossary-definition', '#glossary-deeper', '#glossary-example', '#glossary-source', '#glossary-status',
+    '#retrieval-ledger', '#retrieval-summary', '#retrieval-scope', '#retrieval-list', '#retrieval-unclassified', '#retrieval-unknown-list',
+    '#statistics-panel', '#statistics-button']) {
     const element = new Element(['#event-order', '#activity-filter', '#event-target'].includes(selector) ? 'select' : selector === '#jump-event' ? 'button' : 'div');
     element.id = selector.slice(1); selectors.set(selector, element); document.body.append(element);
   }
   const glossary = selectors.get('#glossary-panel');
+  const statistics = selectors.get('#statistics-panel');
+  statistics.tagName = 'dialog'; statistics.className = 'footer-panel';
+  const statisticsClose = new Element('button'); statisticsClose.textContent = 'Close'; statisticsClose.dataset.closePanel = ''; statistics.append(statisticsClose);
+  selectors.get('#statistics-button').dataset.panel = 'statistics-panel';
+  const retrieval = selectors.get('#retrieval-ledger'); retrieval.tagName = 'details'; statistics.append(retrieval);
+  for (const id of ['summary', 'scope', 'list', 'unclassified']) retrieval.append(selectors.get(`#retrieval-${id}`));
+  selectors.get('#retrieval-unclassified').tagName = 'details';
+  selectors.get('#retrieval-unclassified').append(new Element('summary'));
+  selectors.get('#retrieval-unclassified').append(selectors.get('#retrieval-unknown-list'));
   glossary.tagName = 'dialog'; glossary.className = 'footer-panel';
   const close = new Element('button'); close.textContent = 'Close'; close.dataset.closePanel = ''; glossary.append(close);
   for (const id of ['concept', 'definition', 'deeper', 'example', 'source', 'status']) glossary.append(selectors.get(`#glossary-${id}`));
@@ -253,6 +264,95 @@ const evidenceRows = group => byClass(group, 'tool-events').children;
 const reveal = node => {
   for (let parent = node.parentElement; parent; parent = parent.parentElement) if (parent.tagName === 'details') parent.open = true;
 };
+
+test('retrieval ledger preserves literal text, focus, disclosures and scroll during live updates', async () => {
+  const raw = [
+    { id: 'read-start', type: 'tool.execution_start', data: { toolCallId: 'read', toolName: 'view', arguments: { path: 'café 🧪<img>.txt', view_range: [3, 5] } } },
+    { id: 'read-end', type: 'tool.execution_complete', data: { toolCallId: 'read', success: true, result: { content: '<script>literal 🧪</script>\nline 4' } } },
+  ];
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => raw });
+  await trace.ready; const entries = trace.snapshot().entries; trace.close();
+  const ui = fixture(appSource); ui.render(entries);
+  const list = ui.get('#retrieval-list'), disclosure = ui.get('#retrieval-ledger');
+  assert.equal(list.children.length, 1);
+  assert.match(ui.get('#retrieval-summary').textContent, /1.*occurrence.*1.*reference/i);
+  assert.match(list.textContent, /café 🧪<img>.txt/);
+  assert.match(list.textContent, /<script>literal 🧪<\/script>/);
+  assert.equal(walk(list).some(node => ['script', 'img', 'a'].includes(node.tagName)), false);
+  disclosure.open = true; disclosure.dispatch('toggle');
+  assert.equal(ui.get('#follow').checked, false);
+  const row = list.firstElementChild, detail = row.querySelector('details'); detail.open = true;
+  const content = row.querySelector('.retrieval-content'); content.open = true;
+  const pre = content.querySelector('pre'); pre.focus(); pre.scrollTop = 20; list.scrollTop = 60;
+  ui.get('#statistics-panel').scrollTop = 140;
+  ui.document.scrollingElement.scrollTop = 270;
+  ui.render([...entries, { id: 'notice', type: 'session.info', category: 'session', agentId: '', evidence: '{}', timestamp: '' }]);
+  assert.equal(list.firstElementChild, row); assert.equal(detail.open, true); assert.equal(content.open, true);
+  assert.equal(ui.document.activeElement, pre); assert.equal(pre.scrollTop, 20); assert.equal(list.scrollTop, 60);
+  assert.equal(ui.get('#statistics-panel').scrollTop, 140);
+  assert.equal(ui.document.scrollingElement.scrollTop, 270); assert.equal(ui.get('#follow').checked, false);
+  ui.render(entries.slice(1), { omitted: 1 });
+  assert.equal(list.children.length, 0);
+  assert.match(ui.get('#retrieval-unknown-list').textContent, /unknown/i);
+  assert.match(ui.get('#retrieval-scope').textContent, /older events.*omitted/i);
+  assert.ok(ui.document.activeElement.isConnected, 'Evicted rows retain a reachable focus destination.');
+});
+
+test('a late retrieval completion updates the same row without collapsing or moving request focus', async () => {
+  const raw = [
+    { id: 'late-start', type: 'tool.execution_start', data: { toolCallId: 'late', toolName: 'view', arguments: { path: 'file' } } },
+    { id: 'late-end', type: 'tool.execution_complete', data: { toolCallId: 'late', success: true, result: { content: 'returned later' } } },
+  ];
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => raw });
+  await trace.ready; const entries = trace.snapshot().entries; trace.close();
+  const ui = fixture(appSource); ui.render(entries.slice(0, 1));
+  const list = ui.get('#retrieval-list'), row = list.firstElementChild;
+  assert.match(row.textContent, /Completion not observed/);
+  const request = row.querySelector('pre'); reveal(request); request.focus(); list.scrollTop = 35;
+  ui.get('#follow').checked = false; ui.render(entries);
+  assert.equal(list.firstElementChild, row); assert.equal(row.querySelector('details').open, true);
+  assert.equal(ui.document.activeElement, request); assert.equal(list.scrollTop, 35);
+  assert.equal(ui.get('#follow').checked, false);
+  assert.match(row.textContent, /Reported success.*text returned/);
+  assert.match(row.textContent, /returned later/);
+  assert.equal(row.querySelectorAll('button').length, 2);
+  const changed = { ...entries[1], evidence: JSON.stringify({ ...raw[1], data: { ...raw[1].data, result: { content: 'new retained text' } } }) };
+  ui.render([entries[0], changed]);
+  assert.equal(list.firstElementChild, row); assert.equal(ui.document.activeElement, request);
+  assert.match(row.textContent, /new retained text/); assert.doesNotMatch(row.textContent, /returned later/);
+});
+
+test('retrieval evidence navigation closes Statistics, resets filters and opens exact original evidence in every view', async () => {
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => [
+    { id: 'retrieve-start', agentId: 'child', type: 'tool.execution_start', data: { toolCallId: 'call', toolName: 'grep', arguments: { pattern: '🧪', paths: 'src', output_mode: 'content', head_limit: 2 } } },
+    { id: 'retrieve-end', agentId: 'child', type: 'tool.execution_complete', data: { toolCallId: 'call', success: false, result: { content: 'diagnostic <img>' } } },
+  ] });
+  await trace.ready; const entries = trace.snapshot().entries; trace.close();
+  for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    const ui = fixture(appSource); ui.get('#event-order').value = mode; ui.render(entries); filterMode(ui, 'automation');
+    ui.get('#statistics-button').dispatch('click');
+    assert.equal(ui.get('#statistics-panel').open, true);
+    const list = ui.get('#retrieval-list'); assert.doesNotMatch(list.textContent, /diagnostic <img>/);
+    const button = walk(list).find(node => node.tagName === 'button' && /result evidence/i.test(node.textContent));
+    assert.ok(button); reveal(button); button.dispatch('click');
+    assert.equal(ui.get('#statistics-panel').open, false);
+    assert.equal(ui.get('#event-order').value, 'chronological'); assert.equal(ui.get('#activity-filter').value, 'everything');
+    assert.equal(ui.get('#follow').checked, false);
+    const target = ui.get('#timeline').children[1];
+    assert.equal(target.querySelector('details').open, true);
+    assert.equal(target.querySelector('.recorded-evidence').open, true);
+    assert.equal(ui.document.activeElement, target.querySelector('summary'));
+    assert.match(visibleEvidence(ui)[1], /diagnostic <img>/);
+    ui.render([], { history: 'unsupported' });
+    assert.match(ui.get('#retrieval-summary').textContent, /no recognized.*retained/i);
+    assert.match(ui.get('#retrieval-scope').textContent, /incomplete or unavailable/i);
+    ui.get('#statistics-button').dispatch('click');
+    const top = ui.document.scrollingElement.scrollTop; button.dispatch('click');
+    assert.equal(ui.get('#statistics-panel').open, true, 'An expired source action does not dismiss the current panel.');
+    assert.equal(ui.document.scrollingElement.scrollTop, top);
+    assert.match(ui.get('#navigation-status').textContent, /no longer retained/i);
+  }
+});
 
 test('glossary offers all concepts with labeled authored fallback and preserves reading state on Close or Escape', () => {
   const ui = fixture(appSource);

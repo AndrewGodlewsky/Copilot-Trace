@@ -660,6 +660,61 @@ export function toolOperations(entries) {
   return result;
 }
 
+const retrievalNames = new Set(['view', 'grep', 'glob', 'web_fetch']);
+
+export function retrievalLedger(entries, { history = 'ready', omitted = 0 } = {}) {
+  const rows = [], unclassified = [], references = new Set();
+  let other = 0;
+  for (const { boundaries, start, data } of toolBuckets(entries)) {
+    const operation = data && requestedOperation(data);
+    const links = boundaries.map(entry => ({ id: entry.id,
+      label: entry.type === 'tool.execution_start' ? 'Original request evidence' : 'Original result evidence' }));
+    const explicitUnknownOrigin = data && ['origin', 'overridesBuiltInTool'].some(field => Object.hasOwn(data, field));
+    if (!operation || explicitUnknownOrigin || mcpFields.some(field => data && Object.hasOwn(data, field))) {
+      unclassified.push({ id: boundaries[0].id, links,
+        note: boundaries.some(entry => entry.truncated)
+          ? 'Evidence shortened. Request and retrieval outcome are unknown; the complete event cannot be recovered.'
+          : 'Retrieval status unknown. Complete, unambiguous recognized request and source evidence is unavailable.' });
+      continue;
+    }
+    if (!retrievalNames.has(data.toolName)) { other++; continue; }
+    const args = data.arguments, name = data.toolName;
+    const targets = name === 'view' ? [args.path] : name === 'web_fetch' ? [args.url]
+      : args.paths === undefined ? [] : Array.isArray(args.paths) ? [...args.paths] : [args.paths];
+    for (const target of targets) references.add(JSON.stringify([start.agentId, name === 'web_fetch' ? 'url' : 'path', target]));
+    const partial = name === 'view' ? Boolean(args.view_range && (args.view_range[0] > 1 || args.view_range[1] !== -1))
+      : name === 'grep' ? args.head_limit > 0 : name === 'web_fetch' && (args.start_index > 0 || args.max_length !== undefined);
+    const request = `Requested ${name}${name === 'grep' && args.output_mode === undefined ? ' · output mode not recorded' : ''}`
+      + Object.entries(args).map(([key, value]) => `\n${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`).join('');
+    const end = boundaries.find(entry => entry.type === 'tool.execution_complete');
+    const result = end && explanationData(end);
+    const success = result && result.success === end.success ? result.success : undefined;
+    const text = typeof result?.result?.content === 'string' ? result.result.content : null;
+    const status = !end ? 'missing' : success === false ? 'failed'
+      : success !== true || result.error !== undefined || text === null ? 'unavailable' : text === '' ? 'empty' : 'returned';
+    const statusLabel = { missing: 'Completion not observed', failed: 'Reported failure',
+      unavailable: success === true && result.error === undefined ? 'Reported success · text unavailable' : 'Outcome unknown · returned text unavailable',
+      empty: 'Reported success · empty response', returned: 'Reported success · text returned' }[status];
+    const kindNote = name === 'view' ? 'A view may target a file, image or directory; returned extent and resource type remain unknown.'
+      : name === 'glob' || (name === 'grep' && args.output_mode === 'files_with_matches') ? 'File-list output is not file contents; filenames are not extracted from result prose.'
+      : name === 'grep' && args.output_mode === 'count' ? 'Count output is not file contents; coverage and matching resources are not inferred from result prose.'
+      : name === 'grep' && args.output_mode === 'content' ? 'Search snippets are excerpts, not complete file contents; total matches and coverage remain unknown.'
+      : name === 'grep' ? 'Search output mode is not recorded; result prose does not establish file contents or coverage.'
+      : 'External response text is recorded evidence; document completeness and current contents remain unknown.';
+    const resultNote = status === 'missing' ? 'A missing completion does not mean the operation is still running.'
+      : status === 'failed' ? 'Returned text, if any, is failure diagnostic evidence, not retrieved content.'
+      : status === 'unavailable' ? 'A success flag with no text, unknown or contradictory outcome cannot establish returned information. Display-only detailedContent is not used.'
+      : status === 'empty' ? 'An empty recorded response does not prove that the target or search space was empty.'
+      : 'Only result.content is shown. It may already be shortened by the host; detailedContent is separate display data, not proof of complete or model-delivered information.';
+    rows.push({ id: start.id, toolName: name, source: describeActor(start).source, targets, request, status, statusLabel,
+      content: status === 'returned' || status === 'empty' ? text : null, partial, links,
+      scopeNote: `${partial ? 'Requested scope is limited; this is not confirmation that the host truncated the output. ' : ''}${kindNote} ${resultNote}` });
+  }
+  return { rows, references: references.size, unclassified, other,
+    note: 'Retained events only, up to 300 events with 12,000 characters of evidence each. References count exact literal target strings with their source-agent scope and path/URL kind; they are not unique physical files or resources. Relative paths, aliases and current directories are not resolved. Repeated operations remain separate occurrences. Contracts describe requested semantics; actual implementation and tool origin remain unknown. Returned information does not prove it was understood, used or remains in active context.'
+      + (history !== 'ready' ? ' History is incomplete or unavailable.' : '') + (omitted ? ' Older events were omitted.' : '') };
+}
+
 const permissionApprovals = new Set(['approved', 'approved-read-only-for-session', 'approved-for-session', 'approved-for-location']);
 const permissionDenials = new Set(['denied-by-rules', 'denied-no-approval-rule-and-could-not-request-from-user',
   'denied-interactively-by-user', 'denied-by-content-exclusion-policy', 'denied-by-permission-request-hook']);

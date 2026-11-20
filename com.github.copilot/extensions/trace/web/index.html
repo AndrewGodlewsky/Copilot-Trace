@@ -101,6 +101,18 @@
           <p id="stat-unlinked" hidden></p>
           <h3>Recorded hook pipeline types</h3><ul id="stat-hooks"></ul>
           <h3>Skills loaded</h3><ul id="stat-skills"></ul>
+          <details id="retrieval-ledger" class="retrieval-ledger">
+            <summary>Information retrieval ledger</summary>
+            <p id="retrieval-summary">Waiting for retained events.</p>
+            <p>Requested reads, searches and external retrievals with recorded outcomes. Open an occurrence for its request, retained returned text and original evidence.</p>
+            <ol id="retrieval-list" tabindex="0" aria-label="Retained retrieval operation occurrences"></ol>
+            <details id="retrieval-unclassified" hidden>
+              <summary>Unclassified tool calls · retrieval unknown</summary>
+              <p>These calls may or may not be retrievals. Missing, conflicting, shortened or unsupported evidence cannot establish a recognized retrieval contract.</p>
+              <ol id="retrieval-unknown-list" aria-label="Tool calls with unknown retrieval status"></ol>
+            </details>
+            <p id="retrieval-scope"></p>
+          </details>
           <details id="capabilities" class="capabilities">
             <summary>Capabilities and observed use</summary>
             <p id="capability-scope"></p>

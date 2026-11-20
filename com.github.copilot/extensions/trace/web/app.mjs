@@ -1,4 +1,4 @@
-import { describeActor, explainStep, skillInstructions, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
+import { describeActor, explainStep, skillInstructions, retrievalLedger, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -27,6 +27,9 @@ const navigationStatus = document.querySelector('#navigation-status');
 const actorLegend = document.querySelector('#actor-legend');
 actorLegend.addEventListener('toggle', () => { if (actorLegend.open) follow.checked = false; });
 const statValues = new Map();
+const retrievalRows = new Map(), retrievalUnknown = new Map();
+const retrievalDisclosure = document.querySelector('#retrieval-ledger');
+retrievalDisclosure.addEventListener('toggle', () => { if (retrievalDisclosure.open) follow.checked = false; });
 for (const [key, label] of [['turns', 'Model turns'], ['hooks', 'Hook pipelines'], ['tools', 'Tool calls'], ['skills', 'Skill loads']]) {
   const cell = element('div');
   cell.dataset.metric = key;
@@ -206,6 +209,7 @@ function applyContext(node, context, entry) {
 
 function renderStatistics(snapshot) {
   capabilityView.update(snapshot);
+  renderRetrieval(snapshot);
   const stats = summarize(snapshot.entries);
   for (const [key, value] of statValues) value.textContent = String(stats[key]);
   const preview = snapshot.history === 'unsupported' ? 'Events unavailable'
@@ -224,6 +228,71 @@ function renderStatistics(snapshot) {
       list.replaceChildren(...rows.map(text => element('li', text)));
     }
   }
+}
+
+function renderRetrieval(snapshot) {
+  const ledger = retrievalLedger(snapshot.entries, snapshot);
+  const list = document.querySelector('#retrieval-list'), unknownList = document.querySelector('#retrieval-unknown-list');
+  const panel = document.querySelector('#statistics-panel'), focused = document.activeElement;
+  const inspected = retrievalDisclosure.contains(focused), scroll = panel.scrollTop;
+  const summary = ledger.rows.length
+    ? `${ledger.rows.length} recognized operation occurrence${ledger.rows.length === 1 ? '' : 's'} · ${ledger.references} distinct recorded target reference${ledger.references === 1 ? '' : 's'}`
+    : 'No recognized retrieval requests in retained evidence.';
+  for (const [selector, text] of [['#retrieval-summary', summary], ['#retrieval-scope', ledger.note]]) {
+    const node = document.querySelector(selector); if (node.textContent !== text) node.textContent = text;
+  }
+  const unclassified = document.querySelector('#retrieval-unclassified');
+  unclassified.hidden = !ledger.unclassified.length;
+  const unknownSummary = unclassified.querySelector('summary');
+  const unknownText = `${ledger.unclassified.length} unclassified tool call${ledger.unclassified.length === 1 ? '' : 's'} · retrieval unknown`;
+  if (unknownSummary.textContent !== unknownText) unknownSummary.textContent = unknownText;
+  for (const [records, cache, parent, recognized] of [[ledger.rows, retrievalRows, list, true], [ledger.unclassified, retrievalUnknown, unknownList, false]]) {
+    let previous;
+    for (const record of records) {
+      let node = cache.get(record.id);
+      if (!node) {
+        const item = element('li'), details = element('details'), title = element('summary');
+        const status = element('p'), request = element('pre'), note = element('p'), content = element('details', undefined, 'retrieval-content');
+        request.tabIndex = 0; request.setAttribute('aria-label', 'Exact recorded retrieval request');
+        const text = element('pre'); text.tabIndex = 0; text.setAttribute('aria-label', 'Retained returned text');
+        content.append(element('summary', 'Retained returned text'), text);
+        const links = element('div', undefined, 'boundary-links');
+        links.setAttribute('role', 'group'); links.setAttribute('aria-label', 'Original retrieval evidence');
+        details.append(title, status, request, note, content, links); item.append(details);
+        for (const disclosure of [details, content]) disclosure.addEventListener('toggle', () => { if (disclosure.open) follow.checked = false; });
+        node = { item, title, status, request, note, content, text, links, buttons: new Map() }; cache.set(record.id, node);
+      }
+      const values = [[node.title, recognized ? `${record.toolName} · ${record.source} · ${record.statusLabel}` : 'Unclassified tool call · retrieval unknown'],
+        [node.status, recognized ? (record.targets.length ? `${record.targets.length} recorded target reference${record.targets.length === 1 ? '' : 's'} in this request.` : 'Target not recorded; no directory or resource is assumed.') : 'This call is not counted as a recognized retrieval request.'],
+        [node.request, record.request || ''], [node.note, record.scopeNote || record.note], [node.text, record.content ?? '']];
+      for (const [target, value] of values) if (target.textContent !== value) target.textContent = value;
+      node.request.hidden = !recognized; node.content.hidden = record.content === null || !recognized;
+      let previousButton;
+      for (const link of record.links) {
+        let button = node.buttons.get(link.id);
+        if (!button) {
+          button = element('button', link.label); button.type = 'button';
+          button.addEventListener('click', () => {
+            if (!retainedExample(lastSnapshot?.entries || [], button.entry)) {
+              showBoundary(link.id, undefined, button.entry); return;
+            }
+            footerPanels.closePanel('statistics-panel', { restoreFocus: false });
+            showBoundary(link.id, 'Showing the retrieval ledger’s original retained evidence. Follow live is paused.', button.entry);
+          });
+          node.buttons.set(link.id, button);
+        }
+        button.entry = snapshot.entries.find(entry => entry.id === link.id);
+        previousButton = place(node.links, button, previousButton);
+      }
+      const linkIds = new Set(record.links.map(link => link.id));
+      for (const [id, button] of node.buttons) if (!linkIds.has(id)) { button.remove(); node.buttons.delete(id); }
+      previous = place(parent, node.item, previous);
+    }
+    const ids = new Set(records.map(record => record.id));
+    for (const [id, node] of cache) if (!ids.has(id)) { node.item.remove(); cache.delete(id); }
+  }
+  if (inspected && !unhidden(focused)) { follow.checked = false; list.focus({ preventScroll: true }); }
+  panel.scrollTop = scroll;
 }
 
 function row(entry) {
