@@ -1,4 +1,4 @@
-import { describeActor, explainStep, skillInstructions, retrievalLedger, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
+import { describeActor, explainStep, skillInstructions, retrievalLedger, toolExtents, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -258,14 +258,16 @@ function renderRetrieval(snapshot) {
         content.append(element('summary', 'Retained returned text'), text);
         const links = element('div', undefined, 'boundary-links');
         links.setAttribute('role', 'group'); links.setAttribute('aria-label', 'Original retrieval evidence');
-        details.append(title, status, request, note, content, links); item.append(details);
+        const extent = element('div');
+        details.append(title, status, request, note, extent, content, links); item.append(details);
         for (const disclosure of [details, content]) disclosure.addEventListener('toggle', () => { if (disclosure.open) follow.checked = false; });
-        node = { item, title, status, request, note, content, text, links, buttons: new Map() }; cache.set(record.id, node);
+        node = { item, title, status, request, note, content, text, links, body: extent, buttons: new Map() }; cache.set(record.id, node);
       }
       const values = [[node.title, recognized ? `${record.toolName} · ${record.source} · ${record.statusLabel}` : 'Unclassified tool call · retrieval unknown'],
         [node.status, recognized ? (record.targets.length ? `${record.targets.length} recorded target reference${record.targets.length === 1 ? '' : 's'} in this request.` : 'Target not recorded; no directory or resource is assumed.') : 'This call is not counted as a recognized retrieval request.'],
         [node.request, record.request || ''], [node.note, record.scopeNote || record.note], [node.text, record.content ?? '']];
       for (const [target, value] of values) if (target.textContent !== value) target.textContent = value;
+      renderExtent(node, record.extent);
       node.request.hidden = !recognized; node.content.hidden = record.content === null || !recognized;
       let previousButton;
       for (const link of record.links) {
@@ -342,7 +344,7 @@ function row(entry) {
   body.append(metadata);
   node.recordedEvidence = element('details', undefined, 'recorded-evidence');
   node.recordedEvidence.append(element('summary', 'Recorded evidence'));
-  node.truncated = element('p', 'Evidence shortened to 12,000 characters. The complete event is not retained by this panel.', 'evidence-truncated');
+  node.truncated = element('p', 'Trace clipped raw evidence to at most 12,000 UTF-16 code units. The complete raw event is not retained by this panel.', 'evidence-truncated');
   node.truncated.hidden = !entry.truncated;
   node.pre = element('pre', entry.evidence);
   node.pre.tabIndex = 0;
@@ -351,6 +353,25 @@ function row(entry) {
   body.append(node.recordedEvidence);
   node.details.append(body);
   return node;
+}
+
+function renderExtent(node, extent) {
+  if (!extent) return;
+  if (!node.extent) {
+    const section = element('section', undefined, 'extent-evidence');
+    const badges = element('p', undefined, 'extent-badges'), requested = element('p'), returned = element('p');
+    const details = element('details'), notes = element('p');
+    details.append(element('summary', 'How these limits are known'), notes);
+    details.addEventListener('toggle', () => { if (details.open) follow.checked = false; });
+    section.append(element('h3', 'Scope and limits'), badges, requested, returned, details);
+    node.body.insertBefore(section, node.recordedEvidence || null);
+    node.extent = { badges, requested, returned, notes };
+  }
+  for (const [target, value] of [
+    [node.extent.badges, extent.badges.join(' · ')],
+    [node.extent.requested, extent.requested.join('. ') || 'Requested range or limit unavailable in a recognized complete request.'],
+    [node.extent.returned, extent.returned], [node.extent.notes, extent.notes.join(' ')],
+  ]) if (target.textContent !== value) target.textContent = value;
 }
 
 function renderSkillInstructions(node, entry) {
@@ -770,6 +791,7 @@ function render(snapshot) {
   const stages = actionStages(snapshot.entries, snapshot);
   const provenance = toolProvenance(snapshot.entries);
   const operations = toolOperations(snapshot.entries);
+  const extents = toolExtents(snapshot.entries, snapshot);
   const hooks = hookInvocations(snapshot.entries);
   const hookByEvent = new Map(hooks.flatMap(call => call.entries.map(entry => [entry.id, call])));
   renderStatistics(snapshot);
@@ -786,6 +808,7 @@ function render(snapshot) {
     let node = nodes.get(entry.id);
     if (!node) { node = row(entry); nodes.set(entry.id, node); }
     node.entry = entry;
+    renderExtent(node, extents.get(entry.id));
     if (node.glossary) {
       const concept = conceptForEntry(entry);
       node.glossary.hidden = !concept;

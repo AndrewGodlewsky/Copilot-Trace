@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.28",
+    "summary": "See requested ranges, excerpts and explicitly shortened output separately from the evidence limits in Trace. Unknown coverage remains clear."
+  },
+  {
     "version": "0.1.27",
     "summary": "Inspect recorded reads, searches and web retrieval attempts in a bounded ledger. Requested scope, returned results and missing evidence stay distinct."
   },

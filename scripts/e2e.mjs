@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
-import { actionStages, agentLanes, hookInvocations, retrievalLedger, skillInstructions, toolProvenance, summarize } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
+import { actionStages, agentLanes, hookInvocations, retrievalLedger, skillInstructions, toolExtents, toolProvenance, summarize } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
 import { compareCapabilities } from '../com.github.copilot/extensions/trace/web/capabilities.mjs';
 
 const sdkDirectory = process.env.COPILOT_SDK_DIR;
@@ -170,7 +170,7 @@ try {
   assert.match(await page.text(), /<title>Trace<\/title>/);
   assert.equal((await fetch(first.url + 'app.mjs')).status, 200);
   assert.equal((await fetch(first.url + 'presentation.mjs')).status, 200);
-  for (const asset of ['footer.mjs', 'diagnostics.mjs', 'polling.mjs', 'follow.mjs', 'capabilities.mjs']) assert.equal((await fetch(first.url + asset)).status, 200);
+  for (const asset of ['footer.mjs', 'diagnostics.mjs', 'polling.mjs', 'follow.mjs', 'capabilities.mjs', 'host-output.mjs']) assert.equal((await fetch(first.url + asset)).status, 200);
   const metadata = await (await fetch(first.url + 'metadata')).json();
   assert.equal(metadata.version, JSON.parse(await readFile(join(root, 'plugin.json'), 'utf8')).version);
   assert.equal(metadata.releases[0].version, metadata.version);
@@ -303,7 +303,8 @@ try {
     const phase = approved ? 'approved' : 'denied';
     const output = join(project, `permission-${phase}.txt`);
     const callId = `fixture-permission-${phase}`;
-    const command = `Set-Content -LiteralPath '${output.replaceAll("'", "''")}' -Value 'Trace fixture'`;
+    const command = `Set-Content -LiteralPath '${output.replaceAll("'", "''")}' -Value 'Trace fixture'`
+      + (approved ? "; Write-Output ('fixture-output-' * 10000)" : '');
     let permissionCalls = 0;
     const actionEvents = [];
     session = await client.createSession({
@@ -357,7 +358,21 @@ try {
     assert.ok(actionEvents.indexOf(started) < actionEvents.indexOf(requested), 'Invocation start is not proof that the underlying operation executed.');
     const outputText = await readFile(output, 'utf8').catch(error => { if (error.code === 'ENOENT') return null; throw error; });
     assert.equal(outputText !== null, approved, 'The denied operation creates no file; the approved operation creates only its disposable fixture file.');
-    if (approved) assert.equal(outputText.trim(), 'Trace fixture');
+    if (approved) {
+      assert.equal(outputText.trim(), 'Trace fixture');
+      const shellOutput = completed.data.result.contents.find(item => item.type === 'shell_exit');
+      assert.equal(shellOutput.exitCode, 0);
+      assert.equal(shellOutput.outputTruncated, true, 'The installed host explicitly reports an incomplete output preview.');
+      assert.equal(shellOutput.outputPreview.length, 500);
+      assert.ok(shellOutput.outputFilePath, 'The host may expose an output file, but Trace must never open it.');
+      const projectedOutput = actionSnapshot.entries.find(entry => entry.id === completed.id);
+      assert.equal(projectedOutput.hostOutput.previewCodeUnits, 500);
+      const extent = toolExtents(actionSnapshot.entries, actionSnapshot).get(completed.id);
+      assert.equal(extent.hostShortened, true);
+      assert.equal(extent.traceClipped, false);
+      assert.ok(extent.badges.includes('Host-shortened preview'));
+      assert.equal(extent.coverage, 'Unknown coverage');
+    }
     // This attached runtime delivers the request to its owner, but not to Trace's joined observer.
     assert.equal(actionSnapshot.entries.some(entry => entry.id === requested.id), false);
     assert.ok((await session.getEvents()).some(event => event.id === requested.id), 'The owning client retains the request in history despite its absence from Trace live delivery.');
@@ -387,6 +402,13 @@ try {
     assert.ok(historyRequest, 'Opening a new observer retains the permission request from history.');
     assert.deepEqual(JSON.parse(historyRequest.evidence).data, requested.data);
     assert.equal(requested.data.ownerSessionId, session.sessionId);
+    if (approved) {
+      const historyCompletion = historySnapshot.entries.find(entry => entry.id === completed.id);
+      assert.equal(JSON.parse(historyCompletion.evidence).data.result.contents.find(item => item.type === 'shell_exit').outputTruncated,
+        true, 'The immediate fresh observer also retains this installed runtime\'s structured preview flag.');
+      assert.equal(historyCompletion.hostOutput.previewCodeUnits, 500);
+      assert.equal(toolExtents(historySnapshot.entries, historySnapshot).get(completed.id).hostShortened, true);
+    }
     const historyStages = actionStages(historySnapshot.entries, historySnapshot).get(started.id);
     assert.equal(historyStages.permission, 'Permission unknown', 'Recovery ownership cannot be correlated without a verified owner mapping in the snapshot.');
     assert.deepEqual(historyStages.stages.map(stage => stage.id), [proposed.id, started.id, completed.id]);
@@ -707,12 +729,18 @@ try {
   assert.match(searchRow.request, /content/);
   assert.match(searchRow.request, /2/);
   assert.equal(searchRow.partial, true, 'A limited search is an excerpt, not a complete file read.');
+  const retrievalExtents = toolExtents(retrievalSnapshot.entries, retrievalSnapshot);
+  assert.ok(retrievalExtents.get(rangeRow.id).requested.includes('Lines 3–5 requested (1-based, inclusive)'));
+  assert.ok(retrievalExtents.get(searchRow.id).requested.includes('First 2 results requested'));
+  assert.equal(retrievalExtents.get(rangeRow.id).coverage, 'Unknown coverage');
+  assert.equal(retrievalExtents.get(searchRow.id).hostShortened, false,
+    'The requested result limit alone does not establish host truncation.');
   await session.rpc.canvas.close({ instanceId: 'trace-retrieval-fixture' });
   await until(() => fetch(retrievalPanel.url).then(() => false, () => true), Boolean, 'retrieval fixture server shutdown');
   await session.disconnect();
   assert.equal(requests, 14, 'Only the fourteen expected local synthetic responses are permitted.');
   assert.equal(expired, false);
-  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping agents, approved/denied action boundaries, distinct MCP provenance, hook pipelines, historical skill instructions, read-only capability comparison and retrieval ledger verified with fourteen fixed local responses across six disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
+  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping agents, approved/denied action boundaries, distinct MCP provenance, hook pipelines, historical skill instructions, read-only capability comparison, retrieval ledger and host-shortened preview versus requested limits verified with fourteen fixed local responses across six disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
 } finally {
   clearTimeout(timer);
   releaseFirst();

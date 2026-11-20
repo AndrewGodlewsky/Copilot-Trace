@@ -1,3 +1,5 @@
+import { projectHostOutput } from './web/host-output.mjs';
+
 const LIMIT = 300;
 const EVIDENCE_LIMIT = 12000;
 const definitions = new Map(Object.entries({
@@ -56,6 +58,7 @@ function project(event) {
   const evidence = JSON.stringify({ id: event.id, type: event.type, timestamp: event.timestamp,
     agentId: event.agentId, parentId: event.parentId, data }, (key, value) =>
     ['encryptedContent', 'reasoningOpaque'].includes(key) ? undefined : value, 2);
+  const hostOutput = projectHostOutput(event);
   return {
     id: event.id, type: event.type, category, title, explanation,
     displayName: clip(detail, 180), model: clip(data.model, 180), trigger: clip(data.trigger, 80),
@@ -67,6 +70,7 @@ function project(event) {
     interactionId: identifier(data.interactionId),
     toolCallId: identifier(data.toolCallId), toolName: clip(data.toolName, 180),
     success: typeof data.success === 'boolean' ? data.success : null,
+    ...(hostOutput ? { hostOutput } : {}),
     evidence: clip(evidence, EVIDENCE_LIMIT), truncated: evidence.length > EVIDENCE_LIMIT,
   };
 }

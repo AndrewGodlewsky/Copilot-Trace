@@ -18,6 +18,9 @@ test('serves only authenticated local assets, with restrictive headers', async t
   assert.equal((await fetch(server.url + 'style.css')).status, 200);
   assert.equal((await fetch(server.url + 'app.mjs')).status, 200);
   assert.equal((await fetch(server.url + 'presentation.mjs')).status, 200);
+  const hostOutput = await fetch(server.url + 'host-output.mjs');
+  assert.equal(hostOutput.status, 200);
+  assert.equal(await hostOutput.text(), await readFile(new URL('../com.github.copilot/extensions/trace/web/host-output.mjs', import.meta.url), 'utf8'));
   for (const module of ['footer.mjs', 'diagnostics.mjs', 'polling.mjs', 'follow.mjs', 'glossary.mjs']) assert.equal((await fetch(server.url + module)).status, 200);
   const metadata = await (await fetch(server.url + 'metadata')).json();
   const manifest = JSON.parse(await readFile(new URL('../plugin.json', import.meta.url), 'utf8'));

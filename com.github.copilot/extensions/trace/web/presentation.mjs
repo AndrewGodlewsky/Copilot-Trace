@@ -1,4 +1,5 @@
 import { vocabulary, conceptForEntry } from './glossary.mjs';
+import { retainedHostOutput } from './host-output.mjs';
 export { vocabulary, conceptForEntry, glossaryExample, retainedExample } from './glossary.mjs';
 
 const actorRoles = new Map(Object.entries({
@@ -662,8 +663,91 @@ export function toolOperations(entries) {
 
 const retrievalNames = new Set(['view', 'grep', 'glob', 'web_fetch']);
 
+function requestedExtent(data) {
+  if (!data || !requestedOperation(data) || !retrievalNames.has(data.toolName)
+    || [...mcpFields, 'origin', 'overridesBuiltInTool'].some(field => Object.hasOwn(data, field))) return { requested: [], limited: false };
+  const args = data.arguments, requested = [];
+  let limited = false;
+  if (data.toolName === 'view') {
+    if (args.view_range) {
+      const [first, last] = args.view_range;
+      requested.push(last === -1 ? `Line ${first} through end requested (1-based)` : `Lines ${first}–${last} requested (1-based, inclusive)`);
+      limited = first > 1 || last !== -1;
+    }
+    if (args.forceReadLargeFiles !== undefined) requested.push(args.forceReadLargeFiles
+      ? 'Large-file limit override requested' : 'Large-file limit override not requested');
+  } else if (data.toolName === 'grep') {
+    requested.push({ content: 'Matching-line excerpts requested', files_with_matches: 'Matching file paths requested', count: 'Per-file counts requested' }[args.output_mode]
+      || 'Search output mode not recorded');
+    limited = args.output_mode === 'content' || args.head_limit > 0;
+    if (args.head_limit !== undefined) requested.push(args.head_limit > 0 ? `First ${args.head_limit} results requested` : 'Requested head_limit: 0; returned count unknown');
+    for (const [field, direction] of [['-A', 'after'], ['-B', 'before'], ['-C', 'around']]) {
+      if (args[field] !== undefined) requested.push(`${args[field]} context line${args[field] === 1 ? '' : 's'} ${direction} matches requested`);
+    }
+    if (args['-n'] !== undefined) requested.push(args['-n'] ? 'Line numbers requested' : 'Line numbers not requested');
+  } else if (data.toolName === 'web_fetch') {
+    if (args.start_index !== undefined) requested.push(`Start index ${args.start_index} requested (character pagination)`);
+    if (args.max_length !== undefined) requested.push(`At most ${args.max_length} characters requested`);
+    limited = args.start_index > 0 || args.max_length !== undefined;
+  }
+  return { requested, limited };
+}
+
+export function toolExtents(entries, { history = 'ready', omitted = 0 } = {}) {
+  const descriptions = new Map();
+  for (const { boundaries, data } of toolBuckets(entries)) {
+    const request = requestedExtent(data);
+    const ends = boundaries.filter(entry => entry.type === 'tool.execution_complete');
+    const end = ends.length === 1 ? ends[0] : null;
+    const result = end && explanationData(end);
+    const matching = result?.toolCallId === end?.toolCallId && result?.success === end?.success;
+    const text = matching && typeof result?.result?.content === 'string' ? result.result.content : null;
+    const successful = matching && result?.success === true && result.error === undefined;
+    const returned = matching && result?.success === false ? 'Reported failure; output is diagnostic evidence, not retrieved extent.'
+      : successful && text !== null ? `${text.length} UTF-16 code units retained in result.content; resource extent unknown.`
+      : 'Returned extent unknown; complete matching result text is unavailable.';
+    for (const entry of boundaries) {
+      const host = retainedHostOutput(entry);
+      const badges = ['Unknown coverage'], notes = [
+        'Resource total and returned coverage are unknown. Requested ranges and limits do not prove what was returned; overlapping requests are not merged into coverage.',
+      ];
+      if (request.limited) {
+        badges.unshift('Requested limited scope');
+        notes.push('The request selects a range, excerpt or limit; this does not establish host-shortened output.');
+      }
+      if (data?.toolName === 'grep' || data?.toolName === 'glob') notes.push('Search excerpts, file lists and per-file counts are not file contents or proof of complete coverage.');
+      if (successful && text === '') notes.push('An empty recorded response does not prove an empty file or search space.');
+      if (host) {
+        badges.push('Host-shortened preview');
+        notes.push(`The host recorded result.contents shell_exit.outputTruncated: true; the shell output preview is incomplete.${host.previewCodeUnits === null ? ' Preview length unavailable.' : ` Recorded preview: ${host.previewCodeUnits} UTF-16 code units.`}`);
+        if (entry.truncated) notes.push('This host fact is a separate validated projection from the original event; the corresponding raw payload is clipped. The JSON is not reconstructed.');
+      } else notes.push('Host shortening is unknown. An absent or false preview flag does not prove complete output; result prose and detailedContent length are not truncation evidence.');
+      if (entry.truncated) {
+        badges.push('Trace-clipped evidence');
+        notes.push('Trace clipped this event’s raw evidence to at most 12,000 UTF-16 code units, preserving surrogate pairs. This is separate from host output shortening.');
+      }
+      if (omitted > 0) notes.push(`Trace retains at most 300 events; ${omitted} older event${omitted === 1 ? '' : 's'} omitted. This history limit is separate from result shortening.`);
+      if (history !== 'ready') notes.push('History is incomplete or unavailable; these facts describe retained evidence only.');
+      descriptions.set(entry.id, { requested: request.requested, requestedLimited: request.limited,
+        coverage: 'Unknown coverage', returned, hostShortened: Boolean(host), traceClipped: Boolean(entry.truncated), badges, notes });
+    }
+  }
+  return descriptions;
+}
+
+function combinedExtent(boundaries, extents) {
+  const values = boundaries.map(entry => extents.get(entry.id));
+  const end = boundaries.find(entry => entry.type === 'tool.execution_complete');
+  const hostShortened = values.some(value => value.hostShortened);
+  return { ...extents.get(end?.id || boundaries[0].id),
+    hostShortened, traceClipped: values.some(value => value.traceClipped),
+    badges: [...new Set(values.flatMap(value => value.badges))],
+    notes: [...new Set(values.flatMap(value => value.notes))].filter(note => !hostShortened || !note.startsWith('Host shortening is unknown.')) };
+}
+
 export function retrievalLedger(entries, { history = 'ready', omitted = 0 } = {}) {
   const rows = [], unclassified = [], references = new Set();
+  const extents = toolExtents(entries, { history, omitted });
   let other = 0;
   for (const { boundaries, start, data } of toolBuckets(entries)) {
     const operation = data && requestedOperation(data);
@@ -671,7 +755,7 @@ export function retrievalLedger(entries, { history = 'ready', omitted = 0 } = {}
       label: entry.type === 'tool.execution_start' ? 'Original request evidence' : 'Original result evidence' }));
     const explicitUnknownOrigin = data && ['origin', 'overridesBuiltInTool'].some(field => Object.hasOwn(data, field));
     if (!operation || explicitUnknownOrigin || mcpFields.some(field => data && Object.hasOwn(data, field))) {
-      unclassified.push({ id: boundaries[0].id, links,
+      unclassified.push({ id: boundaries[0].id, links, extent: combinedExtent(boundaries, extents),
         note: boundaries.some(entry => entry.truncated)
           ? 'Evidence shortened. Request and retrieval outcome are unknown; the complete event cannot be recovered.'
           : 'Retrieval status unknown. Complete, unambiguous recognized request and source evidence is unavailable.' });
@@ -682,8 +766,7 @@ export function retrievalLedger(entries, { history = 'ready', omitted = 0 } = {}
     const targets = name === 'view' ? [args.path] : name === 'web_fetch' ? [args.url]
       : args.paths === undefined ? [] : Array.isArray(args.paths) ? [...args.paths] : [args.paths];
     for (const target of targets) references.add(JSON.stringify([start.agentId, name === 'web_fetch' ? 'url' : 'path', target]));
-    const partial = name === 'view' ? Boolean(args.view_range && (args.view_range[0] > 1 || args.view_range[1] !== -1))
-      : name === 'grep' ? args.head_limit > 0 : name === 'web_fetch' && (args.start_index > 0 || args.max_length !== undefined);
+    const extent = combinedExtent(boundaries, extents), partial = extent.requestedLimited;
     const request = `Requested ${name}${name === 'grep' && args.output_mode === undefined ? ' · output mode not recorded' : ''}`
       + Object.entries(args).map(([key, value]) => `\n${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`).join('');
     const end = boundaries.find(entry => entry.type === 'tool.execution_complete');
@@ -707,11 +790,11 @@ export function retrievalLedger(entries, { history = 'ready', omitted = 0 } = {}
       : status === 'empty' ? 'An empty recorded response does not prove that the target or search space was empty.'
       : 'Only result.content is shown. It may already be shortened by the host; detailedContent is separate display data, not proof of complete or model-delivered information.';
     rows.push({ id: start.id, toolName: name, source: describeActor(start).source, targets, request, status, statusLabel,
-      content: status === 'returned' || status === 'empty' ? text : null, partial, links,
+      content: status === 'returned' || status === 'empty' ? text : null, partial, links, extent,
       scopeNote: `${partial ? 'Requested scope is limited; this is not confirmation that the host truncated the output. ' : ''}${kindNote} ${resultNote}` });
   }
   return { rows, references: references.size, unclassified, other,
-    note: 'Retained events only, up to 300 events with 12,000 characters of evidence each. References count exact literal target strings with their source-agent scope and path/URL kind; they are not unique physical files or resources. Relative paths, aliases and current directories are not resolved. Repeated operations remain separate occurrences. Contracts describe requested semantics; actual implementation and tool origin remain unknown. Returned information does not prove it was understood, used or remains in active context.'
+    note: 'Retained events only, up to 300 events with 12,000 UTF-16 code units of raw evidence each. References count exact literal target strings with their source-agent scope and path/URL kind; they are not unique physical files or resources. Relative paths, aliases and current directories are not resolved. Repeated operations remain separate occurrences. Contracts describe requested semantics; actual implementation and tool origin remain unknown. Returned information does not prove it was understood, used or remains in active context.'
       + (history !== 'ready' ? ' History is incomplete or unavailable.' : '') + (omitted ? ' Older events were omitted.' : '') };
 }
 

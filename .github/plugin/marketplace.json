@@ -8,7 +8,7 @@
       "name": "trace",
       "source": "./",
       "description": "Live chat activity with expandable recorded evidence.",
-      "version": "0.1.27"
+      "version": "0.1.28"
     }
   ]
 }

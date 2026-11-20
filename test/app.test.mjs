@@ -354,6 +354,52 @@ test('retrieval evidence navigation closes Statistics, resets filters and opens 
   }
 });
 
+test('scope badges share ledger facts and preserve detail focus during late results and eviction', async () => {
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => [
+    { id: 'scope-start', type: 'tool.execution_start', data: { toolCallId: 'scope', toolName: 'view', arguments: { path: '🧪<img>.txt', view_range: [3, 5] } } },
+    { id: 'scope-end', type: 'tool.execution_complete', data: { toolCallId: 'scope', success: true, result: { content: '🧪<script>' } } },
+  ] });
+  await trace.ready; const entries = trace.snapshot().entries; trace.close();
+  const ui = fixture(appSource); ui.get('#event-order').value = 'chronological'; ui.render(entries.slice(0, 1));
+  const source = ui.get('#timeline').firstElementChild, scope = source.querySelector('.extent-evidence');
+  assert.ok(scope);
+  assert.match(scope.textContent, /Requested limited scope.*Unknown coverage/);
+  assert.match(scope.textContent, /Lines 3–5 requested/);
+  const explanation = scope.querySelector('details'), summary = explanation.querySelector('summary');
+  reveal(summary); explanation.open = true; summary.focus();
+  ui.document.scrollingElement.scrollTop = 310; ui.get('#follow').checked = false;
+  ui.render(entries);
+  assert.equal(source.querySelector('.extent-evidence'), scope);
+  assert.equal(explanation.open, true); assert.equal(ui.document.activeElement, summary);
+  assert.equal(ui.document.scrollingElement.scrollTop, 310); assert.equal(ui.get('#follow').checked, false);
+  assert.match(scope.textContent, /10 UTF-16 code units.*result.content/);
+  assert.match(ui.get('#retrieval-list').textContent, /Lines 3–5 requested.*10 UTF-16 code units/s);
+  assert.equal(walk(ui.get('#retrieval-list')).some(node => ['img', 'script', 'a'].includes(node.tagName)), false);
+  ui.render(entries.slice(1), { omitted: 1 });
+  assert.ok(ui.document.activeElement.isConnected);
+  assert.match(ui.get('#retrieval-unknown-list').textContent, /Unknown coverage/);
+});
+
+test('a doubly shortened result keeps raw evidence separate from the validated host fact', async () => {
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => [
+    { id: 'clipped-end', type: 'tool.execution_complete', data: { toolCallId: 'clipped', success: true, result: {
+      content: '🧪'.repeat(9000), contents: [{ type: 'shell_exit', shellId: 'owned', exitCode: 0, outputTruncated: true, outputPreview: '🧪' }],
+    } } },
+  ] });
+  await trace.ready; const entries = trace.snapshot().entries; trace.close();
+  const ui = fixture(appSource); ui.get('#event-order').value = 'chronological'; ui.render(entries);
+  const source = ui.get('#timeline').firstElementChild, scope = source.querySelector('.extent-evidence');
+  assert.match(scope.textContent, /Host-shortened preview.*Trace-clipped evidence/);
+  assert.match(scope.textContent, /separate validated projection.*raw payload is clipped/s);
+  assert.match(source.querySelector('.recorded-evidence').textContent, /12,000 UTF-16 code units/);
+  assert.equal(source.querySelector('.recorded-evidence').querySelector('pre').textContent, entries[0].evidence);
+  const ledger = ui.get('#retrieval-unknown-list');
+  assert.match(ledger.textContent, /Host-shortened preview.*Trace-clipped evidence/);
+  const original = ledger.querySelector('button'); reveal(original); original.dispatch('click');
+  assert.equal(source.querySelector('.recorded-evidence').open, true);
+  assert.equal(ui.get('#follow').checked, false);
+});
+
 test('glossary offers all concepts with labeled authored fallback and preserves reading state on Close or Escape', () => {
   const ui = fixture(appSource);
   ui.render([]);

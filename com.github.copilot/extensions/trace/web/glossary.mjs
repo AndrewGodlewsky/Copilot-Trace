@@ -72,12 +72,14 @@ function usable(entry) {
 export function retainedExample(entries, example) {
   if (!usable(example)) return false;
   const matches = entries.filter(entry => entry.id === example.id);
-  return matches.length === 1 && identityFields.every(key => matches[0][key] === example[key]);
+  return matches.length === 1 && identityFields.every(key => matches[0][key] === example[key])
+    && JSON.stringify(matches[0].hostOutput) === JSON.stringify(example.hostOutput);
 }
 
 export function glossaryExample(entries, concept, preferred) {
   if (!Object.hasOwn(vocabulary, concept)) return null;
   const matches = entry => vocabulary[concept].types.includes(entry?.type) && retainedExample(entries, entry);
   const entry = matches(preferred) ? preferred : entries.findLast(matches);
-  return entry ? Object.freeze(Object.fromEntries(identityFields.map(key => [key, entry[key]]))) : null;
+  return entry ? Object.freeze({ ...Object.fromEntries(identityFields.map(key => [key, entry[key]])),
+    ...(entry.hostOutput ? { hostOutput: Object.freeze({ ...entry.hostOutput }) } : {}) }) : null;
 }
