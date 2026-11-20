@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import * as presentation from '../com.github.copilot/extensions/trace/web/presentation.mjs';
+import { createFollow } from '../com.github.copilot/extensions/trace/web/follow.mjs';
 
 // A small DOM boundary double exercises reconciliation, not browser layout or native focus behavior.
 function fixture(source) {
@@ -44,31 +45,44 @@ function fixture(source) {
     addEventListener(name, listener) { if (!this.listeners.has(name)) this.listeners.set(name, []); this.listeners.get(name).push(listener); }
     dispatch(name) { for (const listener of this.listeners.get(name) || []) listener({ target: this, preventDefault() {} }); }
     focus() { assert.ok(this.isConnected, 'Focus target remains connected.'); document.activeElement = this; }
-    scrollIntoView() { this.scrolled = true; }
+    scrollIntoView() {
+      this.scrolled = true;
+      this.followAtScroll = selectors.get('#follow').checked;
+      document.scrollingElement.scrollTop = 120;
+    }
     getBoundingClientRect() { return { height: 0 }; }
   }
   document = { body: new Element('body'), createElement: tag => new Element(tag),
     createElementNS: (_, tag) => new Element(tag) };
   document.activeElement = document.body;
   document.documentElement = document.body;
+  let scrollTop = 0;
+  document.scrollingElement = {
+    scrollHeight: 1000, clientHeight: 200,
+    get scrollTop() { return scrollTop; },
+    set scrollTop(value) { scrollTop = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight)); },
+  };
   const selectors = new Map();
   for (const selector of ['main', '#timeline', '#connection', '#notice', '#empty', '#follow', '#actor-legend', '#stat-counts',
     '#stat-scope', '#stat-unlinked', '#stat-hooks', '#stat-skills', '#statistics-peek', '#footer-dock', '#event-order',
-    '#activity-filter', '#reset-filter', '#filter-status', '#filter-empty', '#lane-help']) {
-    const element = new Element(['#event-order', '#activity-filter'].includes(selector) ? 'select' : 'div');
+    '#activity-filter', '#reset-filter', '#filter-status', '#filter-empty', '#lane-help',
+    '#event-target', '#jump-event', '#navigation-status']) {
+    const element = new Element(['#event-order', '#activity-filter', '#event-target'].includes(selector) ? 'select' : selector === '#jump-event' ? 'button' : 'div');
     selectors.set(selector, element); document.body.append(element);
   }
   selectors.get('#follow').checked = true;
   selectors.get('#event-order').value = 'grouped';
   selectors.get('#activity-filter').value = 'everything';
+  selectors.get('#event-target').value = 'failure';
   document.querySelector = selector => selectors.get(selector);
   const context = vm.createContext({ ...presentation, document, window: { addEventListener() {} },
     ResizeObserver: class { observe() {} }, createDiagnostics: () => ({ record() {} }),
-    createFollow: () => ({ onChange() {}, onScroll() {}, sync() {} }),
+    createFollow,
     createPoller: () => ({ refresh() {}, stop() {} }), initFooter() {},
   });
   vm.runInContext(source.replace(/^import .*;\r?\n/gm, ''), context);
   return { document, get: selector => selectors.get(selector),
+    syncFollowing() { vm.runInContext('following.sync();', context); },
     render(entries, extra = {}) {
       context.fixtureSnapshot = { entries, history: 'ready', omitted: 0, ...extra };
       vm.runInContext('lastSnapshot = fixtureSnapshot; render(lastSnapshot);', context);
@@ -128,7 +142,7 @@ test('reported headings and their persistent source control update without reset
   assert.equal(ui.get('#event-order').value, 'chronological');
   assert.equal(sourceRow.firstElementChild.open, true);
   assert.equal(ui.document.activeElement, sourceRow.firstElementChild.firstElementChild);
-  assert.equal(sourceRow.scrolled, true);
+  assert.equal(sourceRow.firstElementChild.firstElementChild.scrolled, true);
   assert.equal(walk(sourceRow).find(node => node.tagName === 'pre').textContent, earlier.evidence);
 });
 
@@ -236,7 +250,7 @@ test('boundary controls reveal exact event order and mode changes reuse rows and
   assert.equal(rows[2], endRow);
   assert.equal(ui.document.activeElement, endRow.firstElementChild.firstElementChild);
   assert.equal(endRow.firstElementChild.open, true);
-  assert.equal(endRow.scrolled, true);
+  assert.equal(endRow.firstElementChild.firstElementChild.scrolled, true);
   ui.get('#event-order').value = 'grouped';
   ui.get('#event-order').dispatch('change');
   assert.equal(ui.get('#timeline').children[0], group);
@@ -384,7 +398,7 @@ test('filter-hidden card focus moves visibly and exact source navigation resets 
   const target = ui.get('#timeline').children[2];
   assert.equal(target.hidden, false);
   assert.equal(ui.document.activeElement, target.firstElementChild.firstElementChild);
-  assert.equal(target.scrolled, true);
+  assert.equal(target.firstElementChild.firstElementChild.scrolled, true);
   assert.match(ui.get('#filter-status').textContent, /Everything.*4 matching.*0 hidden.*4 retained/);
   // Both source controls share the same deliberate reveal path.
   filterMode(ui, 'tools'); reported.dispatch('click');
@@ -683,4 +697,140 @@ test('many collapsed lanes remain stacked and preserve a collapsed focused heade
   assert.equal(ui.document.activeElement, summary);
   assert.equal(laneRows(lane).length, 2);
   assert.match(lane.textContent, /Completed/);
+});
+
+const navigationEntries = [
+  { id: 'input', type: 'user.message', category: 'user', agentId: '', delivery: 'idle', evidence: 'input evidence' },
+  activityStart,
+  { id: 'hook-start', type: 'hook.start', category: 'hook', agentId: '', hookId: 'hook', evidence: 'hook start evidence' },
+  { id: 'failure "<>日本語', type: 'hook.end', category: 'hook', agentId: '', hookId: 'hook', success: false, evidence: 'failure evidence' },
+  { id: 'permission', type: 'permission.requested', category: 'permission', agentId: 'child', evidence: 'permission evidence' },
+  { id: 'skill', type: 'skill.invoked', category: 'skill', agentId: '', evidence: 'skill evidence' },
+  { ...boundary('result', 'complete', { agentId: 'child', success: true }), evidence: 'private result evidence' },
+];
+function navigationCategory(ui, category) {
+  ui.get('#event-target').value = category;
+  ui.get('#event-target').dispatch('change');
+}
+function evidenceNode(ui, text) {
+  return walk(ui.get('#timeline')).find(node => node.tagName === 'pre' && node.textContent === text);
+}
+
+test('latest-event controls reveal exact original evidence through every view and filter without losing disclosures', () => {
+  for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    for (const [category, text] of [['failure', 'failure evidence'], ['permission', 'permission evidence'], ['skill', 'skill evidence'], ['result', 'private result evidence']]) {
+      const ui = fixture(appSource);
+      ui.render(navigationEntries);
+      const prior = evidenceNode(ui, 'input evidence').closest('details');
+      prior.open = true;
+      const evidence = evidenceNode(ui, text), row = evidence.closest('li'), details = row.firstElementChild;
+      ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change');
+      for (const group of ui.get('#timeline').children) if (group !== row && group.className !== 'step') group.firstElementChild.open = false;
+      filterMode(ui, category === 'result' ? 'automation' : 'tools');
+      assert.equal(row.hidden, true, 'The target begins behind a filter.');
+      navigationCategory(ui, category);
+      const jump = ui.get('#jump-event');
+      assert.equal(jump.disabled, false);
+      jump.focus(); jump.dispatch('click');
+      assert.equal(ui.get('#event-order').value, 'chronological');
+      assert.equal(ui.get('#activity-filter').value, 'everything');
+      assert.equal(evidenceNode(ui, text), evidence, 'Navigation reuses original retained evidence.');
+      assert.equal(details.open, true);
+      assert.equal(row.hidden, false);
+      assert.equal(prior.open, true, 'Another row keeps its disclosure state.');
+      assert.equal(ui.document.activeElement, details.firstElementChild);
+      assert.equal(details.firstElementChild.scrolled, true, 'The focused summary is scrolled, including tall evidence cards.');
+      assert.equal(details.firstElementChild.followAtScroll, false, 'Follow pauses before scrolling.');
+      assert.match(ui.get('#navigation-status').textContent, /Showing latest retained.*Follow live is paused/);
+      assert.doesNotMatch(ui.get('#navigation-status').textContent, /private|evidence|日本語/);
+    }
+  }
+});
+
+test('no matches and invalid categories leave mode, focus, follow and reading position unchanged', () => {
+  const ui = fixture(appSource);
+  navigationCategory(ui, 'failure');
+  assert.equal(ui.get('#jump-event').disabled, true, 'Navigation is safe before the first snapshot.');
+  assert.match(ui.get('#navigation-status').textContent, /No retained failure/);
+  ui.render([start]);
+  laneMode(ui); filterMode(ui, 'automation');
+  const selector = ui.get('#event-target'), page = ui.document.scrollingElement;
+  selector.focus(); page.scrollTop = 240; ui.get('#follow').checked = true;
+  for (const category of ['failure', 'permission', 'skill', 'result', 'unknown']) {
+    navigationCategory(ui, category);
+    assert.equal(ui.get('#jump-event').disabled, true);
+    ui.get('#jump-event').dispatch('click'); // A queued activation still rechecks the current snapshot.
+    assert.match(ui.get('#navigation-status').textContent, /No retained|Choose an event category/);
+    assert.equal(ui.get('#event-order').value, 'lanes');
+    assert.equal(ui.get('#activity-filter').value, 'automation');
+    assert.equal(ui.document.activeElement, selector);
+    assert.equal(page.scrollTop, 240);
+    assert.equal(ui.get('#follow').checked, true);
+  }
+});
+
+test('an evicted source link is rejected before changing views, focus, follow or reading position', () => {
+  const ui = fixture(appSource);
+  ui.render([start, end]);
+  const oldButton = walk(ui.get('#timeline')).filter(node => node.tagName === 'button')[1];
+  ui.render([start]);
+  laneMode(ui); filterMode(ui, 'automation');
+  const selector = ui.get('#event-target'), page = ui.document.scrollingElement;
+  selector.focus(); page.scrollTop = 240; ui.get('#follow').checked = true;
+  oldButton.dispatch('click');
+  assert.equal(ui.get('#event-order').value, 'lanes');
+  assert.equal(ui.get('#activity-filter').value, 'automation');
+  assert.equal(ui.document.activeElement, selector);
+  assert.equal(page.scrollTop, 240);
+  assert.equal(ui.get('#follow').checked, true);
+  assert.match(ui.get('#navigation-status').textContent, /no longer retained/);
+});
+
+test('a selected category whose target is evicted cannot navigate using its earlier enabled state', () => {
+  const ui = fixture(appSource);
+  ui.render([start, end]);
+  navigationCategory(ui, 'result');
+  const jump = ui.get('#jump-event');
+  assert.equal(jump.disabled, false);
+  ui.render([start]);
+  laneMode(ui); filterMode(ui, 'automation');
+  ui.get('#event-target').focus();
+  ui.document.scrollingElement.scrollTop = 230;
+  ui.get('#follow').checked = true;
+  jump.dispatch('click');
+  assert.equal(jump.disabled, true);
+  assert.match(ui.get('#navigation-status').textContent, /No retained tool result/);
+  assert.equal(ui.get('#event-order').value, 'lanes');
+  assert.equal(ui.get('#activity-filter').value, 'automation');
+  assert.equal(ui.document.activeElement, ui.get('#event-target'));
+  assert.equal(ui.document.scrollingElement.scrollTop, 230);
+  assert.equal(ui.get('#follow').checked, true);
+});
+
+test('repeated deliberate jumps use the current snapshot while live arrival stays paused and Follow live returns to the bottom', () => {
+  const ui = fixture(appSource), page = ui.document.scrollingElement;
+  ui.render([start, end]);
+  navigationCategory(ui, 'result');
+  ui.syncFollowing();
+  assert.equal(page.scrollTop, 800);
+  const jump = ui.get('#jump-event');
+  jump.focus(); jump.dispatch('click');
+  const oldFocus = ui.document.activeElement;
+  assert.equal(page.scrollTop, 120);
+  assert.equal(ui.get('#follow').checked, false);
+  const latest = boundary('latest', 'complete', { toolCallId: 'latest-call', evidence: 'new result' });
+  page.scrollHeight = 1700;
+  ui.render([start, end, latest]); ui.syncFollowing();
+  assert.equal(page.scrollTop, 120, 'New activity cannot pull the reader away from the chosen event.');
+  assert.equal(ui.document.activeElement, oldFocus);
+  jump.focus(); jump.dispatch('click');
+  const newestFocus = evidenceNode(ui, 'new result').closest('details').firstElementChild;
+  assert.equal(ui.document.activeElement, newestFocus);
+  jump.focus(); jump.dispatch('click');
+  assert.equal(ui.document.activeElement, newestFocus, 'Repeated keyboard activation returns to the same retained target.');
+  ui.get('#follow').checked = true; ui.get('#follow').dispatch('change');
+  assert.equal(page.scrollTop, 1500, 'The real follow controller resumes at the document bottom.');
+  assert.equal(ui.get('#follow').checked, true);
+  page.scrollHeight = 2000; ui.syncFollowing();
+  assert.equal(page.scrollTop, 1800);
 });

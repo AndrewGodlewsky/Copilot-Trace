@@ -1,4 +1,4 @@
-import { describeActor, describeHookGroup, describeToolGroup, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter } from './presentation.mjs';
+import { describeActor, describeHookGroup, describeToolGroup, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -19,6 +19,9 @@ const activityFilter = document.querySelector('#activity-filter');
 const filterStatus = document.querySelector('#filter-status');
 const filterEmpty = document.querySelector('#filter-empty');
 const laneHelp = document.querySelector('#lane-help');
+const eventTarget = document.querySelector('#event-target');
+const jumpEvent = document.querySelector('#jump-event');
+const navigationStatus = document.querySelector('#navigation-status');
 const actorLegend = document.querySelector('#actor-legend');
 actorLegend.addEventListener('toggle', () => { if (actorLegend.open) follow.checked = false; });
 const statValues = new Map();
@@ -36,6 +39,7 @@ let chapters = [];
 let lanes = [];
 let etag;
 let lastSnapshot;
+let navigationState;
 eventOrder.addEventListener('change', () => {
   follow.checked = false;
   if (lastSnapshot) render(lastSnapshot);
@@ -50,6 +54,32 @@ document.querySelector('#reset-filter').addEventListener('click', () => {
   if (lastSnapshot) render(lastSnapshot);
   activityFilter.focus({ preventScroll: true });
 });
+eventTarget.addEventListener('change', updateNavigation);
+jumpEvent.addEventListener('click', () => {
+  const target = updateNavigation();
+  if (!target) {
+    navigationStatus.textContent = unavailableTarget();
+    return;
+  }
+  showBoundary(target.id, `Showing latest retained ${navigationLabels[eventTarget.value]}. Follow live is paused.`);
+});
+
+function unavailableTarget() {
+  return Object.hasOwn(navigationLabels, eventTarget.value)
+    ? `No retained ${navigationLabels[eventTarget.value]} is available. Reading position unchanged.`
+    : 'Choose an event category. Reading position unchanged.';
+}
+
+function updateNavigation() {
+  const target = latestRetainedEvent(lastSnapshot?.entries || [], eventTarget.value);
+  jumpEvent.disabled = !target;
+  const state = `${eventTarget.value}:${Boolean(target)}`;
+  if (navigationState !== state) {
+    navigationStatus.textContent = target ? `Latest retained ${navigationLabels[eventTarget.value]} is available.` : unavailableTarget();
+    navigationState = state;
+  }
+  return target;
+}
 
 function setConnection(message, state) {
   if (connection.textContent !== message) connection.textContent = message;
@@ -185,16 +215,20 @@ function place(parent, item, previous) {
   return item;
 }
 
-function showBoundary(id) {
+function showBoundary(id, message = 'Showing original retained event. Follow live is paused.') {
+  const node = nodes.get(id);
+  if (typeof id !== 'string' || !id.length || id.length > 256 || !node || !lastSnapshot?.entries.some(entry => entry.id === id)) {
+    navigationStatus.textContent = 'That event is no longer retained. Reading position unchanged.';
+    return;
+  }
   follow.checked = false;
   eventOrder.value = 'chronological';
   activityFilter.value = 'everything';
   render(lastSnapshot);
-  const node = nodes.get(id);
-  if (!node) return;
   node.details.open = true;
   node.summary.focus({ preventScroll: true });
-  node.item.scrollIntoView({ block: 'center' });
+  node.summary.scrollIntoView({ block: 'center' });
+  navigationStatus.textContent = message;
 }
 
 function unhidden(node) {
@@ -467,6 +501,7 @@ function render(snapshot) {
   chapters = nextChapters;
   lanes = nextLanes;
   applyFilter(snapshot);
+  updateNavigation();
   // Moving an existing disclosure into a group must not strand keyboard focus.
   const focusedNode = nodes.get(focusedId);
   let focusTarget = focusedNode?.activityLink === focused && focusedNode?.activityBox.hidden

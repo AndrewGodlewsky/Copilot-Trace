@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.18",
+    "summary": "Jump to the latest retained failure, permission request, skill load or tool result. Navigation reveals the original event and pauses Follow live."
+  },
+  {
     "version": "0.1.17",
     "summary": "Compare recorded main-chat and subagent activity in lanes, with honest timing limits and links to supported source evidence."
   },

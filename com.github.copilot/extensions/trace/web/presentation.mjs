@@ -35,6 +35,22 @@ export function matchesFilter(entry, filter) {
   return true;
 }
 
+export const navigationLabels = Object.freeze({
+  failure: 'failure', permission: 'permission request', skill: 'skill load', result: 'tool result',
+});
+
+export function latestRetainedEvent(entries, category) {
+  if (!Object.hasOwn(navigationLabels, category)) return null;
+  return entries.findLast(entry => {
+    if (typeof entry.id !== 'string' || !entry.id.length || entry.id.length > 256) return false;
+    if (category === 'failure') return ['session.error', 'subagent.failed'].includes(entry.type)
+      || (['tool.execution_complete', 'hook.end'].includes(entry.type) && entry.success === false);
+    if (category === 'permission') return entry.type === 'permission.requested';
+    if (category === 'skill') return entry.type === 'skill.invoked';
+    return entry.type === 'tool.execution_complete';
+  }) || null;
+}
+
 export function describeActor(entry) {
   const id = entry.agentId;
   const source = typeof id !== 'string' || id.length > 256 ? 'Source unavailable'

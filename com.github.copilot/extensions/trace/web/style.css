@@ -45,6 +45,7 @@ input { accent-color: var(--model); margin: 0; }
 .filter-control label { flex-wrap: wrap; min-width: 0; }
 .filter-control select { max-width: 100%; }
 #filter-status { flex-basis: 100%; margin: 0; }
+#navigation-status, #navigation-help { flex-basis: 100%; margin: 0; }
 .filter-context { display: block; margin-top: 6px; color: var(--muted); font-size: .786rem; }
 .notice { font-size: 0.857rem; color: var(--muted); margin: 12px 0 26px; }
 .statistics-body { padding: 16px 20px 24px; }

@@ -44,6 +44,19 @@
       <button id="reset-filter" type="button">Reset filters</button>
       <p id="filter-status" role="status">Waiting for retained events.</p>
     </div>
+    <div class="filter-control navigation-control">
+      <label for="event-target">Jump to latest
+        <select id="event-target" aria-describedby="navigation-help navigation-status">
+          <option value="failure">Failure</option>
+          <option value="permission">Permission request</option>
+          <option value="skill">Skill load</option>
+          <option value="result">Tool result</option>
+        </select>
+      </label>
+      <button id="jump-event" type="button" disabled>Jump</button>
+      <p id="navigation-status" role="status" aria-atomic="true">Waiting for retained events.</p>
+      <p id="navigation-help">Latest means the last match in retained event order, including records with unknown time. A jump opens the original event and pauses Follow live.</p>
+    </div>
     <details id="actor-legend" class="legend">
       <summary>Actor labels and sources</summary>
       <p>Labels describe recorded event roles, not who chose the next action.</p>
