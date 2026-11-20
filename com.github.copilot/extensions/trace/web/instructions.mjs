@@ -71,7 +71,7 @@ export function initInstructionSources({ document: doc = globalThis.document, lo
   const get = id => doc.querySelector(`#instruction-${id}`);
   const disclosure = get('sources'), button = get('refresh'), currentList = get('current'), loadList = get('loads');
   const currentGroups = new Map(), loadGroups = new Map();
-  let inventory, retained = {}, selected, sequence = 0, closed = false, controller, timer, loading = false, failed = false;
+  let inventory, retained = {}, selected, sequence = 0, closed = false, suspended = false, controller, timer, loading = false, failed = false;
   const setText = (node, value) => { if (node.textContent !== value) node.textContent = value; };
   const element = (tag, value) => { const node = doc.createElement(tag); if (value !== undefined) node.textContent = value; return node; };
   const actor = id => id === '' ? 'Main chat' : text(id) ? `Agent ${id}` : 'Source unavailable';
@@ -128,6 +128,7 @@ export function initInstructionSources({ document: doc = globalThis.document, lo
     selectionStatus(); get('title').focus({ preventScroll: true }); get('inspector').scrollIntoView({ block: 'nearest' });
   }
   function inspectCurrent(item) {
+    if (closed || suspended || !inventory) return;
     selected = { kind: 'current', inventory };
     const flag = item.defaultDisabled === true ? 'Starts disabled; current enabled state unknown.'
       : item.defaultDisabled === false ? 'Does not start disabled; current enabled state unknown.' : 'Default-disabled flag and current enabled state unknown.';
@@ -136,7 +137,7 @@ export function initInstructionSources({ document: doc = globalThis.document, lo
     showSelection(item.label || 'Source label unavailable', `Retrieved ${inventory.capturedAt}.\nSource ID: ${item.id}\nReported source reference: ${item.sourcePath ?? 'unknown'}\nReported location/type: ${item.group}\n${item.identityValid ? 'Identity is usable within this bounded snapshot.' : 'Identity is ambiguous or incomplete.'}\n${item.scopeNote}\n${flag}\n${body}\n${item.note}`, item.content);
   }
   function inspectSkill(entry) {
-    if (closed) return;
+    if (closed || suspended || !retainedExample(retained.entries || [], entry)) return;
     const skill = skillInstructions(entry);
     if (!skill) return;
     const data = explanationData(entry);
@@ -183,7 +184,7 @@ export function initInstructionSources({ document: doc = globalThis.document, lo
     panel.scrollTop = scroll;
   }
   async function refresh() {
-    if (closed) return;
+    if (closed || suspended) return;
     const request = ++sequence;
     clearTimeout(timer); controller?.abort(); controller = new AbortController();
     const activeController = controller, timeout = setTimeout(() => activeController.abort(), 6000); timer = timeout;
@@ -208,5 +209,12 @@ export function initInstructionSources({ document: doc = globalThis.document, lo
   });
   render();
   return { refresh, inspectSkill, update(snapshot) { if (!closed) { retained = snapshot; render(); } },
+    suspend(value) {
+      suspended = value; sequence++; clearTimeout(timer); controller?.abort();
+      inventory = undefined; selected = undefined; loading = false; failed = false; button.disabled = value;
+      for (const id of ['title', 'detail', 'body', 'selection-status']) get(id).textContent = '';
+      get('inspector').hidden = true; get('original').hidden = true;
+      disclosure.open = false; disclosure.hidden = value; render();
+    },
     close() { closed = true; sequence++; clearTimeout(timer); controller?.abort(); } };
 }

@@ -9,6 +9,7 @@ import * as capabilities from '../com.github.copilot/extensions/trace/web/capabi
 import * as instructions from '../com.github.copilot/extensions/trace/web/instructions.mjs';
 import * as footer from '../com.github.copilot/extensions/trace/web/footer.mjs';
 import { createPoller } from '../com.github.copilot/extensions/trace/web/polling.mjs';
+import * as learning from '../com.github.copilot/extensions/trace/web/learning.mjs';
 
 // A small DOM boundary double exercises reconciliation, not browser layout or native focus behavior.
 function fixture(source, inventoryLoad = async () => { throw new Error('Unexpected inventory request'); }, feedLoad, instructionLoad = async () => { throw new Error('Unexpected instruction request'); }, clock = Date) {
@@ -83,6 +84,8 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   };
   const selectors = new Map();
   for (const selector of ['main', '#timeline', '#connection', '#notice', '#empty', '#follow', '#actor-legend', '#stat-counts',
+    '#prediction', '#prediction-live', '#prediction-replay', '#prediction-controls', '#prediction-category', '#prediction-record',
+    '#prediction-next', '#prediction-skip', '#prediction-exit', '#prediction-follow', '#prediction-status', '#prediction-result', '#prediction-mode',
     '#stat-scope', '#stat-hooks', '#stat-skills', '#statistics-peek', '#footer-dock', '#event-order',
     '#activity-filter', '#reset-filter', '#filter-status', '#filter-empty', '#lane-help',
     '#event-target', '#jump-event', '#navigation-status', '#capabilities', '#capability-refresh', '#capability-status',
@@ -152,7 +155,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   document.getElementById = id => selectors.get(`#${id}`);
   document.querySelectorAll = selector => document.body.querySelectorAll(selector);
   const windowEvents = new Map();
-  const context = vm.createContext({ ...presentation, document, window: { addEventListener(name, listener) {
+  const context = vm.createContext({ ...presentation, ...learning, document, window: { addEventListener(name, listener) {
     if (!windowEvents.has(name)) windowEvents.set(name, []); windowEvents.get(name).push(listener);
   } },
     ResizeObserver: class { observe() {} disconnect() {} }, createDiagnostics: () => ({ record() {} }),
@@ -171,15 +174,208 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     closeCapabilities() { vm.runInContext('capabilityView.close();', context); },
     refreshInstructions() { return vm.runInContext('instructionView.refresh();', context); },
     closeInstructions() { vm.runInContext('instructionView.close();', context); },
+    settlePrediction() { return vm.runInContext('armingPrediction;', context); },
     syncFollowing() { vm.runInContext('following.sync();', context); },
     render(entries, extra = {}) {
       context.fixtureSnapshot = { entries, history: 'ready', omitted: 0, ...extra };
-      vm.runInContext('lastSnapshot = fixtureSnapshot; render(lastSnapshot);', context);
+      vm.runInContext('lastSnapshot = fixtureSnapshot; liveSnapshot = fixtureSnapshot; render(lastSnapshot);', context);
     } };
 }
 const appSource = await readFile(new URL('../com.github.copilot/extensions/trace/web/app.mjs', import.meta.url), 'utf8');
 
 const feedResponse = (snapshot, status = 200) => ({ status, headers: { get: () => 'fixture-revision' }, json: async () => snapshot });
+
+async function predictionFixture() {
+  let emit;
+  const event = (id, type, data = {}) => ({ id, type, data, timestamp: '2026-11-19T12:00:00.000Z' });
+  const trace = createTrace({ on(fn) { emit = fn; return () => {}; }, getEvents: async () => [event('prompt', 'user.message', { content: 'Question 日本語 😀' })] });
+  await trace.ready;
+  return { trace, emit: (id, type, data) => emit(event(id, type, data)), response: (id, timestamp) => emit({ ...event(id, 'assistant.message', { messageId: id, content: `Answer ${id} 日本語 😀 <script>` }), ...(timestamp ? { timestamp } : {}) }) };
+}
+
+test('live practice waits for an in-flight poll and then a fresh baseline, preserving reading and one outcome', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  let load = async () => feedResponse(data.trace.snapshot()), calls = 0;
+  const ui = fixture(appSource, undefined, () => { calls++; return load(); });
+  await ui.refreshFeed();
+  ui.get('#prediction-live').dispatch('click');
+  let release;
+  load = () => new Promise(resolve => { release = resolve; });
+  const pending = ui.refreshFeed(); await Promise.resolve(); await Promise.resolve();
+  ui.get('#prediction-category').value = 'response'; ui.get('#prediction-record').dispatch('click');
+  data.response('already-fetched'); release(feedResponse(data.trace.snapshot()));
+  load = async () => feedResponse(data.trace.snapshot());
+  await pending; await ui.settlePrediction();
+  assert.ok(calls >= 3, 'Arming must perform a separate request after the coalesced pending poll.');
+  assert.match(ui.get('#prediction-status').textContent, /Waiting.*next newly observed/);
+  assert.doesNotMatch(ui.get('#timeline').textContent, /already-fetched/);
+  assert.doesNotMatch(ui.get('#prediction-result').textContent, /already-fetched/);
+  ui.document.scrollingElement.scrollTop = 210;
+  data.emit('hook', 'hook.start'); data.response('chosen'); data.response('future');
+  await ui.refreshFeed();
+  assert.match(ui.get('#prediction-result').textContent, /chosen.*日本語 😀 <script>/s);
+  assert.doesNotMatch(ui.get('#prediction-result').textContent, /future|already-fetched/);
+  assert.doesNotMatch(ui.get('#timeline').textContent, /future|already-fetched/);
+  assert.equal(ui.document.scrollingElement.scrollTop, 210);
+  assert.equal(ui.get('#follow').checked, false);
+  ui.get('#prediction-follow').checked = false; ui.get('#prediction-exit').dispatch('click');
+  assert.match(ui.get('#timeline').textContent, /future/);
+  assert.equal(ui.get('#follow').checked, false);
+  assert.match(ui.get('#prediction-status').textContent, /current live view.*paused/i);
+});
+
+test('replay hides future evidence across views and clears inspectors while live capture keeps updating', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  data.response('first');
+  data.emit('secret-tool', 'tool.execution_start', { toolName: 'view', toolCallId: 'future-call', arguments: { path: 'FUTURE-PATH' } });
+  data.emit('secret-skill', 'skill.invoked', { name: 'FUTURE-SKILL', content: 'FUTURE-BODY' });
+  const ui = fixture(appSource, async () => emptyInventory(new Date().toISOString()),
+    async () => feedResponse(data.trace.snapshot()), async () => instructionInventory('FUTURE-CATALOG'));
+  await ui.refreshFeed(); await ui.refreshInstructions();
+  const catalogButton = ui.get('#instruction-current').querySelector('button'); catalogButton.dispatch('click');
+  ui.get('#arguments-button').dispatch('click');
+  ui.get('#prediction-replay').dispatch('click');
+  assert.equal(ui.get('#arguments-panel').open, false);
+  assert.equal(ui.get('#instruction-sources').hidden, true);
+  assert.equal(ui.get('#capabilities').hidden, true);
+  assert.equal(ui.get('#instruction-body').textContent, '');
+  assert.equal(ui.get('#arguments-first').textContent, '');
+  catalogButton.dispatch('click');
+  assert.equal(ui.get('#instruction-body').textContent, '', 'A stale inspector control cannot restore the future.');
+  for (const view of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    ui.get('#event-order').value = view; ui.get('#event-order').dispatch('change');
+    assert.doesNotMatch(ui.get('#timeline').textContent, /Answer first|FUTURE/);
+  }
+  ui.get('#statistics-button').dispatch('click');
+  assert.doesNotMatch(ui.get('#statistics-panel').textContent, /FUTURE/);
+  ui.get('#statistics-panel').close();
+  ui.get('#glossary-button').dispatch('click');
+  ui.get('#glossary-concept').value = 'skill'; ui.get('#glossary-concept').dispatch('change');
+  assert.doesNotMatch(ui.get('#glossary-panel').textContent, /FUTURE/);
+  ui.get('#glossary-panel').close();
+  data.response('new-live'); await ui.refreshFeed();
+  assert.doesNotMatch(ui.get('#timeline').textContent, /new-live|FUTURE/);
+  ui.get('#prediction-category').value = 'response'; ui.get('#prediction-record').dispatch('click');
+  assert.match(ui.get('#prediction-result').textContent, /Answer first/);
+  assert.doesNotMatch(ui.get('#timeline').textContent, /FUTURE|new-live/);
+  ui.get('#prediction-next').dispatch('click'); ui.get('#prediction-skip').dispatch('click');
+  assert.match(ui.get('#prediction-status').textContent, /Skipped/);
+  assert.doesNotMatch(ui.get('#prediction-result').textContent, /wrong|score/i);
+  ui.get('#prediction-follow').checked = true; ui.get('#prediction-exit').dispatch('click');
+  assert.match(ui.get('#timeline').textContent, /new-live/);
+  assert.equal(ui.get('#follow').checked, true);
+  assert.equal(ui.get('#instruction-sources').hidden, false);
+});
+
+test('skip, disconnect and page close invalidate a live prediction and late baseline responses', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  let load = async () => feedResponse(data.trace.snapshot());
+  const ui = fixture(appSource, undefined, () => load()); await ui.refreshFeed();
+  ui.get('#prediction-live').dispatch('click');
+  ui.get('#prediction-category').value = 'response'; ui.get('#prediction-record').dispatch('click');
+  await ui.settlePrediction();
+  load = async () => feedResponse(null, 503); await ui.refreshFeed();
+  assert.match(ui.get('#prediction-status').textContent, /Unanswered.*connection/i);
+  load = async () => feedResponse(data.trace.snapshot()); data.response('later'); await ui.refreshFeed();
+  assert.doesNotMatch(ui.get('#prediction-result').textContent, /Answer later/);
+  ui.get('#prediction-next').dispatch('click');
+  let release; load = () => new Promise(resolve => { release = resolve; });
+  ui.get('#prediction-record').dispatch('click'); await Promise.resolve(); await Promise.resolve();
+  ui.get('#prediction-skip').dispatch('click');
+  release(feedResponse(data.trace.snapshot())); await ui.settlePrediction();
+  assert.match(ui.get('#prediction-status').textContent, /Skipped/);
+  ui.closePage(); const before = ui.get('#prediction-status').textContent;
+  ui.get('#prediction-record').dispatch('click'); ui.get('#prediction-exit').dispatch('click');
+  assert.equal(ui.get('#prediction-status').textContent, before);
+});
+
+test('retained practice clears future hook, compaction, result and claim content from previously rendered groups', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  data.emit('hook-start', 'hook.start', { hookInvocationId: 'h', hookType: 'preToolUse' });
+  data.emit('compact-start', 'session.compaction_start', { compactionAttemptId: 'c' });
+  data.response('first');
+  data.emit('hook-end', 'hook.end', { hookInvocationId: 'h', hookType: 'preToolUse', success: true, output: 'FUTURE-HOOK' });
+  data.emit('compact-end', 'session.compaction_complete', { compactionAttemptId: 'c', success: true, summaryContent: 'FUTURE-COMPACT' });
+  data.emit('command', 'tool.execution_start', { toolName: 'powershell', toolCallId: 'check', arguments: { command: 'npm test', description: 'Test' } });
+  data.emit('result', 'tool.execution_complete', { toolCallId: 'check', success: true, result: { content: 'FUTURE-RESULT' } });
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot())); await ui.refreshFeed();
+  assert.match(ui.get('#timeline').textContent, /FUTURE/);
+  ui.get('#prediction-replay').dispatch('click');
+  for (const view of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    ui.get('#event-order').value = view; ui.get('#event-order').dispatch('change');
+    assert.doesNotMatch(ui.get('#timeline').textContent, /FUTURE/);
+  }
+  assert.doesNotMatch(ui.get('#statistics-panel').textContent, /FUTURE/);
+  ui.get('#prediction-category').value = 'response'; ui.get('#prediction-record').dispatch('click');
+  assert.doesNotMatch(ui.get('#timeline').textContent, /FUTURE/);
+  ui.get('#prediction-next').dispatch('click'); ui.get('#prediction-record').dispatch('click');
+  assert.match(ui.get('#timeline').textContent, /FUTURE-HOOK|FUTURE-COMPACT/);
+  assert.doesNotMatch(ui.get('#timeline').textContent, /FUTURE-RESULT/);
+  assert.doesNotMatch(ui.get('#statistics-panel').textContent, /FUTURE-RESULT/);
+});
+
+test('practice aborts pending catalog reads, ignores late responses and releases a held baseline on page close', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close()); data.response('future');
+  let releaseCatalog, releaseInventory, releaseFeed, loads = 0, catalogReads = 0;
+  const ui = fixture(appSource, () => new Promise(resolve => { releaseInventory = resolve; }),
+    async () => { loads++; return loads > 1 ? new Promise(resolve => { releaseFeed = resolve; }) : feedResponse(data.trace.snapshot()); },
+    () => { catalogReads++; return new Promise(resolve => { releaseCatalog = resolve; }); });
+  await ui.refreshFeed();
+  const catalog = ui.refreshInstructions(), inventory = ui.refreshCapabilities();
+  ui.get('#prediction-replay').dispatch('click');
+  releaseCatalog(instructionInventory('FUTURE-CATALOG')); releaseInventory(emptyInventory(new Date().toISOString()));
+  await Promise.all([catalog, inventory]);
+  assert.doesNotMatch(ui.get('#statistics-panel').textContent, /FUTURE-CATALOG|future/);
+  await ui.refreshInstructions(); assert.equal(catalogReads, 1);
+  ui.get('#prediction-exit').dispatch('click'); ui.get('#prediction-live').dispatch('click');
+  ui.get('#prediction-category').value = 'response'; ui.get('#prediction-record').dispatch('click');
+  await Promise.resolve(); await Promise.resolve();
+  ui.closePage();
+  const frozen = ui.get('#timeline').textContent, status = ui.get('#prediction-status').textContent;
+  data.response('late-after-close'); releaseFeed(feedResponse(data.trace.snapshot())); await ui.settlePrediction();
+  assert.equal(ui.get('#timeline').textContent, frozen); assert.equal(ui.get('#prediction-status').textContent, status);
+  assert.equal(loads, 2, 'Closing during the coalesced baseline phase must not start another request.');
+});
+
+test('an unknown prediction source is never presented as the main chat', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close()); data.response('unknown-source');
+  for (const agentId of [null, '   ']) {
+    const snapshot = data.trace.snapshot(); snapshot.entries[1] = { ...snapshot.entries[1], agentId };
+    const ui = fixture(appSource); ui.render(snapshot.entries, snapshot);
+    ui.get('#prediction-replay').dispatch('click');
+    ui.get('#prediction-category').value = 'response'; ui.get('#prediction-record').dispatch('click');
+    assert.match(ui.get('#prediction-result').textContent, /Source unavailable/);
+    assert.doesNotMatch(ui.get('#prediction-result').textContent, /Main chat/);
+    assert.match(ui.get('#prediction-status').textContent, /unknown/i);
+  }
+});
+
+test('retained practice removes cached claim results and blocks detached future source controls', async () => {
+  const entries = await claimFixture({ output: 'UNREVEALED-CHECK', exitCode: 0 }), ui = fixture(appSource);
+  ui.render(entries, { liveReceipt: 0 });
+  const claim = byClass(ui.get('#timeline'), 'claim-evidence');
+  const select = claim.querySelectorAll('button').find(button => button.textContent === 'Link this result');
+  select.dispatch('click'); assert.match(claim.textContent, /User-linked result/);
+  const original = claim.querySelectorAll('button').find(button => button.textContent.startsWith('Original result'));
+  ui.get('#prediction-replay').dispatch('click');
+  assert.doesNotMatch(ui.get('#timeline').textContent, /UNREVEALED-CHECK|Tests passed/);
+  assert.doesNotMatch(ui.get('#statistics-panel').textContent, /UNREVEALED-CHECK/);
+  select.dispatch('click'); original.dispatch('click');
+  ui.get('#prediction-category').value = 'execute'; ui.get('#prediction-record').dispatch('click');
+  assert.doesNotMatch(ui.get('#timeline').textContent, /UNREVEALED-CHECK|Tests passed/);
+  assert.doesNotMatch(ui.get('#statistics-panel').textContent, /UNREVEALED-CHECK/);
+});
+
+test('live receipt outcomes still render in recorded timestamp order', async t => {
+  const data = await predictionFixture(); t.after(() => data.trace.close());
+  const ui = fixture(appSource, undefined, async () => feedResponse(data.trace.snapshot())); await ui.refreshFeed();
+  ui.get('#event-order').value = 'chronological'; ui.get('#event-order').dispatch('change');
+  ui.get('#prediction-live').dispatch('click'); ui.get('#prediction-category').value = 'response';
+  ui.get('#prediction-record').dispatch('click'); await ui.settlePrediction();
+  data.response('delayed', '2026-11-18T00:00:00Z'); await ui.refreshFeed();
+  assert.match(ui.get('#timeline').firstElementChild.textContent, /Answer delayed/);
+  assert.match(ui.get('#prediction-result').textContent, /Trace live receipt 1.*boundary 0/);
+});
 
 async function argumentFixture(mcp = false) {
   const trace = createTrace({ on() { return () => {}; }, getEvents: async () => [0, 1, 2].map(index => ({

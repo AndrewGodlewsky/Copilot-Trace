@@ -19,6 +19,37 @@
       <p id="connection" role="status" data-state="connecting">Connecting…</p>
       <label><input id="follow" type="checkbox" checked> Follow live</label>
     </div>
+    <details id="prediction" class="prediction">
+      <summary>Predict next action · Optional practice</summary>
+      <p>Choose an action category, then compare it with one observed record. Local practice only: no score, model confidence or claim that one action was the only reasonable choice.</p>
+      <div class="prediction-actions">
+        <button id="prediction-live" type="button">Start live prediction</button>
+        <button id="prediction-replay" type="button">Start retained practice</button>
+      </div>
+      <p id="prediction-mode">Live prediction targets the next newly observed record after a fresh boundary, not a promise to predict before host execution. Retained practice rehearses a saved-in-memory window that you may already have seen.</p>
+      <div id="prediction-controls" hidden>
+        <label for="prediction-category">Your prediction
+          <select id="prediction-category">
+            <option value="read-search">Read / search</option><option value="edit">Edit</option>
+            <option value="execute">Execute</option><option value="delegation">Delegation</option><option value="response">Response</option>
+          </select>
+        </label>
+        <div class="prediction-actions">
+          <button id="prediction-record" type="button">Record prediction</button>
+          <button id="prediction-skip" type="button">Skip</button>
+          <button id="prediction-next" type="button" disabled>Try another</button>
+        </div>
+        <p>All event views and Statistics use only the displayed practice window. Current capability and instruction catalogs are unavailable during practice. Live capture continues; Trace never pauses the agent.</p>
+        <label><input id="prediction-follow" type="checkbox"> Follow live when returning</label>
+        <button id="prediction-exit" type="button">Return to live view</button>
+      </div>
+      <p id="prediction-status" role="status" aria-atomic="true">Practice is off.</p>
+      <div id="prediction-result"></div>
+      <details><summary>How action categories work</summary>
+        <p>Read / search, edit and execute use complete supported tool argument contracts. A tool invocation is a request, not proof of execution. Unrecognized or ambiguous records remain unknown. Delegation uses a subagent-start record, without borrowing later child metadata. An unsplit assistant message without tool requests is a response; split or phased messages remain unknown. Valid tool-request messages are ignored to avoid counting a proposal again as an invocation. Hook, permission, turn and result boundaries are ignored.</p>
+        <p>Live order uses Trace’s receipt order after history is ready; timestamps and chronology do not establish causality. Disconnects, missing receipts or retention changes leave the exercise unanswered. Retained practice uses recorded event order and hides the later window until each choice or skip.</p>
+      </details>
+    </details>
     <div class="order-control">
       <label for="event-order">View
         <select id="event-order" aria-describedby="order-help">

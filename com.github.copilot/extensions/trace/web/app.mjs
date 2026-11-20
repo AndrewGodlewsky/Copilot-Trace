@@ -1,6 +1,7 @@
 import { describeActor, explainStep, toolOutcomes, skillInstructions, compactionAttempts, delegationHandoffs, recoveryAttempts, guidanceComparison, retrievalLedger, toolExtents, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, observerScope, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
+import { predictionCategories, freezeLearningSnapshot, armLivePrediction, resolveLivePrediction, createReplayPractice, chooseReplayPrediction } from './learning.mjs';
 import { initFooter } from './footer.mjs';
 import { createFollow } from './follow.mjs';
 import { initCapabilities } from './capabilities.mjs';
@@ -57,6 +58,7 @@ let chapters = [];
 let lanes = [];
 let etag;
 let lastSnapshot;
+let liveSnapshot, practice, armingPrediction, practiceGeneration = 0;
 let feedState;
 const argumentsButton = document.querySelector('#arguments-button'), argumentsPanel = document.querySelector('#arguments-panel');
 const argumentSelects = ['first', 'second'].map(side => document.querySelector(`#arguments-${side}`));
@@ -386,6 +388,7 @@ function renderObserverScope() {
     const node = document.querySelector(selector); if (node.textContent !== text) node.textContent = text;
   }
   if (feedState === 'disconnected') setConnection('Disconnected · retrying', 'error');
+  else if (practice) setConnection('Practice view · live capture continues', 'connected');
   else if (lastSnapshot) setConnection(lastSnapshot.history === 'unsupported' ? 'Events unavailable' : `Connected · ${lastSnapshot.entries.length} events`,
     lastSnapshot.history === 'unsupported' ? 'error' : 'connected');
   const timestamp = observation?.lastEvent?.timestamp, age = timestamp ? Math.floor((Date.now() - Date.parse(timestamp)) / 1000) : NaN;
@@ -1677,7 +1680,7 @@ function render(snapshot) {
 }
 
 const following = createFollow(follow, () => document.scrollingElement);
-follow.addEventListener('change', following.onChange);
+follow.addEventListener('change', () => { if (practice) follow.checked = false; following.onChange(); });
 window.addEventListener('scroll', following.onScroll, { passive: true });
 window.addEventListener('resize', following.sync);
 // Reserve the dock's actual height, including wrapped controls and status messages.
@@ -1701,13 +1704,27 @@ const poller = createPoller({
     if (response.status === 200) {
       const snapshot = await response.json();
       if (panelClosed) return false;
-      lastSnapshot = snapshot;
+      liveSnapshot = snapshot;
       lastFeedReceipt = Date.now(); unchangedFeed = false;
       etag = response.headers.get('etag');
       if (feedState !== 'connected') diagnostics.record('connected');
       feedState = 'connected';
-      render(lastSnapshot);
-    } else if (response.status === 304 && lastSnapshot) {
+      if (!practice) { lastSnapshot = snapshot; render(lastSnapshot); }
+      else if (practice.attempt?.status === 'waiting') {
+        const attempt = resolveLivePrediction(practice.attempt, snapshot);
+        if (attempt !== practice.attempt) {
+          practice.attempt = attempt;
+          if (attempt.entry) {
+            const time = entry => { const value = Date.parse(entry.timestamp); return Number.isFinite(value) ? value : Infinity; };
+            practice.snapshot = freezeLearningSnapshot({ ...practice.snapshot,
+              entries: [...practice.snapshot.entries.slice(-299), attempt.entry].sort((a, b) => time(a) - time(b)) });
+            lastSnapshot = practice.snapshot; render(lastSnapshot);
+          }
+          renderPractice();
+        }
+      }
+      if (practice) renderObserverScope();
+    } else if (response.status === 304 && liveSnapshot) {
       lastFeedReceipt = Date.now(); unchangedFeed = true;
       if (feedState !== 'connected') diagnostics.record('connected');
       feedState = 'connected';
@@ -1724,12 +1741,118 @@ const poller = createPoller({
     if (panelClosed) return;
     if (feedState !== 'disconnected') diagnostics.record('disconnected');
     feedState = 'disconnected';
+    if (practice?.attempt?.status === 'waiting') {
+      practice.attempt = resolveLivePrediction(practice.attempt, liveSnapshot, false); renderPractice();
+    }
     renderObserverScope();
   },
 });
 const footerPanels = initFooter({ diagnostics, refresh: poller.refresh, onInspect: () => { follow.checked = false; } });
+
+const prediction = id => document.querySelector(`#prediction-${id}`);
+function closePracticeInspectors() {
+  for (const panel of document.querySelectorAll('.footer-panel')) footerPanels.closePanel(panel.id, { restoreFocus: false });
+  clearArgumentComparison(); glossaryTarget = undefined; guidanceExamples = [];
+  for (const id of ['glossary-example', 'glossary-status', 'guidance-examples']) document.querySelector(`#${id}`).textContent = '';
+  glossarySource.hidden = true;
+}
+function renderPractice() {
+  prediction('controls').hidden = !practice;
+  prediction('live').disabled = Boolean(practice); prediction('replay').disabled = Boolean(practice);
+  follow.disabled = Boolean(practice);
+  if (!practice) return;
+  const attempt = practice.attempt, status = attempt?.status;
+  prediction('category').disabled = Boolean(attempt);
+  prediction('record').setAttribute('aria-disabled', String(Boolean(attempt)));
+  prediction('next').disabled = !attempt || ['waiting', 'arming'].includes(status);
+  prediction('skip').disabled = Boolean(attempt) && !['waiting', 'arming'].includes(status);
+  prediction('mode').textContent = practice.mode === 'replay'
+    ? 'Retained practice: an immutable window of at most 300 retained events. This is rehearsal; you may have seen these events before. Later events are hidden until a choice or skip.'
+    : 'Live prediction: displayed evidence is frozen while capture continues. A fresh baseline excludes everything received during arming; only one later newly observed source record is revealed, alongside up to 299 prior displayed events. Receipt order is not execution time or causality.';
+  prediction('status').textContent = !attempt ? 'Choose a category and record your prediction.'
+    : status === 'arming' ? 'Capturing a fresh observation boundary… Events received during arming are excluded.'
+      : status === 'waiting' ? 'Waiting for the next newly observed eligible record. No outcome yet; you can skip or return to live.'
+        : status === 'skipped' ? 'Skipped. No prediction was compared; host activity continues.'
+          : status === 'unknown' ? attempt.note
+            : `Observed: ${predictionCategories[attempt.category]}. Your choice: ${predictionCategories[attempt.choice]}. ${attempt.category === attempt.choice ? 'Your expectation matched this record.' : 'This record differed from your expectation.'}`;
+  const result = prediction('result'); result.replaceChildren();
+  if (attempt?.entry) {
+    result.append(element('p', attempt.note));
+    const entry = attempt.entry;
+    const source = entry.agentId === '' || (typeof entry.agentId === 'string' && entry.agentId.trim() && entry.agentId.length <= 256)
+      ? describeActor(entry).source : 'Source unavailable';
+    result.append(element('p', `Source event: ${entry.id} · ${entry.type} · ${source} · ${entry.timestamp || 'Time unavailable'}`));
+    if (attempt.mode === 'live') result.append(element('p', `Trace live receipt ${entry.observation.receipt} after boundary ${attempt.baseline}. Recorded timestamps can be earlier or tied; receipt order is not causality.`));
+    const details = element('details');
+    const evidence = element('pre', entry.evidence); evidence.tabIndex = 0;
+    details.append(element('summary', 'Observed source evidence'), evidence); result.append(details);
+  }
+}
+function startPractice(mode) {
+  if (panelClosed || practice || !lastSnapshot) return;
+  const snapshot = freezeLearningSnapshot(lastSnapshot);
+  practiceGeneration++; follow.checked = false; prediction('follow').checked = false;
+  closePracticeInspectors();
+  const replay = mode === 'replay' ? createReplayPractice(snapshot) : null;
+  practice = { mode, replay, snapshot: replay?.snapshot || snapshot, attempt: null };
+  capabilityView.suspend(true); instructionView.suspend(true);
+  lastSnapshot = practice.snapshot; render(lastSnapshot); renderPractice();
+  document.querySelector('#prediction').open = true; prediction('category').focus({ preventScroll: true });
+}
+prediction('live').addEventListener('click', () => startPractice('live'));
+prediction('replay').addEventListener('click', () => startPractice('replay'));
+prediction('record').addEventListener('click', () => {
+  if (panelClosed || !practice || practice.attempt) return;
+  const choice = prediction('category').value;
+  if (!Object.hasOwn(predictionCategories, choice)) return;
+  if (practice.mode === 'replay') {
+    practice.replay = chooseReplayPrediction(practice.replay, choice);
+    practice.attempt = practice.replay.attempt; practice.snapshot = practice.replay.snapshot;
+    lastSnapshot = practice.snapshot; render(lastSnapshot); renderPractice(); return;
+  }
+  const active = practice, generation = ++practiceGeneration;
+  practice.attempt = { status: 'arming', choice }; renderPractice();
+  armingPrediction = (async () => {
+    // refresh coalesces: await the pending request, then explicitly fetch a new baseline.
+    await poller.refresh();
+    if (panelClosed || active !== practice || generation !== practiceGeneration) return;
+    const fresh = await poller.refresh();
+    if (panelClosed || active !== practice || generation !== practiceGeneration) return;
+    practice.attempt = fresh && feedState === 'connected' ? armLivePrediction(liveSnapshot, choice)
+      : { status: 'unknown', choice, note: 'Unanswered: a fresh connected observation boundary is unavailable.' };
+    renderPractice();
+  })();
+});
+prediction('next').addEventListener('click', () => {
+  if (panelClosed || !practice || !practice.attempt || ['waiting', 'arming'].includes(practice.attempt.status)) return;
+  practiceGeneration++; practice.attempt = null; renderPractice(); prediction('category').focus({ preventScroll: true });
+});
+prediction('skip').addEventListener('click', () => {
+  if (panelClosed || !practice || (practice.attempt && !['waiting', 'arming'].includes(practice.attempt.status))) return;
+  practiceGeneration++;
+  if (practice.mode === 'replay') {
+    practice.replay = chooseReplayPrediction(practice.replay, 'response');
+    practice.snapshot = practice.replay.snapshot;
+    practice.attempt = { ...practice.replay.attempt, status: 'skipped', choice: undefined };
+    lastSnapshot = practice.snapshot; render(lastSnapshot);
+  } else practice.attempt = { status: 'skipped' };
+  renderPractice();
+});
+prediction('exit').addEventListener('click', () => {
+  if (panelClosed || !practice) return;
+  const resume = prediction('follow').checked;
+  practiceGeneration++; practice = undefined; closePracticeInspectors();
+  capabilityView.suspend(false); instructionView.suspend(false);
+  lastSnapshot = liveSnapshot || lastSnapshot; render(lastSnapshot); renderPractice();
+  prediction('result').replaceChildren();
+  prediction('mode').textContent = 'Practice is off. Start another live prediction or rehearse the retained window.';
+  prediction('status').textContent = `Returned to the current live view. Follow live is ${resume ? 'on' : 'paused'}.`;
+  follow.checked = resume; following.onChange(); prediction('live').focus({ preventScroll: true });
+});
 window.addEventListener('pagehide', () => {
   panelClosed = true;
+  practiceGeneration++; practice = undefined; liveSnapshot = undefined;
+  prediction('result').replaceChildren();
   clearArgumentComparison();
   poller.stop(); capabilityView.close(); instructionView.close(); pageSize.disconnect();
   claimsClosed = true;

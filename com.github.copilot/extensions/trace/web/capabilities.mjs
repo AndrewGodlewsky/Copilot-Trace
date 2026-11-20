@@ -84,7 +84,7 @@ export async function fetchCapabilities(signal) {
 export function initCapabilities({ document: doc = globalThis.document, load = fetchCapabilities, onInspect = () => {} } = {}) {
   const get = id => doc.querySelector(`#${id}`);
   const button = get('capability-refresh'), list = get('capability-list'), status = get('capability-status');
-  let inventory, retained = {}, sequence = 0, closed = false, controller, timer, ageTimer, loading = false, failed = false;
+  let inventory, retained = {}, sequence = 0, closed = false, suspended = false, controller, timer, ageTimer, loading = false, failed = false;
   const states = new Set(['ready', 'uninitialized', 'unsupported', 'unavailable', 'timeout', 'session-mismatch', 'closed', 'malformed']);
   const setText = (node, value) => { if (node.textContent !== value) node.textContent = value; };
   function render() {
@@ -115,7 +115,7 @@ export function initCapabilities({ document: doc = globalThis.document, load = f
     }
   }
   async function refresh() {
-    if (closed) return;
+    if (closed || suspended) return;
     const request = ++sequence;
     clearTimeout(timer); controller?.abort(); controller = new AbortController();
     const activeController = controller;
@@ -137,5 +137,10 @@ export function initCapabilities({ document: doc = globalThis.document, load = f
   get('capabilities').addEventListener('toggle', () => { if (get('capabilities').open) onInspect(); });
   render();
   return { refresh, update(snapshot) { if (!closed) { retained = snapshot; render(); } },
+    suspend(value) {
+      suspended = value; sequence++; clearTimeout(timer); clearTimeout(ageTimer); controller?.abort();
+      inventory = undefined; loading = false; failed = false; button.disabled = value;
+      get('capabilities').open = false; get('capabilities').hidden = value; render();
+    },
     close() { closed = true; sequence++; clearTimeout(timer); clearTimeout(ageTimer); controller?.abort(); } };
 }

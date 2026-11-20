@@ -132,7 +132,11 @@ test('action title and original evidence stay stable across live completion and 
   await trace.ready;
   const after = trace.snapshot().entries;
   assert.equal(after.length, 2);
-  assert.deepEqual(after[0], before);
+  const { observation: beforeObservation, ...beforeRecord } = before;
+  const { observation: afterObservation, ...afterRecord } = after[0];
+  assert.deepEqual(beforeObservation, { source: 'live', receipt: null });
+  assert.deepEqual(afterObservation, { source: 'history', receipt: null });
+  assert.deepEqual(afterRecord, beforeRecord);
   assert.equal(describeStep(after[0]).title, describeStep(before).title);
   assert.equal(after[0].agentId, 'child');
   assert.equal(describeStep(after[1]).subtitle, 'Failed');

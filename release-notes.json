@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.42",
+    "summary": "Practice predicting the next observed action in optional live and replay exercises. Feedback links to recorded evidence and leaves missing or ambiguous outcomes unknown."
+  },
+  {
     "version": "0.1.41",
     "summary": "Understand what supported read, edit and process results establish, with a route to separately observed validation. Tool status, process exit and overall task correctness remain distinct."
   },

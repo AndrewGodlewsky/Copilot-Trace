@@ -88,12 +88,17 @@ export function createTrace(session, diagnostics = { record() {} }) {
   let history = 'loading';
   let revision = 0;
   let omitted = 0;
+  let liveReceipt = 0;
   let closed = false;
   let unsubscribe;
   let timer;
   let stopWaiting;
-  function insert(entry) {
+  function insert(entry, source) {
     if (!entry || events.has(entry.id)) return;
+    if (source) {
+      if (source === 'live' && history === 'ready') liveReceipt = Number.isSafeInteger(liveReceipt) && liveReceipt < Number.MAX_SAFE_INTEGER ? liveReceipt + 1 : null;
+      entry = { ...entry, observation: { source, receipt: source === 'live' && history === 'ready' ? liveReceipt : null } };
+    }
     events.set(entry.id, entry);
     // Ephemeral events are absent from history; merge by recorded time before trimming.
     // Equal times keep insertion order. Missing/invalid times stay at the end.
@@ -111,7 +116,7 @@ export function createTrace(session, diagnostics = { record() {} }) {
     diagnostics.record('observer_unsupported');
   } else {
     try {
-      unsubscribe = session.on(event => { if (!closed) insert(project(event)); });
+      unsubscribe = session.on(event => { if (!closed) insert(project(event), 'live'); });
       diagnostics.record('observer_started');
       const timeout = new Promise((_, reject) => {
         stopWaiting = () => reject(new Error('History unavailable.'));
@@ -128,7 +133,7 @@ export function createTrace(session, diagnostics = { record() {} }) {
         const historyIds = new Set();
         for (const event of past) {
           const entry = project(event);
-          if (entry) { historyIds.add(entry.id); insert(entry); }
+          if (entry) { historyIds.add(entry.id); insert(entry, 'history'); }
         }
         for (const entry of live.values()) if (!historyIds.has(entry.id)) insert(entry);
         omitted = Math.max(omitted, liveOmitted);
@@ -156,7 +161,7 @@ export function createTrace(session, diagnostics = { record() {} }) {
         const result = entry.success === false ? 'failed' : entry.success === true ? 'completed' : 'result recorded';
         return { ...entry, toolName, title: `Tool ${result} · ${name}` };
       });
-      return { revision, history, omitted, limit: LIMIT, entries };
+      return { revision, history, omitted, limit: LIMIT, liveReceipt, entries };
     },
     close() {
       if (closed) return;

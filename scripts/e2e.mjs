@@ -7,6 +7,7 @@ import { createServer } from 'node:http';
 import { actionStages, agentLanes, compactionAttempts, delegationHandoffs, hookInvocations, linkValidationClaim, observedActivity, permissionScope, retainedValidationLink, retrievalLedger, skillInstructions, toolExtents, toolProvenance, summarize, validationChecks, validationClaims, validationOverview } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
 import { compareCapabilities } from '../com.github.copilot/extensions/trace/web/capabilities.mjs';
 import { instructionSources } from '../com.github.copilot/extensions/trace/web/instructions.mjs';
+import { armLivePrediction, classifyPredictionEvent, resolveLivePrediction } from '../com.github.copilot/extensions/trace/web/learning.mjs';
 
 const sdkDirectory = process.env.COPILOT_SDK_DIR;
 const cli = process.env.COPILOT_CLI_PATH;
@@ -213,7 +214,7 @@ try {
   assert.match(await page.text(), /<title>Trace<\/title>/);
   assert.equal((await fetch(first.url + 'app.mjs')).status, 200);
   assert.equal((await fetch(first.url + 'presentation.mjs')).status, 200);
-  for (const asset of ['footer.mjs', 'diagnostics.mjs', 'polling.mjs', 'follow.mjs', 'capabilities.mjs', 'host-output.mjs', 'instructions.mjs']) assert.equal((await fetch(first.url + asset)).status, 200);
+  for (const asset of ['footer.mjs', 'diagnostics.mjs', 'polling.mjs', 'follow.mjs', 'capabilities.mjs', 'host-output.mjs', 'instructions.mjs', 'learning.mjs']) assert.equal((await fetch(first.url + asset)).status, 200);
   const metadata = await (await fetch(first.url + 'metadata')).json();
   assert.equal(metadata.version, JSON.parse(await readFile(join(root, 'plugin.json'), 'utf8')).version);
   assert.equal(metadata.releases[0].version, metadata.version);
@@ -223,6 +224,9 @@ try {
   const history = await until(() => fetch(first.url + 'events').then(r => r.json()),
     value => value.history !== 'loading', 'history load');
   assert.equal(history.history, 'ready');
+  assert.ok(Number.isSafeInteger(history.liveReceipt) && history.liveReceipt >= 0);
+  assert.deepEqual(history.entries.find(entry => entry.id === historical.eventId)?.observation,
+    { source: 'history', receipt: null }, 'Hydrated history cannot acquire a new live prediction receipt.');
   assert.equal(history.entries.find(entry => entry.id === historical.eventId)?.protectedContentOmitted, false,
     'Actual historical projection reports no protected omission for the literal fixture log.');
   assert.ok(history.entries.some(entry => entry.id === historical.eventId && entry.evidence.includes('日本語 😀')), 'Attached extension must receive actual session history.');
@@ -230,6 +234,10 @@ try {
   const observed = await until(() => fetch(first.url + 'events').then(r => r.json()),
     value => value.entries.some(entry => entry.id === live.eventId), 'live session event');
   assert.equal(observed.entries.filter(entry => entry.id === live.eventId).length, 1);
+  const liveObservation = observed.entries.find(entry => entry.id === live.eventId).observation;
+  assert.equal(liveObservation.source, 'live');
+  assert.ok(Number.isSafeInteger(liveObservation.receipt) && liveObservation.receipt > history.liveReceipt
+    && liveObservation.receipt <= observed.liveReceipt, 'The actual post-ready subscribed log has a new bounded observation receipt.');
   assert.equal(observed.entries.find(entry => entry.id === live.eventId)?.protectedContentOmitted, false,
     'Actual live projection carries the same explicit omission status.');
   assert.equal((await session.rpc.canvas.open(input)).url, first.url);
@@ -252,6 +260,12 @@ try {
   const chapterPanel = await session.rpc.canvas.open(input);
   await session.send({ prompt: 'Synthetic first request' });
   await until(async () => requests, count => count === 1, 'first local fixture request');
+  const predictionBaseline = await until(() => fetch(chapterPanel.url + 'events').then(r => r.json()),
+    value => value.history === 'ready' && value.entries.some(entry => entry.id === rawInputs[0]?.id), 'fresh prediction baseline while response is held');
+  assert.equal(predictionBaseline.entries.some(entry => entry.type === 'assistant.message'), false,
+    'The fixed response has not been released or observed before the prediction.');
+  const livePrediction = armLivePrediction(predictionBaseline, 'response');
+  assert.equal(livePrediction.status, 'waiting');
   await session.send({ prompt: 'Synthetic immediate input', mode: 'immediate' });
   await session.send({ prompt: 'Synthetic queued input', mode: 'enqueue' });
   releaseFirst();
@@ -259,6 +273,17 @@ try {
     value => value.entries.filter(entry => entry.type === 'assistant.turn_end').length === 3, 'synthetic request completion');
   unsubscribe();
   assert.equal(requests, 3, 'Only the three expected local synthetic responses are permitted.');
+  const predictionOutcome = resolveLivePrediction(livePrediction, chapterSnapshot);
+  assert.equal(predictionOutcome.status, 'resolved');
+  assert.equal(predictionOutcome.category, 'response');
+  const nextEligible = chapterSnapshot.entries.filter(entry => entry.observation?.receipt > livePrediction.baseline)
+    .sort((a, b) => a.observation.receipt - b.observation.receipt).find(entry => classifyPredictionEvent(entry));
+  assert.equal(predictionOutcome.entry?.id, nextEligible?.id);
+  assert.equal(predictionOutcome.entry?.type, 'assistant.message');
+  assert.equal(JSON.parse(predictionOutcome.entry.evidence).data.content, 'Synthetic local fixture response.');
+  assert.ok(predictionOutcome.entry.observation.receipt > predictionBaseline.liveReceipt);
+  assert.equal(resolveLivePrediction(predictionOutcome, chapterSnapshot), predictionOutcome,
+    'Later records in the same batch cannot replace the one resolved outcome.');
   assert.equal(rawInputs.length, 3);
   assert.equal(rawInputs[0].data.delivery, 'idle');
   assert.ok(['steering', 'queued'].includes(rawInputs[1].data.delivery), 'Use recorded delivery, not requested send mode.');

@@ -1,6 +1,6 @@
 # Trace
 
-Current version: **0.1.41**
+Current version: **0.1.42**
 
 A GitHub Copilot desktop plugin for understanding the activity inside your current chat. `/trace` opens a live timeline with turn markers and expandable recorded evidence. This is an initial proof of concept: explanations describe what events mean; they do not infer why the model made a decision.
 
@@ -59,6 +59,8 @@ The optional validation overview in Statistics lists recognized recorded checks 
 The optional repetition overview in Statistics counts exact supported calls within retained evidence and links to each occurrence. Object-key order can normalize; literal strings and array order remain significant. Source and provider identities stay separate, as do repetition, reported tool failures, typed process failures and missing results. These counts do not diagnose a stuck or inefficient agent. See [repeated activity](docs/repeated-activity.md).
 
 Use **Compare arguments** to select two retained tool calls and inspect bounded added, removed, changed or identical values. Selections keep their exact source and original evidence; incompatible, incomplete or expired records show a limitation. Protected fields stay omitted, and affected calls cannot be compared as complete arguments. MCP comparisons describe literal JSON only, with historical schema and meaning unknown. Differences do not establish why an argument changed or prove a retry. See [argument comparison](docs/argument-comparison.md).
+
+The optional **Predict next action** exercise lets you choose an observable category, then inspect the next eligible record. Live practice starts from a fresh observation boundary; retained practice reveals a frozen snapshot one outcome at a time and is labelled as rehearsal of possibly already-seen activity. Missing or ambiguous outcomes remain unknown. Live capture continues, and returning to the current view has an explicit Follow choice. This is local practice, with no model-confidence score or claim that only one next action was reasonable. See [prediction practice](docs/predict-next.md).
 
 Trace keeps up to 300 recent supported events per panel in memory, with up to 12,000 UTF-16 code units of evidence per event; omissions and shortening are labeled. Token deltas, canvas bookkeeping and replay checkpoint copies are excluded. Encrypted/opaque reasoning fields are omitted. Closing the panel releases its observer and server. Trace makes no model requests and saves no transcripts. Instruction refresh requests bounded source content from the host; Trace does not scan project paths. The host may retain its own logs; event payloads and source snapshots can contain sensitive instruction text, chat content, file paths and tool arguments.
 
