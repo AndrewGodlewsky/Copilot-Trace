@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.19",
+    "summary": "Event details now separate what happened, what the recorded result means and what remains unknown. General explanations and original evidence stay available."
+  },
+  {
     "version": "0.1.18",
     "summary": "Jump to the latest retained failure, permission request, skill load or tool result. Navigation reveals the original event and pauses Follow live."
   },

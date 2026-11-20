@@ -1,4 +1,4 @@
-import { describeActor, describeHookGroup, describeToolGroup, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
+import { describeActor, explainStep, describeHookGroup, describeToolGroup, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -182,8 +182,18 @@ function row(entry) {
     node.activityBox.append(element('p', 'Recorded assistant statement, not a verified reason or a summary of all work in this turn.'), node.activityLink);
     body.append(node.activityBox);
   }
-  node.explanation = element('p', entry.explanation);
-  body.append(element('h3', 'What this step means'), node.explanation);
+  const lesson = explainStep(entry);
+  body.append(element('h3', 'Understand this step'));
+  node.lesson = new Map();
+  for (const [key, heading] of [['happened', 'What happened'], ['means', 'What the recorded result means'], ['unknown', 'What remains unknown']]) {
+    const paragraph = element('p', lesson[key], `step-${key}`);
+    node.lesson.set(key, paragraph);
+    body.append(element('h4', heading), paragraph);
+  }
+  const general = element('details', undefined, 'general-definition');
+  node.explanation = element('p', lesson.general);
+  general.append(element('summary', 'General definition'), node.explanation);
+  body.append(general);
   const metadata = element('dl', undefined, 'metadata');
   node.metadata = new Map();
   for (const [label, value] of metadataValues(entry)) {
@@ -192,13 +202,15 @@ function row(entry) {
     metadata.append(element('dt', label), text);
   }
   body.append(metadata);
-  body.append(element('h3', 'Recorded evidence'));
+  node.recordedEvidence = element('details', undefined, 'recorded-evidence');
+  node.recordedEvidence.append(element('summary', 'Recorded evidence'));
   node.truncated = element('p', 'Evidence shortened to 12,000 characters. The complete event is not retained by this panel.', 'evidence-truncated');
   node.truncated.hidden = !entry.truncated;
   node.pre = element('pre', entry.evidence);
   node.pre.tabIndex = 0;
   node.pre.setAttribute('aria-label', 'Recorded event data');
-  body.append(node.truncated, node.pre);
+  node.recordedEvidence.append(node.truncated, node.pre);
+  body.append(node.recordedEvidence);
   node.details.append(body);
   return node;
 }
@@ -226,6 +238,7 @@ function showBoundary(id, message = 'Showing original retained event. Follow liv
   activityFilter.value = 'everything';
   render(lastSnapshot);
   node.details.open = true;
+  node.recordedEvidence.open = true;
   node.summary.focus({ preventScroll: true });
   node.summary.scrollIntoView({ block: 'center' });
   navigationStatus.textContent = message;
@@ -416,7 +429,9 @@ function render(snapshot) {
     for (const [label, value] of metadataValues(entry)) {
       if (node.metadata.get(label).textContent !== value) node.metadata.get(label).textContent = value;
     }
-    if (node.explanation.textContent !== (entry.explanation || '')) node.explanation.textContent = entry.explanation || '';
+    const lesson = explainStep(entry);
+    for (const [key, paragraph] of node.lesson) if (paragraph.textContent !== lesson[key]) paragraph.textContent = lesson[key];
+    if (node.explanation.textContent !== lesson.general) node.explanation.textContent = lesson.general;
     if (node.pre.textContent !== (entry.evidence || '')) node.pre.textContent = entry.evidence || '';
     node.truncated.hidden = !entry.truncated;
     applyContext(node, context, entry);

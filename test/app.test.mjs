@@ -104,6 +104,69 @@ function filterMode(ui, value) {
 const byClass = (element, name) => walk(element).find(node => node.className.split(' ').includes(name));
 const evidenceRows = group => byClass(group, 'tool-events').children;
 
+test('structured explanations and optional literal evidence update without replacing focused disclosures in every view', () => {
+  for (const mode of ['grouped', 'chronological', 'chapters', 'lanes']) {
+    const ui = fixture(appSource);
+    ui.get('#event-order').value = mode;
+    const make = success => ({ ...end, explanation: '<img> Authored definition 日本語😀', success,
+      evidence: JSON.stringify({ id: end.id, type: end.type, timestamp: end.timestamp, data: { success } }) });
+    const first = make(true);
+    ui.render([first]);
+    const row = walk(ui.get('#timeline')).find(node => node.className.split(' ').includes('step')
+      && walk(node).some(child => child.tagName === 'pre' && child.textContent === first.evidence)
+      && !node.className.includes('group') && !node.className.includes('chapter') && !node.className.includes('lane'));
+    const details = row.firstElementChild;
+    details.open = true;
+    assert.ok(walk(row).some(node => node.textContent === 'Understand this step'));
+    for (const heading of ['What happened', 'What the recorded result means', 'What remains unknown']) {
+      assert.ok(walk(row).some(node => node.tagName === 'h4' && node.textContent === heading));
+    }
+    const general = byClass(row, 'general-definition');
+    const evidence = byClass(row, 'recorded-evidence');
+    assert.equal(general.open, false);
+    assert.equal(evidence.open, false);
+    general.open = true;
+    evidence.open = true;
+    const pre = walk(evidence).find(node => node.tagName === 'pre');
+    pre.focus();
+    const meaning = byClass(row, 'step-means');
+    assert.match(meaning.textContent, /reports success/i);
+    assert.ok(general.textContent.includes('<img> Authored definition 日本語😀'));
+    assert.equal(walk(row).filter(node => node.tagName === 'img').length, 0);
+    const replacement = { ...make(false), explanation: 'Updated authored definition.' };
+    ui.render([replacement]);
+    assert.equal(byClass(row, 'step-means'), meaning);
+    assert.match(meaning.textContent, /reports failure/i);
+    assert.equal(pre.textContent, replacement.evidence);
+    assert.equal(ui.document.activeElement, pre);
+    assert.equal(details.open, true);
+    assert.equal(general.open, true);
+    assert.equal(evidence.open, true);
+    assert.ok(general.textContent.includes('Updated authored definition.'));
+    ui.render([{ ...replacement, truncated: true }]);
+    assert.match(meaning.textContent, /outcome.*unavailable/i);
+    assert.match(byClass(row, 'step-unknown').textContent, /complete.*matching.*unavailable/i);
+    assert.equal(byClass(row, 'evidence-truncated').hidden, false);
+    assert.equal(ui.document.activeElement, pre);
+  }
+});
+
+test('jumping to an original event opens its retained nested evidence disclosure', () => {
+  const ui = fixture(appSource);
+  ui.render([start, end]);
+  const row = evidenceRows(ui.get('#timeline').firstElementChild)[1];
+  const evidence = byClass(row, 'recorded-evidence');
+  assert.ok(evidence, 'Literal evidence has an optional disclosure.');
+  assert.equal(evidence.open, false);
+  ui.get('#event-target').value = 'result';
+  ui.get('#event-target').dispatch('change');
+  ui.get('#jump-event').dispatch('click');
+  assert.equal(evidence.open, true);
+  assert.equal(row.firstElementChild.open, true);
+  assert.equal(ui.document.activeElement, row.firstElementChild.firstElementChild);
+  assert.equal(walk(evidence).find(node => node.tagName === 'pre').textContent, end.evidence);
+});
+
 const activityStart = { id: 'activity-start', type: 'assistant.turn_start', category: 'turn', agentId: '',
   turnId: '0', model: 'fixture-model', timestamp: '2026-11-20T12:00:00Z', evidence: '{}' };
 function activityIntent(id, text, timestamp = '2026-11-20T12:00:01Z', extra = {}) {
@@ -721,7 +784,7 @@ test('latest-event controls reveal exact original evidence through every view an
     for (const [category, text] of [['failure', 'failure evidence'], ['permission', 'permission evidence'], ['skill', 'skill evidence'], ['result', 'private result evidence']]) {
       const ui = fixture(appSource);
       ui.render(navigationEntries);
-      const prior = evidenceNode(ui, 'input evidence').closest('details');
+      const prior = evidenceNode(ui, 'input evidence').closest('li').firstElementChild;
       prior.open = true;
       const evidence = evidenceNode(ui, text), row = evidence.closest('li'), details = row.firstElementChild;
       ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change');
@@ -824,7 +887,7 @@ test('repeated deliberate jumps use the current snapshot while live arrival stay
   assert.equal(page.scrollTop, 120, 'New activity cannot pull the reader away from the chosen event.');
   assert.equal(ui.document.activeElement, oldFocus);
   jump.focus(); jump.dispatch('click');
-  const newestFocus = evidenceNode(ui, 'new result').closest('details').firstElementChild;
+  const newestFocus = evidenceNode(ui, 'new result').closest('li').firstElementChild.firstElementChild;
   assert.equal(ui.document.activeElement, newestFocus);
   jump.focus(); jump.dispatch('click');
   assert.equal(ui.document.activeElement, newestFocus, 'Repeated keyboard activation returns to the same retained target.');

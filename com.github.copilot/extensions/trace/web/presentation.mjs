@@ -58,6 +58,133 @@ export function describeActor(entry) {
   return { role: actorRoles.get(entry.type) || 'Actor unknown', source };
 }
 
+const stepLessons = new Map(Object.entries({
+  'user.message': ['The host recorded user input.',
+    'Input supplies a request or context; the event is a record of delivery, not a response.',
+    'This event does not show whether the assistant read, acted on or correctly answered the input.'],
+  'assistant.turn_start': ['The host recorded a model turn starting.',
+    'A turn is one iteration of the agent loop; a request can involve several turns.',
+    'The end, outcome and reason for this iteration are not established by its start.'],
+  'assistant.turn_end': ['The host recorded a model turn ending.',
+    'This iteration ended; more turns or tool calls may follow.',
+    'A turn ending does not establish that the user’s task is finished or correct.'],
+  'assistant.intent': ['The host recorded an assistant’s reported activity.',
+    'The activity text is an assistant statement about its work.',
+    'This is not an independently verified reason for a choice or a complete account of internal decisions.'],
+  'assistant.message': ['The host recorded an assistant message.',
+    'This is a reported response; its evidence may also contain tool requests.',
+    'The event alone does not verify the response’s claims, correctness or reasons.'],
+  'assistant.reasoning': ['The host recorded exposed reasoning text.',
+    'This is text the host exposed as reasoning, not a complete view of the model’s internal process.',
+    'Unrecorded internal decisions and independently verified reasons remain unknown.'],
+  'tool.execution_start': ['The runtime recorded a tool invocation starting.',
+    'Arguments describe a requested operation. This start does not prove the operation executed; permission may still be required.',
+    'The result and reason for choosing this tool are not established here. A missing result does not mean it is still running.'],
+  'tool.execution_complete': ['The runtime recorded a tool result.',
+    'The reported outcome is unavailable; a result event alone does not establish success.',
+    'A tool result does not establish that the user’s task is correct or complete. Missing boundaries leave the call record partial.'],
+  'skill.invoked': ['The host recorded a skill being loaded.',
+    'A skill supplies instructions or context. The recorded trigger is unavailable or unrecognized.',
+    'Loading does not prove the instructions were followed or identify which instruction caused the choice.'],
+  'subagent.started': ['The host recorded a delegated agent starting.',
+    'Delegation gives another agent a piece of work; the event records its start.',
+    'The outcome is not established here. A missing outcome does not mean the agent is still running.'],
+  'subagent.completed': ['The host recorded a delegated agent outcome.',
+    'Cancellation status is unavailable; the event type alone does not distinguish completion from cancellation.',
+    'This event does not independently verify that the delegated task is correct or that the overall task is complete.'],
+  'subagent.failed': ['The host reported a delegated agent failure.',
+    'This is a failure report for delegated work; the evidence may provide a recorded error.',
+    'The root cause, recovery and effect on the overall task are not established by this event alone.'],
+  'hook.start': ['The harness recorded a hook starting.',
+    'A hook is configured automation run at a workflow point.',
+    'This start does not establish the result, what changed or which configuration selected the hook.'],
+  'hook.end': ['The harness recorded a hook result.',
+    'The reported outcome is unavailable; a result event alone does not establish success.',
+    'A hook result does not verify the user’s task or prove which later actions it affected.'],
+  'permission.requested': ['The harness requested a permission decision.',
+    'A permission request asks whether an operation may proceed; it is not approval or proof of execution.',
+    'The decision and who or what will make it are not established by the request.'],
+  'permission.completed': ['The harness recorded a permission decision.',
+    'The recorded decision result is unavailable or unrecognized.',
+    'The decision source is unavailable; the result kind alone does not identify a person.'],
+  'session.compaction_start': ['The harness recorded context compaction starting.',
+    'Compaction attempts to reduce conversation context for later turns.',
+    'This start does not establish success or which information later turns will receive.'],
+  'session.compaction_complete': ['The harness recorded a context compaction result.',
+    'The reported outcome is unavailable; the event type alone does not establish successful compaction.',
+    'This result does not by itself establish the exact context or behavior of later turns.'],
+  'session.error': ['The host reported a session error.',
+    'An error records a problem the host reported; its literal text remains available in evidence.',
+    'The root cause, recovery and effect on the user’s task are not established by this event alone.'],
+  'session.info': ['The host recorded an informational message.',
+    'This is a host notice, not an assistant action or a task outcome.',
+    'The notice alone does not establish what caused later activity or whether the task succeeded.'],
+  'session.warning': ['The host recorded a warning.',
+    'A warning flags a concern reported by the host; it is not by itself a failed task.',
+    'The cause, impact and any recovery are not established by this event alone.'],
+  'abort': ['The host recorded an interruption.',
+    'Work was interrupted; this event is distinct from a successful result.',
+    'The initiator, cause and whether other work continued are not established by the event type alone.'],
+}));
+
+function explanationData(entry) {
+  if (entry.truncated || typeof entry.id !== 'string' || !entry.id || entry.id.length > 256
+    || typeof entry.evidence !== 'string' || entry.evidence.length > 12000) return null;
+  let event;
+  try { event = JSON.parse(entry.evidence); } catch { return null; }
+  const agent = event?.agentId === undefined ? ''
+    : typeof event.agentId === 'string' && event.agentId.length > 0 && event.agentId.length <= 256 ? event.agentId : null;
+  const data = event?.data;
+  return event?.id === entry.id && event.type === entry.type && agent !== null && agent === entry.agentId
+    && (event.timestamp ?? '') === entry.timestamp && data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+}
+
+export function explainStep(entry = {}) {
+  const lesson = stepLessons.get(entry.type);
+  if (!lesson) return {
+    happened: 'An unrecognized event type was recorded.',
+    means: 'An explanation for this event type is unavailable. Inspect its literal evidence when available.',
+    unknown: 'Its meaning, outcome and reason are unknown; no behavior is inferred from its name.',
+    general: 'No general definition is available for this event type.',
+  };
+  let [happened, means, unknown] = lesson;
+  const data = explanationData(entry);
+  if (['tool.execution_complete', 'hook.end', 'session.compaction_complete'].includes(entry.type)
+    && typeof data?.success === 'boolean' && data.success === entry.success) {
+    means = `The recorded success field reports ${data.success ? 'success' : 'failure'} for this operation. It is a reported outcome, not an independent check.`;
+  }
+  if (entry.type === 'subagent.completed' && typeof data?.cancelled === 'boolean') {
+    means = data.cancelled ? 'The recorded cancelled field reports cancellation of the delegated work.'
+      : 'The recorded cancelled field reports completion without cancellation; this is not a check of the result’s correctness.';
+  }
+  if (entry.type === 'skill.invoked' && ['agent-invoked', 'user-invoked', 'context-load'].includes(data?.trigger)
+    && data.trigger === entry.trigger) {
+    means = `A skill supplies instructions or context. The recorded trigger is ${data.trigger}; this is the host’s attribution.`;
+  }
+  if (entry.type === 'user.message' && ['idle', 'steering', 'queued'].includes(data?.delivery) && data.delivery === entry.delivery) {
+    means = `The recorded delivery is ${data.delivery}. ` + {
+      idle: 'Idle input starts a request while no run is in flight.',
+      steering: 'Steering input is delivered into an existing run.',
+      queued: 'Queued input is scheduled for a later run.',
+    }[data.delivery];
+  }
+  if (entry.type === 'permission.completed') {
+    const kind = data?.result && typeof data.result === 'object' && !Array.isArray(data.result) ? data.result.kind : null;
+    if (['approved', 'approved-read-only-for-session', 'approved-for-session', 'approved-for-location'].includes(kind)) {
+      means = `The recorded decision kind is ${kind}. Approval permits an operation; it does not prove it executed.`;
+    } else if (['denied-by-rules', 'denied-no-approval-rule-and-could-not-request-from-user', 'denied-interactively-by-user',
+      'denied-by-content-exclusion-policy', 'denied-by-permission-request-hook', 'cancelled'].includes(kind)) {
+      means = `The recorded decision kind is ${kind}. This records a refusal or cancellation, not a successful operation.`;
+    }
+    if (['assisted_approval', 'human_response', 'host_policy', 'unattended_fallback', 'authorization_carry_forward'].includes(data?.decisionSource)) {
+      unknown = `Recorded decision source: ${data.decisionSource}. This attribution does not independently prove that a person interacted or that the operation executed.`;
+    }
+  }
+  if (!data) unknown += ' Complete, matching event data is unavailable; only the recorded event type is described.';
+  return { happened, means, unknown,
+    general: typeof entry.explanation === 'string' && entry.explanation ? entry.explanation : 'No further general definition is available.' };
+}
+
 function toolIdentity(entry) {
   return typeof entry.agentId === 'string' && entry.agentId.length <= 256
     && typeof entry.toolCallId === 'string' && entry.toolCallId.length > 0 && entry.toolCallId.length <= 256
