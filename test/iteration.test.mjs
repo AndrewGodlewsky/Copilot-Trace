@@ -118,6 +118,42 @@ test('changing UI evidence during verification fails the receipt', async t => {
   assert.equal((await iteration.statusIteration(root, 'change')).ready, false);
 });
 
+test('explicit owner UI deferral preserves automated gates and reports pending acceptance', async t => {
+  const { root, dir } = await fixture(t, { ui: true, host: true });
+  const report = join(dir, 'deferral.md');
+  await writeFile(report, 'Owner explicitly deferred native UI acceptance for this batch. Pending: narrow layout and keyboard focus.');
+  assert.equal(typeof iteration.recordUiDeferral, 'function');
+  await iteration.recordUiDeferral(root, 'change', report);
+  assert.equal((await json(join(dir, 'ui.json'))).decision, 'deferred');
+  const seen = [];
+  const result = await iteration.verifyIteration(root, 'change', { runner: async gate => { seen.push(gate.command); return pass(); } });
+  assert.deepEqual(seen, ['npm test', 'npm run check', 'npm run e2e']);
+  assert.equal(result.status, 'passed');
+  assert.equal(result.ui, 'deferred');
+  const status = await iteration.statusIteration(root, 'change');
+  assert.equal(status.ready, true);
+  assert.equal(status.ui, 'deferred');
+  const failure = await iteration.verifyIteration(root, 'change', { runner: async () => ({ code: 1, stdout: 'failed' }) });
+  assert.equal(failure.status, 'failed');
+  assert.equal((await iteration.statusIteration(root, 'change')).ready, false);
+});
+
+test('UI deferral rejects empty evidence and becomes stale after candidate changes', async t => {
+  const { root, dir, approve } = await fixture(t, { ui: true });
+  const report = join(dir, 'deferral.md');
+  await writeFile(report, ' ');
+  assert.equal(typeof iteration.recordUiDeferral, 'function');
+  await assert.rejects(iteration.recordUiDeferral(root, 'change', report), /empty/i);
+  await writeFile(report, 'Owner explicitly defers native checks; narrow layout remains pending.');
+  await iteration.recordUiDeferral(root, 'change', report);
+  await writeFile(join(dir, 'ui-evidence.txt'), 'changed authorization');
+  await assert.rejects(iteration.verifyIteration(root, 'change', { runner: pass }), /UI acceptance/i);
+  await iteration.recordUiDeferral(root, 'change', report);
+  await writeFile(join(root, 'source.mjs'), 'changed candidate');
+  await approve();
+  await assert.rejects(iteration.verifyIteration(root, 'change', { runner: pass }), /UI acceptance/i);
+});
+
 test('a missing approval records a failed preflight without executing gates', async t => {
   const { root, dir } = await fixture(t);
   await rm(join(dir, 'review.json'));

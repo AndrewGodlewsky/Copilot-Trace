@@ -54,13 +54,25 @@ Verification runs `npm test` and `npm run check`, plus `npm run e2e` for declare
 npm run iteration -- ui issue-123 .iteration/issue-123/owner-ui-report.md
 ```
 
-This command records acceptance already received; it cannot perform a visual check or prove who authored the report. Record it only after the owner confirms the required UI checks pass. Missing, altered or stale UI evidence blocks verification. Explorer's product-specific `check:ui` browser suite and `--allow-ui` flag are not used here. Do not automate browser/desktop UI without an explicit request; use Brave if authorized and still distinguish browser-layout evidence from native-host acceptance. Missing runtime prerequisites and failed checks are failures, never silent passes. The SDK fixture uses the installed runtime and disposable local fixtures, not a paid provider or an existing user session.
+This command records acceptance already received; it cannot perform a visual check or prove who authored the report. Record it only after the owner confirms the required UI checks pass. Missing, altered or stale UI evidence blocks verification unless the owner has explicitly authorized the deferral below. Explorer's product-specific `check:ui` browser suite and `--allow-ui` flag are not used here. Do not automate browser/desktop UI without an explicit request; use Brave if authorized and still distinguish browser-layout evidence from native-host acceptance. Missing runtime prerequisites and failed checks are failures, never silent passes. The SDK fixture uses the installed runtime and disposable local fixtures, not a paid provider or an existing user session.
 
 Console output is a compact result with evidence references. Full command output and hashes stay under `.iteration/<id>/`. On resume, run `status` first: reuse fresh passing evidence unless a new requirement or unresolved concern warrants more checks. `verify` deliberately reruns the gates when invoked. `status` checks candidate content, requirements, approval and check evidence. New/deleted/edited source files, changed briefs or modified logs invalidate readiness; edits during checks also fail. A content-preserving commit can retain readiness. After interruption, inspect the receipt and any lock before retrying; do not delete a live verifier's lock.
 
 Ready means the candidate has recorded fresh checks and approval. It does not mean published or fully accepted on real hardware. Run any additional acceptance required by the issue, and explicitly report manual exclusions (for example microphone, live model, screen reader or IME). The helper does not attest these by implication.
 
 Follow AGENTS.md's release steps: synchronized version and notes, required gates, package validation, safe integration, push to main and remote commit verification. Fetch before publication. Integration that changes tested content needs fresh review of the delta and fresh gates. The CLI neither commits nor pushes. Keep the final commit/version and remote verification in the completion report. Never overwrite another worktree's unfinished changes.
+
+### Authorized UI deferral
+
+The owner may explicitly defer manual UI acceptance for a specified run or scope while retaining automated checks, independent review and publication. Preserve the actual authorization, its source/scope and the issue-specific pending manual checks in a local report, then run:
+
+```powershell
+npm run iteration -- defer-ui issue-123 .iteration/issue-123/owner-deferral.md
+```
+
+Keep the brief's `ui` declaration true. This records `decision: deferred`, binds the report to the candidate and brief, and lets the normal verifier run all required automated gates. `verify` and `status` report `ui: deferred`; they do not report native acceptance. Empty, modified or stale evidence still blocks readiness. Like review/acceptance attestations, this command records an authorization already received; it cannot authenticate the person or grant itself permission.
+
+Apply a deferral only within the owner's stated scope; being unavailable does not authorize one. Publish only after the remaining gates pass. Issue comments and completion reports must name the outstanding native checks and distinguish implementation/publication from full manual acceptance. Keep an issue open when its manual acceptance is still pending. Record actual UI acceptance with `ui` and rerun verification when those checks occur. This exception does not authorize UI automation, paid inference or skipping another failed check.
 
 ## 5. Record measured usage when available
 

@@ -23,6 +23,8 @@ Tests must use disposable data and local model fixtures, never paid inference or
 
 Respect the owner's global restriction: no computer-use or browser UI automation without an explicit request. Ask the owner to perform manual UI checks. Use Brave if browser opening is authorized.
 
+When the owner explicitly defers manual UI acceptance for a stated run or scope, follow the [authorized deferral procedure](docs/development-workflow.md#authorized-ui-deferral). Keep visible changes declared `ui: true`, record the authorization and pending checks, and retain every automated/review/publication gate. A deferral is never a claim that native UI checks passed.
+
 Install through Copilot's CLI; do not edit host databases or installed-plugin records. A local marketplace loads its checkout live, so retain that directory and start a new session after changes.
 
 ## Complete every iteration

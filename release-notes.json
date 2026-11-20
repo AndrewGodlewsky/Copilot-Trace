@@ -1,7 +1,7 @@
 [
   {
     "version": "0.1.11",
-    "summary": "Show plain-language titles for recognized view and search requests while keeping original evidence and result status available."
+    "summary": "Show plain-language titles for recognized view and search requests while keeping original evidence and result status available. Release checks can now record an explicitly authorized deferral of manual UI review."
   },
   {
     "version": "0.1.10",

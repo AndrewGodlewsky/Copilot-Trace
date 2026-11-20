@@ -154,7 +154,15 @@ export async function reviewIteration(root, id, reviewer, evidenceFile) {
   });
 }
 
-export async function recordUiAcceptance(root, id, evidenceFile) {
+export function recordUiAcceptance(root, id, evidenceFile) {
+  return recordUiDecision(root, id, evidenceFile, 'accepted');
+}
+
+export function recordUiDeferral(root, id, evidenceFile) {
+  return recordUiDecision(root, id, evidenceFile, 'deferred');
+}
+
+async function recordUiDecision(root, id, evidenceFile, decision) {
   return withLock(root, id, async dir => {
     const { brief, briefHash } = await completedBrief(root, id);
     if (!brief.ui) throw new Error('UI acceptance requires a declared UI change.');
@@ -163,10 +171,10 @@ export async function recordUiAcceptance(root, id, evidenceFile) {
     const candidate = await fingerprint(root);
     await atomicWrite(root, join(dir, 'ui-evidence.txt'), evidence);
     await atomicWrite(root, join(dir, 'ui.json'), jsonText({
-      schemaVersion: 1, id, decision: 'accepted', candidate, briefHash,
+      schemaVersion: 1, id, decision, candidate, briefHash,
       evidence: 'ui-evidence.txt', evidenceHash: digest(evidence), recordedAt: new Date().toISOString(),
     }));
-    return { command: 'ui', id, status: 'recorded', evidence: `.iteration/${id}/ui.json` };
+    return { command: decision === 'deferred' ? 'defer-ui' : 'ui', id, status: 'recorded', ui: decision, evidence: `.iteration/${id}/ui.json` };
   });
 }
 
@@ -185,18 +193,20 @@ async function reviewedCandidate(root, id) {
   const evidence = await localRead(root, join(dir, 'review-evidence.txt'));
   if (!evidence.toString('utf8').trim() || digest(evidence) !== approval.evidenceHash) throw new Error('Review evidence is modified or empty.');
   let uiHash = null;
+  let ui = 'not-required';
   if (brief.ui) {
     try {
       const bytes = await localRead(root, join(dir, 'ui.json'));
       const acceptance = JSON.parse(bytes.toString('utf8'));
-      if (!acceptance || acceptance.schemaVersion !== 1 || acceptance.id !== id || acceptance.decision !== 'accepted'
+      if (!acceptance || acceptance.schemaVersion !== 1 || acceptance.id !== id || !['accepted', 'deferred'].includes(acceptance.decision)
         || acceptance.candidate !== candidate || acceptance.briefHash !== briefHash || acceptance.evidence !== 'ui-evidence.txt') throw new Error('Invalid or stale receipt.');
       const uiEvidence = await localRead(root, join(dir, 'ui-evidence.txt'));
       if (!uiEvidence.toString('utf8').trim() || digest(uiEvidence) !== acceptance.evidenceHash) throw new Error('Modified or empty evidence.');
       uiHash = digest(bytes);
-    } catch (error) { throw new Error('Owner UI acceptance is missing, invalid or stale for this candidate/brief.', { cause: error }); }
+      ui = acceptance.decision;
+    } catch (error) { throw new Error('Owner UI acceptance or authorized deferral is missing, invalid or stale for this candidate/brief.', { cause: error }); }
   }
-  return { brief, candidate, briefHash, approvalHash: digest(approvalBytes), evidenceHash: digest(evidence), uiHash };
+  return { brief, candidate, briefHash, approvalHash: digest(approvalBytes), evidenceHash: digest(evidence), uiHash, ui };
 }
 
 function gatesFor(brief) {
@@ -247,7 +257,7 @@ export async function verifyIteration(root, id, { runner = realRunner } = {}) {
     }
     const receipt = {
       schemaVersion: 1, id, status: 'failed', candidate: before.candidate, briefHash: before.briefHash,
-      approvalHash: before.approvalHash, evidenceHash: before.evidenceHash, uiHash: before.uiHash, gates: [], startedAt: new Date().toISOString(),
+      approvalHash: before.approvalHash, evidenceHash: before.evidenceHash, uiHash: before.uiHash, ui: before.ui, gates: [], startedAt: new Date().toISOString(),
     };
     try {
       receipt.head = (await git(root, ['rev-parse', 'HEAD'])).trim();
@@ -274,7 +284,7 @@ export async function verifyIteration(root, id, { runner = realRunner } = {}) {
     } catch (error) { receipt.reason = error.message; }
     receipt.finishedAt = new Date().toISOString();
     await atomicWrite(root, join(dir, 'verification.json'), jsonText(receipt));
-    return { command: 'verify', id, status: receipt.status, reason: receipt.reason, evidence: `.iteration/${id}/verification.json`, gates: receipt.gates.map(({ command, code, stdout, stderr }) => ({ command, status: code === 0 ? 'passed' : 'failed', stdout: `.iteration/${id}/${stdout.path}`, stderr: `.iteration/${id}/${stderr.path}` })) };
+    return { command: 'verify', id, status: receipt.status, ui: before.ui, reason: receipt.reason, evidence: `.iteration/${id}/verification.json`, gates: receipt.gates.map(({ command, code, stdout, stderr }) => ({ command, status: code === 0 ? 'passed' : 'failed', stdout: `.iteration/${id}/${stdout.path}`, stderr: `.iteration/${id}/${stderr.path}` })) };
   });
 }
 
@@ -302,7 +312,7 @@ export async function statusIteration(root, id) {
           || digest(await localRead(root, join(dir, evidence.path))) !== evidence.hash) throw new Error('Verification log evidence is missing or modified.');
       }
     }
-    return { command: 'status', id, ready: true, status: 'ready', evidence: `.iteration/${id}/verification.json` };
+    return { command: 'status', id, ready: true, status: 'ready', ui: current.ui, evidence: `.iteration/${id}/verification.json` };
   } catch (error) { return { command: 'status', id, ready: false, status: 'not-ready', reasons: [error.message] }; }
 }
 
@@ -362,10 +372,11 @@ async function main(args) {
   if (command === 'start' && rest.length === 0) result = await startIteration(repository, id);
   else if (command === 'review' && rest.length === 2) result = await reviewIteration(repository, id, rest[0], resolve(rest[1]));
   else if (command === 'ui' && rest.length === 1) result = await recordUiAcceptance(repository, id, resolve(rest[0]));
+  else if (command === 'defer-ui' && rest.length === 1) result = await recordUiDeferral(repository, id, resolve(rest[0]));
   else if (command === 'verify' && rest.length === 0) result = await verifyIteration(repository, id);
   else if (command === 'status' && rest.length === 0) result = await statusIteration(repository, id);
   else if (command === 'usage' && rest.length === 1) result = await recordUsage(repository, id, resolve(rest[0]));
-  else throw new Error('Usage: iteration start <id> | review <id> <reviewer> <evidence-file> | ui <id> <owner-report> | verify <id> | status <id> | usage <id> <entry.json>');
+  else throw new Error('Usage: iteration start <id> | review <id> <reviewer> <evidence-file> | ui <id> <owner-report> | defer-ui <id> <owner-authorization-and-pending-checks> | verify <id> | status <id> | usage <id> <entry.json>');
   console.log(JSON.stringify(result));
   if (result.status === 'failed' || result.ready === false) process.exitCode = 1;
 }
