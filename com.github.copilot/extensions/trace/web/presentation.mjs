@@ -181,6 +181,82 @@ export function skillInstructions(entry = {}) {
   };
 }
 
+function compactionMetrics(data) {
+  const count = value => Number.isSafeInteger(value) && value >= 0;
+  const basis = typeof data?.tokenAccountingBasis === 'string' ? data.tokenAccountingBasis : null;
+  const before = data?.preCompactionTokens, after = data?.postCompactionTokens;
+  const removed = data?.tokensRemoved, messages = data?.messagesRemoved, length = data?.preCompactionMessagesLength;
+  const tokenConflict = removed !== undefined && (!count(removed)
+    || (count(before) && count(after) && removed !== before - after));
+  const messageConflict = messages !== undefined && (!count(messages)
+    || (length !== undefined && (!count(length) || messages > length)));
+  const comparable = basis === 'local_full_context_estimate' && count(before) && count(after) && !tokenConflict;
+  return {
+    status: comparable ? 'comparable' : !data || basis === null ? 'unavailable' : 'incomparable', basis,
+    before: comparable ? before : null, after: comparable ? after : null, change: comparable ? before - after : null,
+    tokensRemoved: count(removed) && !tokenConflict ? removed : null,
+    messagesRemoved: count(messages) && !messageConflict ? messages : null,
+    note: (comparable ? 'Comparable context-token estimates, measured on the reported local_full_context_estimate basis.'
+      : tokenConflict ? 'Context comparison unavailable: reported token measurements are invalid or inconsistent.'
+      : basis !== null && basis !== 'local_full_context_estimate' ? 'Context comparison unavailable: the reported accounting basis is unrecognized.'
+      : 'Context comparison unavailable: a recognized accounting basis and valid paired context-token estimates are not retained.')
+      + (messageConflict ? ' Reported message reduction is invalid or inconsistent and is unavailable.' : '')
+      + ' These are separate from summarizer inference usage and do not measure memory retention.',
+  };
+}
+
+export function compactionAttempts(entries) {
+  const attempts = [], byIdentity = new Map(), dataByEntry = new Map();
+  for (const entry of entries) {
+    if (!['session.compaction_start', 'session.compaction_complete'].includes(entry.type)) continue;
+    let data = explanationData(entry);
+    if (entry.type === 'session.compaction_complete'
+      && (typeof data?.success === 'boolean' ? data.success : null) !== entry.success) data = null;
+    dataByEntry.set(entry, data);
+    const id = typeof data?.compactionAttemptId === 'string' && data.compactionAttemptId.trim().length > 0
+      && data.compactionAttemptId.length <= 256 ? data.compactionAttemptId : null;
+    const identity = id === null ? null : JSON.stringify([entry.agentId, id]);
+    let attempt = identity === null ? null : byIdentity.get(identity);
+    if (!attempt) {
+      attempt = { id: identity === null ? `unlinked-compaction:${entry.id}` : `compaction:${identity}`,
+        agentId: entry.agentId, compactionAttemptId: id, entries: [] };
+      attempts.push(attempt);
+      if (identity !== null) byIdentity.set(identity, attempt);
+    }
+    attempt.entries.push(entry);
+  }
+  for (const attempt of attempts) {
+    const starts = attempt.entries.filter(entry => entry.type === 'session.compaction_start');
+    const ends = attempt.entries.filter(entry => entry.type === 'session.compaction_complete');
+    const conflict = starts.length > 1 || ends.length > 1
+      || (starts.length === 1 && ends.length === 1 && attempt.entries[0] !== starts[0]);
+    attempt.status = conflict ? 'conflict' : attempt.compactionAttemptId === null ? 'unlinked'
+      : !starts.length ? 'complete-only' : !ends.length ? 'start-only' : 'paired';
+    const data = !conflict && ends.length === 1 ? dataByEntry.get(ends[0]) : null;
+    attempt.outcome = data?.success === true ? 'success' : data?.success === false ? 'failure' : 'unknown';
+    attempt.reportedOutcome = typeof data?.outcome === 'string' ? data.outcome : null;
+    const content = typeof data?.summaryContent === 'string' ? data.summaryContent : null;
+    attempt.summary = {
+      status: content === null ? 'unavailable' : content === '' ? 'empty' : 'complete', content,
+      note: content !== null ? content === '' ? 'The host recorded an empty summary.'
+        : `${content.length} UTF-16 code units of exact host-reported LLM summary retained.`
+        : attempt.entries.some(entry => entry.truncated) ? 'Summary unavailable: Trace clipped event evidence to at most 12,000 UTF-16 code units and cannot recover the complete summary.'
+        : !data ? 'Summary unavailable: a unique completion with complete matching evidence is not retained.'
+        : 'Summary unavailable: the host did not record a text summary.',
+    };
+    attempt.metrics = compactionMetrics(data);
+    attempt.notes = [conflict ? starts.length > 1 || ends.length > 1
+      ? 'Duplicate boundaries for this source and attempt ID conflict; no unique attempt result is inferred.'
+      : 'The completion appears before its start in retained event order; the boundary record conflicts.'
+      : attempt.status === 'unlinked' ? 'Pairing unavailable: complete matching evidence, a known source and a nonempty bounded attempt ID are required. Time, names and chronological parent IDs do not establish a match.'
+      : attempt.status === 'start-only' ? 'Completion not retained. This does not mean compaction is still running.'
+      : attempt.status === 'complete-only' ? 'Start not retained. This completion can report its own result; no start is inferred.'
+      : 'Start and completion share the exact recorded source and compaction attempt ID.',
+    'The summary is a host-reported LLM summary, not all context or proof of what future turns retain. Whether any instruction or fact was preserved, followed or forgotten remains unknown.'];
+  }
+  return attempts;
+}
+
 export function explainStep(entry = {}) {
   const lesson = stepLessons.get(entry.type);
   if (!lesson) return {

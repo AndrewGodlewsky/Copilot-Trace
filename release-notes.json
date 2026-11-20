@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.32",
+    "summary": "Inspect recorded compaction summaries and comparable context-token estimates. Missing boundaries, shortened evidence and unknown memory effects remain explicit."
+  },
+  {
     "version": "0.1.31",
     "summary": "Compare instruction guidance, configured hooks and permission controls, with examples from retained events. Recorded decisions stay separate from general explanations and task correctness."
   },

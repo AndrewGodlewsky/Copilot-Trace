@@ -171,6 +171,9 @@ input { accent-color: var(--model); margin: 0; }
 .evidence > details > summary, .skill-instructions > details > summary { cursor: pointer; font-size: 0.857rem; padding: 6px 0; }
 .skill-instructions .metadata dd { white-space: pre-wrap; }
 .skill-preview { max-height: min(10rem, 35vh); }
+.compaction { overflow-wrap: anywhere; }
+.compaction button { max-width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.compaction-summary { max-height: min(22rem, 45vh); overscroll-behavior: contain; }
 .metadata { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 14px; font-size: 0.786rem; margin: 16px 0; }
 .metadata dt { color: var(--muted); }
 .metadata dd { margin: 0; overflow-wrap: anywhere; }

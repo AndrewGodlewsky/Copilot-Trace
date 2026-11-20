@@ -980,6 +980,121 @@ test('skill body changes from available to unavailable clear stale text and safe
   assert.equal(byClass(row, 'skill-arguments').hidden, true);
 });
 
+async function compactionFixture(data = {}, startOnly = false) {
+  const raw = [
+    { id: 'compact-start', type: 'session.compaction_start', timestamp: '2026-11-20T12:00:00Z', data: { compactionAttemptId: 'attempt' } },
+    { id: 'compact-end', type: 'session.compaction_complete', timestamp: '2026-11-20T12:00:01Z', data: {
+      compactionAttemptId: 'attempt', success: true, outcome: 'applied', summaryContent: 'Exact <summary> 🧪',
+      tokenAccountingBasis: 'local_full_context_estimate', preCompactionTokens: 100, postCompactionTokens: 40,
+      tokensRemoved: 60, messagesRemoved: 2, ...data,
+    } },
+  ];
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => startOnly ? raw.slice(0, 1) : raw });
+  await trace.ready; const entries = trace.snapshot().entries; trace.close(); return entries;
+}
+
+test('compaction details expose literal summary with source, units and explicitly limited meaning', async () => {
+  const content = '# Café 🧪\r\n<script>literal only</script>\n' + '日'.repeat(8000);
+  const entries = await compactionFixture({ summaryContent: content, outcome: 'future <outcome>' });
+  const ui = fixture(appSource); ui.render(entries);
+  const section = byClass(ui.get('#timeline').firstElementChild, 'compaction');
+  assert.ok(section, 'A compaction event offers an optional summary and limits disclosure.');
+  assert.equal(section.tagName, 'details'); assert.equal(section.open, false);
+  const summary = byClass(section, 'compaction-summary');
+  assert.equal(summary.textContent, content); assert.equal(summary.tabIndex, 0);
+  assert.equal(summary.attributes['aria-label'], 'Exact retained compaction summary');
+  assert.match(section.textContent, /Main chat.*attempt/s);
+  assert.match(section.textContent, /Reported success.*future <outcome>/s);
+  assert.match(section.textContent, /100 → 40 context-token estimates.*decrease of 60/s);
+  assert.match(section.textContent, /local_full_context_estimate.*messages removed: 2/s);
+  assert.match(section.textContent, /UTF-16 code units.*not all context.*future turns retain/s);
+  assert.equal(walk(section).some(node => ['script', 'a', 'code', 'img'].includes(node.tagName)), false);
+  assert.equal(section.querySelectorAll('button').length, 2);
+  section.open = true; section.dispatch('toggle'); assert.equal(ui.get('#follow').checked, false);
+});
+
+test('compaction completion updates the same optional disclosure while keeping focus and reading position', async () => {
+  const entries = await compactionFixture({ summaryContent: '日'.repeat(8000) });
+  const ui = fixture(appSource); ui.render(entries.slice(0, 1), { history: 'loading' });
+  const row = ui.get('#timeline').firstElementChild, section = byClass(row, 'compaction');
+  assert.ok(section, 'A start-only attempt explains its missing completion.');
+  assert.match(section.textContent, /Completion not retained.*does not mean.*running/s);
+  reveal(section); section.open = true; section.dispatch('toggle'); section.firstElementChild.focus();
+  ui.document.scrollingElement.scrollTop = 235;
+  ui.render(entries);
+  assert.equal(byClass(row, 'compaction'), section); assert.equal(section.open, true);
+  assert.equal(ui.document.activeElement, section.firstElementChild); assert.equal(ui.document.scrollingElement.scrollTop, 235);
+  const body = byClass(section, 'compaction-summary'); body.scrollTop = 95; body.focus();
+  for (const mode of ['chronological', 'chapters', 'lanes', 'grouped']) {
+    ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change');
+    assert.equal(ui.document.activeElement, body); assert.equal(section.open, true); assert.equal(body.scrollTop, 95);
+    assert.equal(ui.document.scrollingElement.scrollTop, 235); assert.equal(ui.get('#follow').checked, false);
+    filterMode(ui, 'tools'); assert.equal(ui.document.activeElement, ui.get('#activity-filter'));
+    filterMode(ui, 'everything'); body.focus();
+  }
+  ui.render(entries.slice(1), { omitted: 1 });
+  assert.equal(row.isConnected, false); assert.equal(ui.document.activeElement.isConnected, true);
+  assert.match(byClass(ui.get('#timeline'), 'compaction').textContent, /Start not retained/);
+});
+
+test('compaction original links preserve chronology and reject expired or changed source identities', async () => {
+  const entries = await compactionFixture();
+  const ui = fixture(appSource); ui.render(entries);
+  const section = byClass(ui.get('#timeline').firstElementChild, 'compaction');
+  assert.ok(section, 'Original evidence is reachable from the disclosure.');
+  const link = section.querySelectorAll('button')[1];
+  for (const mode of ['chronological', 'chapters', 'lanes', 'grouped']) {
+    ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change');
+    filterMode(ui, 'tools'); link.dispatch('click');
+    assert.equal(ui.get('#event-order').value, 'chronological'); assert.equal(ui.get('#activity-filter').value, 'everything');
+    assert.equal(ui.get('#follow').checked, false);
+    assert.deepEqual(visibleEvidence(ui), entries.map(entry => entry.evidence));
+    const target = ui.get('#timeline').children[1];
+    assert.equal(byClass(target, 'recorded-evidence').open, true); assert.equal(ui.document.activeElement, target.firstElementChild.firstElementChild);
+  }
+  ui.render([entries[0], { ...entries[1], agentId: 'changed' }]);
+  ui.document.scrollingElement.scrollTop = 333; ui.get('#follow').checked = true; link.dispatch('click');
+  assert.match(ui.get('#navigation-status').textContent, /no longer retained/);
+  assert.equal(ui.document.scrollingElement.scrollTop, 333); assert.equal(ui.get('#follow').checked, true);
+  ui.render(entries.slice(0, 1), { omitted: 1 }); link.dispatch('click');
+  assert.equal(ui.document.scrollingElement.scrollTop, 333);
+});
+
+test('unavailable compaction content clears stale text and preserves explicit empty, clipped and metric states', async () => {
+  const entries = await compactionFixture(); const ui = fixture(appSource); ui.render(entries);
+  const section = byClass(ui.get('#timeline').children[1], 'compaction');
+  assert.ok(section, 'Completion disclosure remains available when details are missing.');
+  const body = byClass(section, 'compaction-summary'); reveal(body); body.focus();
+  ui.render([entries[0], { ...entries[1], truncated: true }]);
+  assert.equal(body.textContent, ''); assert.equal(body.hidden, true);
+  assert.notEqual(ui.document.activeElement, body); assert.equal(ui.document.activeElement.isConnected, true);
+  assert.match(section.textContent, /clipped.*12,000 UTF-16.*cannot recover/s);
+  for (const summaryContent of ['', undefined]) {
+    ui.render(await compactionFixture({ summaryContent, tokenAccountingBasis: 'future_basis', success: false }));
+    assert.equal(body.hidden, true); assert.equal(body.textContent, '');
+    assert.match(section.textContent, summaryContent === '' ? /recorded an empty summary/ : /did not record a text summary/);
+    assert.match(section.textContent, /Reported failure.*Context comparison unavailable.*future_basis/s);
+    assert.doesNotMatch(section.textContent, /100 → 40/);
+  }
+});
+
+test('conflicting compaction boundaries keep only local evidence links and changed event types clear old summaries', async () => {
+  const entries = await compactionFixture();
+  const duplicate = { ...entries[0], id: 'duplicate', evidence: JSON.stringify({ ...JSON.parse(entries[0].evidence), id: 'duplicate' }) };
+  const ui = fixture(appSource); ui.render([entries[0], duplicate, entries[1]]);
+  for (const row of ui.get('#timeline').children) {
+    const section = byClass(row, 'compaction'); assert.ok(section);
+    assert.match(section.textContent, /Duplicate boundaries/);
+    assert.equal(section.querySelectorAll('button').length, 1, 'An ambiguous group must not duplicate all other boundaries in every row.');
+    assert.equal(byClass(section, 'compaction-summary').hidden, true);
+  }
+  ui.render(entries);
+  const row = ui.get('#timeline').firstElementChild, section = byClass(row, 'compaction');
+  assert.equal(byClass(section, 'compaction-summary').hidden, false);
+  ui.render([{ ...entries[0], type: 'session.info' }]);
+  assert.equal(byClass(row, 'compaction'), undefined);
+});
+
 async function hookFixture() {
   const raw = [
     ['first-start', 'hook.start', 'first', 'postToolUse'],

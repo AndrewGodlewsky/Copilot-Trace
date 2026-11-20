@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
-import { actionStages, agentLanes, hookInvocations, retrievalLedger, skillInstructions, toolExtents, toolProvenance, summarize } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
+import { actionStages, agentLanes, compactionAttempts, hookInvocations, retrievalLedger, skillInstructions, toolExtents, toolProvenance, summarize } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
 import { compareCapabilities } from '../com.github.copilot/extensions/trace/web/capabilities.mjs';
 import { instructionSources } from '../com.github.copilot/extensions/trace/web/instructions.mjs';
 
@@ -23,6 +23,7 @@ let allowAgentResponses = false;
 let permissionFixture;
 let provenanceFixture;
 let retrievalFixture;
+const compactionSummary = 'Fixed local compaction summary. Literal café 🧪 <script>text</script>.';
 let mcpRequests = 0;
 const mcpMethods = [];
 let fixtureError;
@@ -63,7 +64,7 @@ const fixture = createServer(async (req, res) => {
     return;
   }
   const number = ++requests;
-  if (!allowSyntheticResponses || number > (retrievalFixture ? 14 : provenanceFixture ? 12 : permissionFixture ? 10 : allowAgentResponses ? 7 : 3)) {
+  if (!allowSyntheticResponses || number > (retrievalFixture ? 14 + (retrievalFixture.allowCompaction ? 1 : 0) : provenanceFixture ? 12 : permissionFixture ? 10 : allowAgentResponses ? 7 : 3)) {
     req.resume(); res.writeHead(500); res.end('Unexpected fixture inference request.'); return;
   }
   try {
@@ -97,12 +98,16 @@ const fixture = createServer(async (req, res) => {
       }
     }
     if (retrievalFixture) {
-      assert.ok(retrievalFixture.allowCalls && ++retrievalFixture.responses <= 2);
+      assert.ok(retrievalFixture.allowCalls && ++retrievalFixture.responses <= (retrievalFixture.allowCompaction ? 3 : 2));
       assert.deepEqual(body.tools.map(tool => tool.function?.name).sort(), ['grep', 'view']);
       if (retrievalFixture.responses === 1) {
         message = { role: 'assistant', content: null, tool_calls: retrievalFixture.calls.map(call => ({
           id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.arguments) } })) };
         reason = 'tool_calls';
+      }
+      if (retrievalFixture.responses === 3) {
+        assert.equal(retrievalFixture.allowCompaction, true);
+        message = { role: 'assistant', content: compactionSummary };
       }
     }
     if (number === 4) {
@@ -812,12 +817,63 @@ try {
   assert.equal(retrievalExtents.get(rangeRow.id).coverage, 'Unknown coverage');
   assert.equal(retrievalExtents.get(searchRow.id).hostShortened, false,
     'The requested result limit alone does not establish host truncation.');
+  assert.equal(requests, 14, 'Retrieval inspection has no extra model requests.');
+  const permissionsBeforeCompaction = retrievalPermissions.length;
+  retrievalFixture.allowCompaction = true;
+  const compactionResult = await session.rpc.history.compact({ trigger: 'manual', customInstructions: 'Fixed fixture summary only.' });
+  retrievalFixture.allowCompaction = false;
+  if (fixtureError) throw fixtureError;
+  assert.equal(compactionResult.success, true);
+  assert.equal(retrievalFixture.responses, 3);
+  assert.equal(retrievalPermissions.length, permissionsBeforeCompaction, 'Fixture compaction must not request tool operations.');
+  const compactionEvents = retrievalEvents.filter(event => ['session.compaction_start', 'session.compaction_complete'].includes(event.type));
+  assert.equal(compactionEvents.length, 2);
+  const [compactionStart, compactionEnd] = compactionEvents;
+  assert.equal(compactionStart.type, 'session.compaction_start');
+  assert.equal(compactionEnd.type, 'session.compaction_complete');
+  assert.ok(typeof compactionStart.data.compactionAttemptId === 'string' && compactionStart.data.compactionAttemptId.length > 0);
+  assert.equal(compactionEnd.data.compactionAttemptId, compactionStart.data.compactionAttemptId);
+  assert.equal(compactionEnd.data.success, true);
+  assert.equal(compactionEnd.data.outcome, 'applied');
+  assert.equal(compactionEnd.data.summaryContent, compactionSummary);
+  assert.equal(compactionEnd.data.tokenAccountingBasis, 'local_full_context_estimate');
+  for (const field of ['preCompactionTokens', 'postCompactionTokens', 'tokensRemoved']) {
+    assert.ok(Number.isSafeInteger(compactionEnd.data[field]) && compactionEnd.data[field] >= 0);
+  }
+  assert.equal(compactionEnd.data.tokensRemoved, compactionEnd.data.preCompactionTokens - compactionEnd.data.postCompactionTokens);
+  const compactionSnapshot = await until(() => fetch(retrievalPanel.url + 'events').then(response => response.json()),
+    value => compactionEvents.every(event => value.entries.some(entry => entry.id === event.id)), 'compaction summary projection');
+  for (const raw of compactionEvents) {
+    const projected = compactionSnapshot.entries.find(entry => entry.id === raw.id);
+    assert.equal(projected.agentId, raw.agentId ?? '');
+    assert.equal(projected.timestamp, raw.timestamp);
+    assert.equal(projected.truncated, false);
+    assert.deepEqual(JSON.parse(projected.evidence).data, raw.data);
+  }
+  const compactions = compactionAttempts(compactionSnapshot.entries);
+  assert.equal(compactions.length, 1);
+  const observedCompaction = compactions[0];
+  assert.equal(observedCompaction.agentId, '');
+  assert.equal(observedCompaction.compactionAttemptId, compactionStart.data.compactionAttemptId);
+  assert.equal(observedCompaction.status, 'paired');
+  assert.equal(observedCompaction.outcome, 'success');
+  assert.equal(observedCompaction.reportedOutcome, 'applied');
+  assert.deepEqual(observedCompaction.entries.map(entry => entry.id), compactionEvents.map(event => event.id));
+  assert.equal(observedCompaction.summary.status, 'complete');
+  assert.equal(observedCompaction.summary.content, compactionSummary);
+  assert.equal(observedCompaction.metrics.status, 'comparable');
+  assert.equal(observedCompaction.metrics.basis, 'local_full_context_estimate');
+  assert.equal(observedCompaction.metrics.before, compactionEnd.data.preCompactionTokens);
+  assert.equal(observedCompaction.metrics.after, compactionEnd.data.postCompactionTokens);
+  assert.equal(observedCompaction.metrics.change, compactionEnd.data.preCompactionTokens - compactionEnd.data.postCompactionTokens);
+  assert.equal(observedCompaction.metrics.tokensRemoved, compactionEnd.data.tokensRemoved);
+  assert.equal(observedCompaction.metrics.messagesRemoved, compactionEnd.data.messagesRemoved);
   await session.rpc.canvas.close({ instanceId: 'trace-retrieval-fixture' });
   await until(() => fetch(retrievalPanel.url).then(() => false, () => true), Boolean, 'retrieval fixture server shutdown');
   await session.disconnect();
-  assert.equal(requests, 14, 'Only the fourteen expected local synthetic responses are permitted.');
+  assert.equal(requests, 15, 'Only the fifteen expected local synthetic responses are permitted.');
   assert.equal(expired, false);
-  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping agents, approved/denied action boundaries, distinct MCP provenance, hook pipelines, historical skill instructions, read-only capability comparison, retrieval ledger, host-shortened preview and current instruction sources versus recorded loads verified with fourteen fixed local responses across six disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
+  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping agents, approved/denied action boundaries, distinct MCP provenance, hook pipelines, historical skill instructions, read-only capability comparison, retrieval ledger, host-shortened preview, current instruction sources versus recorded loads and compaction summaries verified with fifteen fixed local responses across six disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
 } finally {
   clearTimeout(timer);
   releaseFirst();

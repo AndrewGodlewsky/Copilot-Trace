@@ -1,4 +1,4 @@
-import { describeActor, explainStep, skillInstructions, guidanceComparison, retrievalLedger, toolExtents, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, observerScope, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
+import { describeActor, explainStep, skillInstructions, compactionAttempts, guidanceComparison, retrievalLedger, toolExtents, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, observerScope, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -495,6 +495,58 @@ function metadataValues(entry) {
   return [['Recorded time', time], ['Actor', actor.role], ['Source', actor.source], ['Event', entry.type]];
 }
 
+function renderCompaction(node, attempt) {
+  if (!attempt) { node.compaction?.details.remove(); node.compaction = null; return; }
+  if (!node.compaction) {
+    const details = element('details', undefined, 'compaction');
+    const source = element('p'), outcome = element('p'), note = element('p'), limits = element('p'), metrics = element('p');
+    const summary = element('pre', '', 'compaction-summary');
+    summary.tabIndex = 0;
+    summary.setAttribute('aria-label', 'Exact retained compaction summary');
+    const links = element('div', undefined, 'boundary-links');
+    links.setAttribute('role', 'group'); links.setAttribute('aria-label', 'Original compaction evidence in recorded event order');
+    details.append(element('summary', 'Compaction summary and limits'), source, outcome,
+      element('h4', 'Reported summary'), note, summary, limits, element('h4', 'Reported measurements'), metrics, links);
+    details.addEventListener('toggle', () => { if (details.open) follow.checked = false; });
+    node.body.insertBefore(details, node.recordedEvidence);
+    node.compaction = { details, source, outcome, note, summary, limits, metrics, links, buttons: new Map() };
+  }
+  const view = node.compaction, measurement = attempt.metrics;
+  const result = attempt.outcome === 'unknown' ? 'Reported success or failure unavailable.' : `Reported ${attempt.outcome}.`;
+  const outcome = attempt.reportedOutcome === null ? 'Outcome field not recorded in complete matching evidence.'
+    : attempt.reportedOutcome === '' ? 'Recorded outcome field is empty.' : `Recorded outcome: ${attempt.reportedOutcome}.`;
+  const comparison = measurement.status === 'comparable'
+    ? `${measurement.before} → ${measurement.after} context-token estimates; ${measurement.change > 0 ? `decrease of ${measurement.change}`
+      : measurement.change < 0 ? `increase of ${-measurement.change}` : 'no change'}. ` : '';
+  const basis = ` Reported basis: ${measurement.basis === '' ? '(empty)' : measurement.basis ?? 'unavailable'}.`;
+  const removed = ` Reported tokens removed: ${measurement.tokensRemoved ?? 'unavailable'}. Reported messages removed: ${measurement.messagesRemoved ?? 'unavailable'}.`;
+  for (const [target, value] of [
+    [view.source, `${describeActor(attempt.entries[0]).source} · Attempt ID: ${attempt.compactionAttemptId ?? 'unavailable'}`],
+    [view.outcome, `${result} ${outcome}`], [view.note, attempt.summary.note], [view.summary, attempt.summary.content ?? ''],
+    [view.limits, attempt.notes.join(' ')], [view.metrics, comparison + measurement.note + basis + removed],
+  ]) if (target.textContent !== value) target.textContent = value;
+  view.summary.hidden = attempt.summary.status !== 'complete';
+  let previous;
+  const ids = new Set();
+  for (const entry of attempt.status === 'conflict' ? [node.entry] : attempt.entries) {
+    if (!retainedExample(attempt.entries, entry)) continue;
+    ids.add(entry.id);
+    let button = view.buttons.get(entry.id);
+    if (button && !retainedExample([entry], button.entry)) { button.remove(); button = null; }
+    if (!button) {
+      button = element('button'); button.type = 'button';
+      button.entry = Object.freeze({ ...entry });
+      button.addEventListener('click', () => showBoundary(entry.id,
+        'Showing the compaction disclosure’s original retained evidence. Follow live is paused.', button.entry));
+      view.buttons.set(entry.id, button);
+    }
+    const label = `${entry.type === 'session.compaction_start' ? 'Start' : 'Completion / summary'} evidence · ${entry.timestamp || 'Time unavailable'}`;
+    if (button.textContent !== label) button.textContent = label;
+    previous = place(view.links, button, previous);
+  }
+  for (const [id, button] of view.buttons) if (!ids.has(id)) { button.remove(); view.buttons.delete(id); }
+}
+
 function renderHookInvocation(owner, call) {
   if (!owner.hook) {
     owner.hook = element('details', undefined, 'hook-invocation');
@@ -864,6 +916,8 @@ function render(snapshot) {
   const provenance = toolProvenance(snapshot.entries);
   const operations = toolOperations(snapshot.entries);
   const extents = toolExtents(snapshot.entries, snapshot);
+  const compactions = compactionAttempts(snapshot.entries);
+  const compactionByEvent = new Map(compactions.flatMap(attempt => attempt.entries.map(entry => [entry.id, attempt])));
   const hooks = hookInvocations(snapshot.entries);
   const hookByEvent = new Map(hooks.flatMap(call => call.entries.map(entry => [entry.id, call])));
   renderStatistics(snapshot);
@@ -881,6 +935,7 @@ function render(snapshot) {
     if (!node) { node = row(entry); nodes.set(entry.id, node); }
     node.entry = entry;
     renderExtent(node, extents.get(entry.id));
+    renderCompaction(node, compactionByEvent.get(entry.id));
     if (node.glossary) {
       const concept = conceptForEntry(entry);
       node.glossary.hidden = !concept;
