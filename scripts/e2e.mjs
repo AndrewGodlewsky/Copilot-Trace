@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
-import { actionStages, agentLanes, compactionAttempts, delegationHandoffs, hookInvocations, linkValidationClaim, permissionScope, retainedValidationLink, retrievalLedger, skillInstructions, toolExtents, toolProvenance, summarize, validationChecks, validationClaims, validationOverview } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
+import { actionStages, agentLanes, compactionAttempts, delegationHandoffs, hookInvocations, linkValidationClaim, observedActivity, permissionScope, retainedValidationLink, retrievalLedger, skillInstructions, toolExtents, toolProvenance, summarize, validationChecks, validationClaims, validationOverview } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
 import { compareCapabilities } from '../com.github.copilot/extensions/trace/web/capabilities.mjs';
 import { instructionSources } from '../com.github.copilot/extensions/trace/web/instructions.mjs';
 
@@ -35,6 +35,7 @@ let fixtureError;
 let releaseFirst;
 const firstResponse = new Promise(resolve => { releaseFirst = resolve; });
 let releaseAgents;
+let inspectPendingAgents;
 const agentResponses = new Promise(resolve => { releaseAgents = resolve; });
 async function serveMcpFixture(req, res) {
   mcpRequests++;
@@ -148,7 +149,11 @@ const fixture = createServer(async (req, res) => {
     }
     if (number === 5 || number === 6) {
       assert.equal(body.tools?.length ?? 0, 0, 'Synthetic child agents must have no actual model-facing tools.');
-      if (number === 6) setTimeout(releaseAgents, 20);
+      if (number === 6) {
+        assert.equal(typeof inspectPendingAgents, 'function');
+        await inspectPendingAgents();
+        setTimeout(releaseAgents, 20);
+      }
       await agentResponses;
     }
     if (body.stream) {
@@ -287,8 +292,31 @@ try {
   const stopAgentEvents = session.on(event => agentEvents.push(event));
   const agentPanel = await session.rpc.canvas.open(input);
   assert.equal(requests, 3, 'Opening the agent fixture canvas must not trigger inference.');
+  inspectPendingAgents = async () => {
+    const pendingSnapshot = await until(() => fetch(agentPanel.url + 'events').then(response => response.json()),
+      value => value.entries.filter(entry => entry.type === 'subagent.started').length === 2
+        && value.entries.filter(entry => entry.type === 'tool.execution_start').length === 2
+        && agentEvents.filter(event => event.type === 'subagent.started').length === 2,
+      'both delegated starts before fixed child responses');
+    assert.equal(pendingSnapshot.entries.some(entry => ['subagent.completed', 'subagent.failed', 'tool.execution_complete'].includes(entry.type)), false);
+    const pending = observedActivity(pendingSnapshot.entries, pendingSnapshot);
+    const delegated = pending.items.filter(item => item.kind === 'delegation');
+    assert.equal(delegated.length, 2);
+    assert.equal(new Set(delegated.map(item => item.source)).size, 2);
+    for (const raw of agentEvents.filter(event => event.type === 'subagent.started')) {
+      const item = delegated.find(item => item.entry.id === raw.id);
+      assert.ok(item);
+      assert.equal(item.source, raw.agentId);
+      assert.equal(item.label, 'Delegated outcome not observed');
+      assert.ok(item.links.some(entry => entry.id === raw.id));
+    }
+    const tools = pending.items.filter(item => item.kind === 'tool');
+    assert.deepEqual(tools.map(item => item.entry.toolCallId).sort(), ['fixture-task-one', 'fixture-task-two']);
+    assert.ok(tools.every(item => item.source === '' && item.label === 'Tool completion not observed'));
+  };
   allowAgentResponses = true;
   await session.sendAndWait({ prompt: 'Synthetic delegation fixture only.' }, 30000);
+  inspectPendingAgents = undefined;
   if (fixtureError) throw fixtureError;
   const agentSnapshot = await until(() => fetch(agentPanel.url + 'events').then(r => r.json()),
     value => value.history === 'ready' && value.entries.filter(entry => entry.type === 'subagent.completed').length === 2
@@ -324,6 +352,7 @@ try {
   }
   const laneView = agentLanes(agentSnapshot.entries, agentSnapshot);
   const parallelHandoffs = delegationHandoffs(agentSnapshot.entries, agentSnapshot);
+  assert.equal(observedActivity(agentSnapshot.entries, agentSnapshot).items.some(item => ['tool', 'delegation'].includes(item.kind)), false);
   assert.equal(parallelHandoffs.length, 2);
   assert.ok(laneView.scale && laneView.scale.end > laneView.scale.start);
   assert.ok(laneView.overlaps >= 1, 'Actual retained child lifecycles produce recorded lane overlap.');
@@ -380,6 +409,14 @@ try {
           .get(pendingSnapshot.entries.find(entry => entry.type === 'tool.execution_start' && entry.toolCallId === callId).id);
         assert.equal(pendingStages.permission, 'Permission unknown', 'An invocation before a decision must not imply authorization.');
         assert.equal(pendingStages.stages.some(stage => stage.type === 'permission.completed' || stage.type === 'tool.execution_complete'), false);
+        const pendingActivity = observedActivity(pendingSnapshot.entries, pendingSnapshot);
+        const pendingTool = pendingActivity.items.find(item => item.kind === 'tool' && item.entry.toolCallId === callId);
+        assert.ok(pendingTool);
+        assert.equal(pendingTool.source, '');
+        assert.equal(pendingTool.label, 'Tool completion not observed');
+        assert.ok(pendingTool.links.some(entry => entry.id === pendingTool.entry.id));
+        assert.equal(pendingActivity.items.some(item => item.kind === 'permission'), false,
+          'The joined observer has no live request record; a held permission cannot be fabricated from fixture knowledge.');
         return { kind: approved ? 'approve-once' : 'reject' };
       },
       model: 'fixture', provider: { type: 'openai', baseUrl: `http://127.0.0.1:${fixture.address().port}/v1`, apiKey: 'fixture', wireApi: 'completions' },
@@ -454,6 +491,7 @@ try {
     assert.equal(requestScope.kind, approved ? 'request' : 'unknown');
     assert.equal(requestScope.approvalKind, null);
     assert.equal(stages.stages.find(stage => stage.id === completed.id).label, `Tool result: reported ${approved ? 'success' : 'failure'}`);
+    assert.equal(observedActivity(actionSnapshot.entries, actionSnapshot).items.some(item => item.kind === 'tool' && item.entry.toolCallId === callId), false);
     await session.rpc.canvas.close({ instanceId: input.instanceId });
     await until(() => fetch(actionPanel.url).then(() => false, () => true), Boolean, 'permission fixture server shutdown');
     const historyPanel = await session.rpc.canvas.open(input);

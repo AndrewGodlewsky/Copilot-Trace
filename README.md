@@ -1,6 +1,6 @@
 # Trace
 
-Current version: **0.1.37**
+Current version: **0.1.38**
 
 A GitHub Copilot desktop plugin for understanding the activity inside your current chat. `/trace` opens a live timeline with turn markers and expandable recorded evidence. This is an initial proof of concept: explanations describe what events mean; they do not infer why the model made a decision.
 
@@ -37,6 +37,8 @@ The optional **Retrieval ledger** in Statistics lists recognized recorded reads,
 Partial-evidence labels distinguish requested ranges and excerpts, explicit host-shortened output previews, Trace's own evidence clipping and the retained-history window. Available limits keep their recorded units; unknown coverage stays unknown. Trace does not read a current file or a host output file to fill gaps. See [partial evidence](docs/partial-evidence.md).
 
 Contextual scope help explains incomplete history, omitted events, shortened evidence and unmatched boundaries near the affected counts and summaries. A disconnected feed keeps its last retained data visibly stale until reconnection; changing views does not change that status. No observed event is not proof that nothing happened. See [evidence scope](docs/evidence-scope.md).
+
+The optional activity view lists retained requests or invocations whose decision, completion or delegated outcome has not been observed. Concurrent records stay separate and link to their original evidence. These are observations about the retained window, not guarantees that work is currently waiting or running. Feed connection and recorded event time remain separate; silence and elapsed time do not diagnose thought, failure or completion. See [observed activity](docs/observed-activity.md).
 
 Open **Glossary** from the footer or a term button in an event's details for explanations of model turns, tools, hooks, skills, context, subagents, permissions and compaction. Start with a short definition, expand for more detail, and inspect a retained event example when available. Static teaching examples and expired evidence are labeled explicitly. The glossary shares its vocabulary with event explanations and does not control the agent. See [glossary](docs/glossary.md).
 

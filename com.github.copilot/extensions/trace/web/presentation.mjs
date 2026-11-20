@@ -1322,6 +1322,33 @@ export function permissionScope(entry = {}) {
   return permissionResultScope(entry.type === 'permission.completed' ? explanationData(entry)?.result : null);
 }
 
+function permissionGroups(entries, records, unique) {
+  const usableId = value => typeof value === 'string' && value.length > 0 && value.length <= 256;
+  const object = value => value && typeof value === 'object' && !Array.isArray(value);
+  const permissions = new Map();
+  for (const entry of entries) {
+    const data = records.get(entry);
+    if (!['permission.requested', 'permission.completed'].includes(entry.type) || !usableId(data?.requestId)) continue;
+    const key = toolIdentity({ agentId: entry.agentId, toolCallId: data.requestId });
+    if (key === null) continue;
+    if (!permissions.has(key)) permissions.set(key, []);
+    permissions.get(key).push({ entry, data });
+  }
+  return [...permissions.values()].map(bucket => {
+    const requests = bucket.filter(record => record.entry.type === 'permission.requested');
+    const decisions = bucket.filter(record => record.entry.type === 'permission.completed');
+    const request = requests[0]?.data, decision = decisions[0]?.data;
+    const requestCall = request?.permissionRequest?.toolCallId, decisionCall = decision?.toolCallId;
+    const calls = [...new Set(bucket.map(({ entry, data }) => entry.type === 'permission.requested'
+      ? data.permissionRequest?.toolCallId : data.toolCallId).filter(usableId))];
+    const valid = bucket.every(({ entry }) => unique(entry)) && requests.length <= 1 && decisions.length <= 1 && calls.length <= 1
+      && (!request || (object(request.permissionRequest) && (requestCall === undefined || usableId(requestCall))
+        && request.ownerAgentId === undefined && request.ownerSessionId === undefined))
+      && (!decision || decisionCall === undefined || usableId(decisionCall));
+    return { bucket, calls, valid };
+  });
+}
+
 // One bounded parse per retained event; neither chronology nor recovery ownership is a correlation key.
 export function actionStages(entries, { history = 'ready', omitted = 0 } = {}) {
   const usableId = value => typeof value === 'string' && value.length > 0 && value.length <= 256;
@@ -1331,7 +1358,7 @@ export function actionStages(entries, { history = 'ready', omitted = 0 } = {}) {
   for (const entry of entries) counts.set(entry.id, (counts.get(entry.id) || 0) + 1);
   const unique = entry => counts.get(entry.id) === 1;
   const records = new Map(entries.map(entry => [entry, explanationData(entry)]));
-  const proposals = new Map(), permissions = new Map();
+  const proposals = new Map();
   const add = (map, key, value) => {
     if (key === null) return;
     if (!map.has(key)) map.set(key, []);
@@ -1347,22 +1374,9 @@ export function actionStages(entries, { history = 'ready', omitted = 0 } = {}) {
         if (object(request)) add(proposals, identity(entry, request.toolCallId), { entry, name: request.name, valid });
       }
     }
-    if (['permission.requested', 'permission.completed'].includes(entry.type) && usableId(data.requestId)) {
-      add(permissions, identity(entry, data.requestId), { entry, data });
-    }
   }
   const permissionCalls = new Map();
-  for (const bucket of permissions.values()) {
-    const requests = bucket.filter(record => record.entry.type === 'permission.requested');
-    const decisions = bucket.filter(record => record.entry.type === 'permission.completed');
-    const request = requests[0]?.data, decision = decisions[0]?.data;
-    const requestCall = request?.permissionRequest?.toolCallId, decisionCall = decision?.toolCallId;
-    const calls = [...new Set(bucket.map(({ entry, data }) => entry.type === 'permission.requested'
-      ? data.permissionRequest?.toolCallId : data.toolCallId).filter(usableId))];
-    const valid = bucket.every(({ entry }) => unique(entry)) && requests.length <= 1 && decisions.length <= 1 && calls.length === 1
-      && (!request || (object(request.permissionRequest) && (requestCall === undefined || usableId(requestCall))
-        && request.ownerAgentId === undefined && request.ownerSessionId === undefined))
-      && (!decision || decisionCall === undefined || usableId(decisionCall));
+  for (const { bucket, calls, valid } of permissionGroups(entries, records, unique)) {
     for (const call of calls) add(permissionCalls, identity(bucket[0].entry, call), { bucket, valid });
   }
   const result = new Map();
@@ -1434,6 +1448,77 @@ export function actionStages(entries, { history = 'ready', omitted = 0 } = {}) {
     for (const entry of boundaries) result.set(entry.id, description);
   }
   return result;
+}
+
+export function observedActivity(entries, { history = 'ready', omitted = 0, now = Date.now() } = {}) {
+  const items = [], handled = new Set(), counts = new Map(), positions = new Map();
+  for (const [index, entry] of entries.entries()) { counts.set(entry.id, (counts.get(entry.id) || 0) + 1); positions.set(entry, index); }
+  const unique = entry => counts.get(entry.id) === 1;
+  const records = new Map(entries.map(entry => [entry, explanationData(entry)]));
+  const source = entry => entry.agentId === '' || identityText(entry.agentId) ? entry.agentId : null;
+  const add = (kind, entry, label, detail, links = [entry]) => {
+    const interruption = kind !== 'unknown' && entries.findLast(candidate => candidate.type === 'abort'
+      && source(candidate) === source(entry) && unique(candidate) && records.get(candidate)
+      && positions.get(candidate) > positions.get(entry));
+    if (interruption) {
+      detail += ' An interruption was recorded for this source; this operation’s outcome remains unknown. The interruption has no call ID.';
+      links.push(interruption);
+    }
+    items.push({ id: `${kind}:${JSON.stringify([source(entry), entry.id])}${unique(entry) ? '' : `:${positions.get(entry)}`}`, kind, source: source(entry), entry, label, detail,
+      links: [...new Set(links)].filter(unique) });
+  };
+  const unknown = boundaries => {
+    boundaries.forEach(entry => handled.add(entry));
+    add('unknown', boundaries[0], 'Activity unknown',
+      'Source, identity or lifecycle evidence is unavailable or ambiguous. No current activity is inferred.', boundaries);
+  };
+  const stages = actionStages(entries, { history, omitted });
+  for (const section of groupSteps(entries).filter(section => section.kind === 'tool')) {
+    const boundaries = section.entries, starts = boundaries.filter(entry => entry.type === 'tool.execution_start');
+    const ends = boundaries.filter(entry => entry.type === 'tool.execution_complete');
+    const valid = starts.length <= 1 && ends.length <= 1 && boundaries.every(entry => unique(entry)
+      && source(entry) !== null && identityText(entry.toolCallId) && records.get(entry)?.toolCallId === entry.toolCallId);
+    if (!valid) { unknown(boundaries); continue; }
+    boundaries.forEach(entry => handled.add(entry));
+    if (!starts.length || ends.length) continue;
+    const entry = starts[0], action = stages.get(entry.id);
+    const decisions = action.stages.filter(stage => stage.type === 'permission.completed');
+    const links = [entry, ...decisions.map(stage => entries.find(candidate => candidate.id === stage.id))];
+    add('tool', entry, 'Tool completion not observed',
+      `${action.permission}. An invocation entry does not prove execution; a result may be absent, late or outside the retained window.`, links);
+  }
+  for (const { bucket, valid } of permissionGroups(entries, records, unique)) {
+    const boundaries = bucket.map(record => record.entry);
+    const usable = bucket.every(({ entry, data }) => source(entry) !== null && identityText(data.requestId)
+      && (data.permissionRequest?.toolCallId === undefined || identityText(data.permissionRequest.toolCallId))
+      && (data.toolCallId === undefined || identityText(data.toolCallId)));
+    if (!valid || !usable) { unknown(boundaries); continue; }
+    boundaries.forEach(entry => handled.add(entry));
+    const request = boundaries.find(entry => entry.type === 'permission.requested');
+    if (request && !boundaries.some(entry => entry.type === 'permission.completed')) {
+      add('permission', request, 'Permission decision not observed',
+        'A retained request has no matching recorded decision. It may be old or incomplete; current waiting and approval are unknown.');
+    }
+  }
+  for (const row of delegationHandoffs(entries, { history, omitted })) {
+    const boundaries = row.entries.filter(entry => ['subagent.started', 'subagent.completed', 'subagent.failed'].includes(entry.type));
+    if (!boundaries.length) continue;
+    if (row.status === 'conflict' || row.lifecycle === 'unknown') { unknown(boundaries); continue; }
+    boundaries.forEach(entry => handled.add(entry));
+    const entry = boundaries.find(entry => entry.type === 'subagent.started');
+    if (entry && row.lifecycle === 'missing') add('delegation', entry, 'Delegated outcome not observed',
+      'A retained child start has no matching lifecycle outcome. Parent tool results are separate; current child execution is unknown.');
+  }
+  for (const entry of entries) if (['permission.requested', 'permission.completed', 'subagent.started', 'subagent.completed', 'subagent.failed'].includes(entry.type)
+    && !handled.has(entry)) unknown([entry]);
+  items.sort((a, b) => positions.get(a.entry) - positions.get(b.entry));
+  const entry = entries.at(-1), time = entry && timestampMilliseconds(entry.timestamp);
+  const knownTime = Number.isFinite(time) && Number.isFinite(now) && time <= now;
+  return { items, lastEvent: entry ? { entry, timestamp: knownTime ? entry.timestamp : null,
+    elapsedSeconds: knownTime ? Math.floor((now - time) / 1000) : null } : null,
+  notes: ['Retained boundaries do not establish that work is currently running or waiting. Absence of an item does not establish inactivity or success.',
+    'Missing, late or omitted records can leave an outcome unknown. Trace cannot diagnose thinking, failure or completion from silence.',
+    ...(history !== 'ready' ? ['History is incomplete or unavailable.'] : []), ...(omitted ? ['Older events were omitted.'] : [])] };
 }
 
 // Temporal membership only: keep interleaved agents in their original event order.

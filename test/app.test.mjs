@@ -11,7 +11,7 @@ import * as footer from '../com.github.copilot/extensions/trace/web/footer.mjs';
 import { createPoller } from '../com.github.copilot/extensions/trace/web/polling.mjs';
 
 // A small DOM boundary double exercises reconciliation, not browser layout or native focus behavior.
-function fixture(source, inventoryLoad = async () => { throw new Error('Unexpected inventory request'); }, feedLoad, instructionLoad = async () => { throw new Error('Unexpected instruction request'); }) {
+function fixture(source, inventoryLoad = async () => { throw new Error('Unexpected inventory request'); }, feedLoad, instructionLoad = async () => { throw new Error('Unexpected instruction request'); }, clock = Date) {
   let document;
   class Element {
     constructor(tagName) {
@@ -90,6 +90,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     '#guidance-comparison', '#guidance-examples',
     '#retrieval-ledger', '#retrieval-summary', '#retrieval-scope', '#retrieval-list', '#retrieval-unclassified', '#retrieval-unknown-list',
     '#validation-overview', '#validation-summary', '#validation-scope', '#validation-list',
+    '#observed-activity', '#observed-summary', '#observed-time', '#observed-feed', '#observed-scope', '#observed-list',
     '#instruction-sources', '#instruction-refresh', '#instruction-status', '#instruction-scope', '#instruction-window', '#instruction-current', '#instruction-loads',
     '#instruction-inspector', '#instruction-title', '#instruction-detail', '#instruction-body', '#instruction-original', '#instruction-selection-status',
     '#statistics-panel', '#statistics-button', '#evidence-scope', '#scope-summary', '#scope-view', '#stat-evidence-scope', '#stat-scope-summary']) {
@@ -113,6 +114,8 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   selectors.get('#retrieval-unclassified').append(selectors.get('#retrieval-unknown-list'));
   const validation = selectors.get('#validation-overview'); validation.tagName = 'details'; statistics.append(validation);
   for (const id of ['summary', 'scope', 'list']) validation.append(selectors.get(`#validation-${id}`));
+  const observed = selectors.get('#observed-activity'); observed.tagName = 'details'; statistics.append(observed);
+  for (const id of ['summary', 'time', 'feed', 'scope', 'list']) observed.append(selectors.get(`#observed-${id}`));
   const instruction = selectors.get('#instruction-sources'); instruction.tagName = 'details'; statistics.append(instruction);
   for (const id of ['refresh', 'status', 'scope', 'window', 'current', 'loads', 'inspector']) instruction.append(selectors.get(`#instruction-${id}`));
   for (const id of ['title', 'detail', 'body', 'original', 'selection-status']) selectors.get('#instruction-inspector').append(selectors.get(`#instruction-${id}`));
@@ -142,7 +145,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     createFollow,
     initCapabilities: options => capabilities.initCapabilities({ ...options, document, load: inventoryLoad }),
     initInstructionSources: options => instructions.initInstructionSources({ ...options, document, load: instructionLoad }),
-    fetch: feedLoad, AbortSignal,
+    fetch: feedLoad, AbortSignal, Date: clock,
     createPoller: options => feedLoad ? createPoller({ ...options, schedule: () => 1, cancel() {} }) : ({ refresh() {}, stop() {} }),
     initFooter: options => footer.initPanels?.({ ...options, document }),
   });
@@ -163,6 +166,84 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
 const appSource = await readFile(new URL('../com.github.copilot/extensions/trace/web/app.mjs', import.meta.url), 'utf8');
 
 const feedResponse = (snapshot, status = 200) => ({ status, headers: { get: () => 'fixture-revision' }, json: async () => snapshot });
+
+async function observedFixture() {
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => [
+    { id: 'observed-start', type: 'tool.execution_start', timestamp: '2026-11-20T12:00:00Z',
+      data: { toolCallId: 'observed-call', toolName: '<script>日🧪' } },
+    { id: 'observed-request', type: 'permission.requested', timestamp: '2026-11-20T12:00:01Z',
+      data: { requestId: 'observed-permission', permissionRequest: { kind: 'shell', toolCallId: 'observed-call' } } },
+    { id: 'observed-result', type: 'tool.execution_complete', timestamp: '2026-11-20T12:00:02Z',
+      data: { toolCallId: 'observed-call', success: false } },
+  ] });
+  await trace.ready; const entries = trace.snapshot().entries; trace.close(); return entries;
+}
+
+test('observed activity keeps literal overlapping evidence and reading state across views, then guards expired links', async () => {
+  const entries = await observedFixture(), ui = fixture(appSource); ui.render(entries.slice(0, 2));
+  const disclosure = ui.get('#observed-activity'), list = ui.get('#observed-list');
+  assert.equal(disclosure.open, false); assert.equal(list.children.length, 2);
+  assert.match(list.textContent, /Tool completion not observed.*Permission decision not observed/s);
+  assert.match(list.textContent, /<script>日🧪/); assert.equal(list.querySelectorAll('script').length, 0);
+  ui.get('#statistics-button').dispatch('click'); disclosure.open = true; disclosure.dispatch('toggle');
+  const link = list.querySelector('button'); link.focus();
+  ui.get('#statistics-panel').scrollTop = 120; list.scrollTop = 70; ui.document.scrollingElement.scrollTop = 230;
+  for (const mode of ['chronological', 'chapters', 'lanes', 'grouped']) {
+    ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change');
+    assert.equal(list.querySelector('button'), link); assert.equal(ui.document.activeElement, link);
+    assert.equal(disclosure.open, true); assert.equal(list.scrollTop, 70);
+    assert.equal(ui.get('#statistics-panel').scrollTop, 120); assert.equal(ui.document.scrollingElement.scrollTop, 230);
+    assert.equal(ui.get('#follow').checked, false);
+  }
+  filterMode(ui, 'automation'); link.dispatch('click');
+  assert.equal(ui.get('#statistics-panel').open, false); assert.equal(ui.get('#activity-filter').value, 'everything');
+  assert.equal(ui.get('#event-order').value, 'chronological'); assert.equal(ui.get('#follow').checked, false);
+  ui.get('#statistics-button').dispatch('click'); link.focus(); ui.render(entries);
+  assert.equal(list.children.length, 1, 'Completion removes the invocation row but does not invent a permission decision.');
+  assert.equal(ui.document.activeElement, list, 'An evicted focused item moves focus to the stable list.');
+  ui.get('#follow').checked = true; ui.document.scrollingElement.scrollTop = 333; link.dispatch('click');
+  assert.match(ui.get('#navigation-status').textContent, /no longer.*activity|no longer retained/i);
+  assert.equal(ui.document.scrollingElement.scrollTop, 333); assert.equal(ui.get('#follow').checked, true);
+  const changed = structuredClone(entries[0]), raw = JSON.parse(changed.evidence);
+  raw.data.arguments = { command: 'A different retained invocation' }; changed.evidence = JSON.stringify(raw);
+  ui.render([changed]); link.dispatch('click');
+  assert.match(ui.get('#navigation-status').textContent, /no longer.*activity|no longer retained/i);
+  assert.equal(ui.document.scrollingElement.scrollTop, 333); assert.equal(ui.get('#follow').checked, true);
+  ui.render([], { omitted: 3 }); assert.equal(list.children.length, 0); assert.match(ui.get('#observed-scope').textContent, /Older events were omitted/);
+});
+
+test('observed activity distinguishes feed receipts and host time through 304, disconnect and recovery without announcements', async () => {
+  const entries = (await observedFixture()).slice(0, 1); let now = Date.parse('2026-11-20T12:00:10Z');
+  class Clock extends Date { static now() { return now; } }
+  let response = feedResponse({ entries, history: 'ready', omitted: 0 });
+  const ui = fixture(appSource, undefined, async () => response, undefined, Clock);
+  await ui.refreshFeed();
+  const list = ui.get('#observed-list'), row = list.firstElementChild, disclosure = ui.get('#observed-activity');
+  assert.match(ui.get('#observed-time').textContent, /2026-11-20T12:00:00Z.*10 s/s);
+  assert.match(ui.get('#observed-feed').textContent, /2026-11-20T12:00:10.000Z/);
+  disclosure.open = true; disclosure.dispatch('toggle'); row.querySelector('button').focus();
+  ui.get('#statistics-panel').scrollTop = 100; ui.document.scrollingElement.scrollTop = 240;
+  now += 60000; response = feedResponse(null, 304); await ui.refreshFeed();
+  assert.equal(list.firstElementChild, row); assert.match(ui.get('#observed-time').textContent, /12:00:00Z.*70 s/s);
+  assert.match(ui.get('#observed-feed').textContent, /12:01:10.000Z.*no new retained events received/s);
+  assert.equal(ui.get('#statistics-panel').scrollTop, 100); assert.equal(ui.document.scrollingElement.scrollTop, 240);
+  response = feedResponse(null, 503); await ui.refreshFeed();
+  assert.match(ui.get('#connection').textContent, /Disconnected/); assert.match(ui.get('#observed-feed').textContent, /cached|stale/i);
+  assert.equal(list.firstElementChild, row); assert.match(list.textContent, /completion not observed/i);
+  assert.doesNotMatch(list.textContent, /inactive|stuck|thinking|still running/i);
+  response = feedResponse(null, 304); await ui.refreshFeed();
+  assert.match(ui.get('#connection').textContent, /Connected/); assert.doesNotMatch(ui.get('#observed-feed').textContent, /cached|stale/i);
+  assert.ok(walk(disclosure).every(node => node.attributes.role !== 'status' && !node.attributes['aria-live']));
+  ui.render([{ ...entries[0], timestamp: '2027-01-01T12:00:00Z' }]); assert.match(ui.get('#observed-time').textContent, /unknown/i);
+  ui.closePage(); assert.equal(list.children.length, 0); assert.equal(await ui.refreshFeed(), false);
+});
+
+test('an in-flight feed response after page close cannot recreate observed activity', async () => {
+  let release; const pending = new Promise(resolve => { release = resolve; });
+  const ui = fixture(appSource, undefined, () => pending); const refresh = ui.refreshFeed();
+  ui.closePage(); release(feedResponse({ entries: (await observedFixture()).slice(0, 1), history: 'ready', omitted: 0 }));
+  assert.equal(await refresh, false); assert.equal(ui.get('#observed-list').children.length, 0);
+});
 
 test('actual poller keeps initial failure counts unavailable and explains zero events after recovery', async () => {
   let response = new Error('private fixture failure');

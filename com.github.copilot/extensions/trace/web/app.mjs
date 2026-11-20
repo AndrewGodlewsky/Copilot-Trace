@@ -6,7 +6,7 @@ import { createFollow } from './follow.mjs';
 import { initCapabilities } from './capabilities.mjs';
 import { initInstructionSources } from './instructions.mjs';
 import { vocabulary, conceptForEntry, glossaryExample, retainedExample } from './glossary.mjs';
-import { validationClaims, validationChecks, validationOverview, linkValidationClaim, retainedValidationLink } from './presentation.mjs';
+import { validationClaims, validationChecks, validationOverview, linkValidationClaim, retainedValidationLink, observedActivity } from './presentation.mjs';
 
 const diagnostics = createDiagnostics();
 diagnostics.record('panel_started');
@@ -33,6 +33,9 @@ const retrievalDisclosure = document.querySelector('#retrieval-ledger');
 retrievalDisclosure.addEventListener('toggle', () => { if (retrievalDisclosure.open) follow.checked = false; });
 const validationRows = new Map(), validationDisclosure = document.querySelector('#validation-overview');
 validationDisclosure.addEventListener('toggle', () => { if (validationDisclosure.open) follow.checked = false; });
+const observedRows = new Map(), observedDisclosure = document.querySelector('#observed-activity');
+observedDisclosure.addEventListener('toggle', () => { if (observedDisclosure.open) follow.checked = false; });
+let observation, lastFeedReceipt, unchangedFeed = false, panelClosed = false;
 for (const [key, label] of [['turns', 'Model turns'], ['hooks', 'Hook pipelines'], ['tools', 'Tool calls'], ['skills', 'Skill loads']]) {
   const cell = element('div');
   cell.dataset.metric = key;
@@ -287,6 +290,17 @@ function renderObserverScope() {
   if (feedState === 'disconnected') setConnection('Disconnected · retrying', 'error');
   else if (lastSnapshot) setConnection(lastSnapshot.history === 'unsupported' ? 'Events unavailable' : `Connected · ${lastSnapshot.entries.length} events`,
     lastSnapshot.history === 'unsupported' ? 'error' : 'connected');
+  const timestamp = observation?.lastEvent?.timestamp, age = timestamp ? Math.floor((Date.now() - Date.parse(timestamp)) / 1000) : NaN;
+  const time = !observation?.lastEvent ? 'No retained host event time is available.'
+    : Number.isFinite(age) && age >= 0 ? `Last recorded host event: ${timestamp} · ${age} s ago. This is event age, not compute time.`
+      : 'Last recorded host event time unknown: the timestamp is missing, invalid or ahead of this panel’s clock.';
+  const feed = `${lastFeedReceipt ? `Last successful feed response: ${new Date(lastFeedReceipt).toISOString()}.` : 'No successful feed response yet.'} `
+    + (feedState === 'disconnected' ? 'Disconnected; retained activity is a cached snapshot and may be stale.'
+      : unchangedFeed ? 'Unchanged response; no new retained events received. This does not establish inactivity.'
+        : 'Feed receipt time is separate from the recorded host event time.');
+  for (const [selector, text] of [['#observed-time', time], ['#observed-feed', feed]]) {
+    const target = document.querySelector(selector); if (target.textContent !== text) target.textContent = text;
+  }
 }
 
 function renderStatistics(snapshot) {
@@ -294,6 +308,7 @@ function renderStatistics(snapshot) {
   instructionView.update(snapshot);
   renderRetrieval(snapshot);
   renderValidation(snapshot);
+  renderObservedActivity(snapshot);
   const stats = summarize(snapshot.entries);
   for (const [selector, values] of [['#stat-hooks', stats.hookNames], ['#stat-skills', stats.skillNames]]) {
     const list = document.querySelector(selector);
@@ -303,6 +318,62 @@ function renderStatistics(snapshot) {
       list.replaceChildren(...rows.map(text => element('li', text)));
     }
   }
+}
+
+function renderObservedActivity(snapshot) {
+  observation = observedActivity(snapshot.entries, { ...snapshot, now: Date.now() });
+  const list = document.querySelector('#observed-list'), panel = document.querySelector('#statistics-panel');
+  const focused = document.activeElement, inspected = observedDisclosure.contains(focused), scroll = panel.scrollTop;
+  const summary = observation.items.length ? `${observation.items.length} retained operation or request boundaries with missing or unknown outcomes.`
+    : 'No unresolved supported boundaries retained. Current activity is unknown.';
+  for (const [selector, text] of [['#observed-summary', summary], ['#observed-scope', observation.notes.join(' ')]]) {
+    const target = document.querySelector(selector); if (target.textContent !== text) target.textContent = text;
+  }
+  let previous;
+  for (const item of observation.items) {
+    let node = observedRows.get(item.id);
+    if (node && !retainedExample([item.entry], node.entry)) { node.item.remove(); observedRows.delete(item.id); node = null; }
+    if (!node) {
+      const row = element('li'), title = element('strong'), identity = element('p'), detail = element('p');
+      const links = element('div', undefined, 'boundary-links');
+      links.setAttribute('role', 'group'); links.setAttribute('aria-label', 'Original observed activity evidence');
+      row.append(title, identity, detail, links);
+      node = { item: row, title, identity, detail, links, entry: item.entry, buttons: new Map() };
+      observedRows.set(item.id, node);
+    }
+    const source = item.source === null ? 'Source unavailable' : item.source === '' ? 'Main chat' : `Agent ${item.source}`;
+    const identity = `${source} · ${item.entry.toolName || item.entry.type}${item.entry.toolCallId ? ` · Call ${item.entry.toolCallId}` : ''}`;
+    for (const [target, text] of [[node.title, item.label], [node.identity, identity], [node.detail, item.detail]]) {
+      if (target.textContent !== text) target.textContent = text;
+    }
+    let previousButton;
+    const linked = item.links.filter(entry => retainedExample(snapshot.entries, entry));
+    for (const entry of linked) {
+      let button = node.buttons.get(entry.id);
+      if (button && !retainedExample([entry], button.entry)) { button.remove(); node.buttons.delete(entry.id); button = null; }
+      if (!button) {
+        button = element('button', `Original ${entry.type} evidence`); button.type = 'button'; button.entry = entry;
+        button.addEventListener('click', () => {
+          const current = !panelClosed && observation.items.find(current => current.id === item.id);
+          if (!current || !retainedExample(current.links, entry) || !retainedExample(lastSnapshot.entries, entry)) {
+            navigationStatus.textContent = 'That evidence no longer describes this retained activity. Reading position unchanged.';
+            return;
+          }
+          footerPanels.closePanel('statistics-panel', { restoreFocus: false });
+          showBoundary(entry.id, 'Showing original observed activity evidence. Follow live is paused.', entry);
+        });
+        node.buttons.set(entry.id, button);
+      }
+      previousButton = place(node.links, button, previousButton);
+    }
+    const ids = new Set(linked.map(entry => entry.id));
+    for (const [id, button] of node.buttons) if (!ids.has(id)) { button.remove(); node.buttons.delete(id); }
+    previous = place(list, node.item, previous);
+  }
+  const ids = new Set(observation.items.map(item => item.id));
+  for (const [id, node] of observedRows) if (!ids.has(id)) { node.item.remove(); observedRows.delete(id); }
+  if (inspected && !unhidden(focused)) { follow.checked = false; list.focus({ preventScroll: true }); }
+  panel.scrollTop = scroll;
 }
 
 function renderValidation(snapshot) {
@@ -1410,13 +1481,18 @@ pageSize.observe(dock);
 const poller = createPoller({
   async load() {
     const response = await fetch('events', { headers: etag ? { 'If-None-Match': etag } : {}, signal: AbortSignal.timeout(5000) });
+    if (panelClosed) return false;
     if (response.status === 200) {
-      lastSnapshot = await response.json();
+      const snapshot = await response.json();
+      if (panelClosed) return false;
+      lastSnapshot = snapshot;
+      lastFeedReceipt = Date.now(); unchangedFeed = false;
       etag = response.headers.get('etag');
       if (feedState !== 'connected') diagnostics.record('connected');
       feedState = 'connected';
       render(lastSnapshot);
     } else if (response.status === 304 && lastSnapshot) {
+      lastFeedReceipt = Date.now(); unchangedFeed = true;
       if (feedState !== 'connected') diagnostics.record('connected');
       feedState = 'connected';
       renderObserverScope();
@@ -1429,6 +1505,7 @@ const poller = createPoller({
     return true;
   },
   onError() {
+    if (panelClosed) return;
     if (feedState !== 'disconnected') diagnostics.record('disconnected');
     feedState = 'disconnected';
     renderObserverScope();
@@ -1436,12 +1513,15 @@ const poller = createPoller({
 });
 const footerPanels = initFooter({ diagnostics, refresh: poller.refresh, onInspect: () => { follow.checked = false; } });
 window.addEventListener('pagehide', () => {
+  panelClosed = true;
   poller.stop(); capabilityView.close(); instructionView.close(); pageSize.disconnect();
   claimsClosed = true;
   for (const view of claimViews.values()) { view.link = null; view.results.clear(); view.details.remove(); }
   claimViews.clear();
   for (const node of validationRows.values()) { node.buttons.clear(); node.item.remove(); }
   validationRows.clear();
+  for (const node of observedRows.values()) { node.buttons.clear(); node.item.remove(); }
+  observedRows.clear(); observation = undefined;
 });
 renderObserverScope();
 void poller.refresh();
