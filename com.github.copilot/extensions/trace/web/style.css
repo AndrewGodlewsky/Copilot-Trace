@@ -48,6 +48,9 @@ input { accent-color: var(--model); margin: 0; }
 #navigation-status, #navigation-help { flex-basis: 100%; margin: 0; }
 .filter-context { display: block; margin-top: 6px; color: var(--muted); font-size: .786rem; }
 .notice { font-size: 0.857rem; color: var(--muted); margin: 12px 0 26px; }
+.evidence-scope { font-size: .857rem; color: var(--muted); margin: 12px 0 26px; }
+.evidence-scope > summary { cursor: pointer; padding-block: 6px; }
+.evidence-scope p { margin: 8px 0; }
 .statistics-body { padding: 16px 20px 24px; }
 .statistics-body p { color: var(--muted); }
 .statistics-body h3 { font-size: .857rem; margin: 20px 0 6px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--model); }

@@ -129,7 +129,7 @@ test('clipped, conflicting, malformed or evicted boundary evidence remains navig
   assert.match(clipped.unclassified[0].note, /shortened/i);
   assert.equal(clipped.references, 0);
   const none = ledger([], { history: 'unsupported', omitted: 9 });
-  assert.match(none.note, /incomplete or unavailable/i);
+  assert.match(none.note, /did not expose the session event API/i);
   assert.match(none.note, /older events.*omitted/i);
 });
 

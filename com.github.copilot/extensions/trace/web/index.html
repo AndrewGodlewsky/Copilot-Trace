@@ -72,7 +72,11 @@
       </dl>
       <p>Open a step for its separate Source: Main chat, Agent followed by its recorded ID, or Source unavailable. Source identifies the recorded agent context, not who initiated the event. Event order does not establish cause.</p>
     </details>
-    <p id="notice" class="notice">Reading available chat history…</p>
+    <details id="evidence-scope" class="evidence-scope">
+      <summary id="scope-summary">Waiting for event feed · Scope and limits</summary>
+      <p id="notice">No event snapshot is available; counts are unknown.</p>
+      <p id="scope-view">Open any retained step for its evidence.</p>
+    </details>
     <div id="empty" class="empty">
       <h2>Waiting for activity</h2>
       <p>Keep this panel open and continue the chat. Supported events will appear here as the host shares them.</p>
@@ -89,16 +93,18 @@
         <p>Observed action stages link structured assistant requests, invocation entries, permission records and tool results when their exact identifiers agree. They retain recorded order, which can put invocation entry before permission. Entry and approval do not prove an operation executed; a result reports the tool's outcome. Missing permission is unknown, never assumed approval. Ambiguous records stay separate, and a decision kind alone does not identify a person.</p>
         <p>Request chapters begin at main-chat idle input or a turn start linked to earlier queued input by its exact interaction ID. They show timing, not which input caused an action. Input can be host-supplied. Steering never starts a new chapter; missing delivery or linkage leaves boundaries unknown. Original events stay in order, and Chronological events removes the chapter headers. A new chapter or an interruption does not establish success or completion.</p>
         <p>Agent lanes use exact recorded source IDs, never display names. Unknown-source records remain unassigned. Positive reliable start/end timestamps support observed overlap, not simultaneous CPU work; equal or unreliable boundaries remain unknown. Main-chat bars cover paired model turns, not whole requests. Subagent completion, failure and cancellation are distinct; missing completion never means still running. Explicit spawning-tool IDs enable parent evidence links only when one retained invocation matches. Missing, conflicting or shortened evidence leaves the relationship unavailable.</p>
-        <p>Recorded evidence only, with up to 300 recent supported events. Long evidence is shortened. Some host activity and earlier streaming updates may be unavailable. Trace keeps its copy of chat content in memory and makes no model calls.</p>
+        <p>Recorded evidence only, with up to 300 recent supported events and 12,000 UTF-16 code units of raw evidence per record. Some host activity and earlier streaming updates may be unavailable. Trace keeps its copy of chat content in memory and makes no model calls.</p>
         <p>Filters only hide retained event rows. Tools includes recorded tool starts and results, not proof of file changes. Skills and hooks includes skill invocations and hook starts/results. Problems includes session errors or warnings, interruptions, failed subagents, and tool or hook results with an explicit failure. Other text, missing results and permission waiting do not establish a problem. Call and chapter headers retain their full context; Statistics always counts all retained events. Evidence-navigation buttons reset the filter to Everything and open the original event.</p>
       </details>
       <dialog id="statistics-panel" class="footer-panel statistics-drawer" aria-labelledby="statistics-title">
         <div class="drawer-grip" aria-hidden="true"></div>
         <div class="panel-heading"><h2 id="statistics-title">Activity overview</h2><button type="button" data-close-panel>Close</button></div>
         <div class="statistics-body">
-          <dl id="stat-counts" class="stat-counts"></dl>
-          <p id="stat-scope">Waiting for recorded activity…</p>
-          <p id="stat-unlinked" hidden></p>
+          <dl id="stat-counts" class="stat-counts" aria-describedby="stat-scope-summary"></dl>
+          <details id="stat-evidence-scope" class="evidence-scope">
+            <summary id="stat-scope-summary">Waiting for event feed · Count scope</summary>
+            <p id="stat-scope">No event snapshot is available; counts are unknown.</p>
+          </details>
           <h3>Recorded hook pipeline types</h3><ul id="stat-hooks"></ul>
           <h3>Skills loaded</h3><ul id="stat-skills"></ul>
           <details id="retrieval-ledger" class="retrieval-ledger">

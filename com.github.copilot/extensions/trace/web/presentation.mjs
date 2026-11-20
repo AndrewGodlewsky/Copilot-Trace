@@ -727,7 +727,7 @@ export function toolExtents(entries, { history = 'ready', omitted = 0 } = {}) {
         notes.push('Trace clipped this event’s raw evidence to at most 12,000 UTF-16 code units, preserving surrogate pairs. This is separate from host output shortening.');
       }
       if (omitted > 0) notes.push(`Trace retains at most 300 events; ${omitted} older event${omitted === 1 ? '' : 's'} omitted. This history limit is separate from result shortening.`);
-      if (history !== 'ready') notes.push('History is incomplete or unavailable; these facts describe retained evidence only.');
+      if (history !== 'ready') notes.push(historyScopeState(history)[1]);
       descriptions.set(entry.id, { requested: request.requested, requestedLimited: request.limited,
         coverage: 'Unknown coverage', returned, hostShortened: Boolean(host), traceClipped: Boolean(entry.truncated), badges, notes });
     }
@@ -795,7 +795,7 @@ export function retrievalLedger(entries, { history = 'ready', omitted = 0 } = {}
   }
   return { rows, references: references.size, unclassified, other,
     note: 'Retained events only, up to 300 events with 12,000 UTF-16 code units of raw evidence each. References count exact literal target strings with their source-agent scope and path/URL kind; they are not unique physical files or resources. Relative paths, aliases and current directories are not resolved. Repeated operations remain separate occurrences. Contracts describe requested semantics; actual implementation and tool origin remain unknown. Returned information does not prove it was understood, used or remains in active context.'
-      + (history !== 'ready' ? ' History is incomplete or unavailable.' : '') + (omitted ? ' Older events were omitted.' : '') };
+      + (history !== 'ready' ? ` ${historyScopeState(history)[1]}` : '') + (omitted ? ' Older events were omitted.' : '') };
 }
 
 const permissionApprovals = new Set(['approved', 'approved-read-only-for-session', 'approved-for-session', 'approved-for-location']);
@@ -904,7 +904,8 @@ export function actionStages(entries, { history = 'ready', omitted = 0 } = {}) {
     if (!starts.length) notes.push('Invocation entry unknown; no start boundary is retained.');
     if (!ends.length) notes.push('Tool outcome unknown; no result boundary is retained.');
     if (permission === 'Permission unknown') notes.push('Missing permission evidence does not establish approval or preauthorization.');
-    if (history !== 'ready' || omitted) notes.push('History is incomplete or older events were omitted; only retained evidence is shown.');
+    if (history !== 'ready') notes.push(historyScopeState(history)[1]);
+    if (omitted) notes.push('Older events were omitted; only retained evidence is shown.');
     const description = { stages, notes: [...new Set(notes)], permission };
     for (const entry of boundaries) result.set(entry.id, description);
   }
@@ -960,6 +961,62 @@ export function turnContext(entries, { history = 'ready', omitted = 0 } = {}) {
     }
   }
   return context;
+}
+
+const historyScope = {
+  loading: ['History loading', 'Available history is still loading; live events may already be retained.'],
+  ready: ['', 'Available history was read; this covers retained supported events only, not the whole chat.'],
+  unavailable: ['Earlier history unavailable', 'Earlier history could not be read. Retained live events remain available.'],
+  unsupported: ['Event API unsupported', 'This host did not expose the session event API. Reopen in a compatible Copilot desktop session.'],
+};
+
+function historyScopeState(history) {
+  return Object.hasOwn(historyScope, history) ? historyScope[history]
+    : ['History status unknown', 'History status is unknown; available records do not establish full history.'];
+}
+
+export function observerScope(snapshot, feedState = 'connected', stats = summarize(snapshot?.entries || [])) {
+  const entries = snapshot?.entries || [];
+  const [historyLabel, historyReason] = historyScopeState(snapshot?.history);
+  const stale = Boolean(snapshot) && feedState === 'disconnected';
+  const omitted = Number.isSafeInteger(snapshot?.omitted) && snapshot.omitted > 0 ? snapshot.omitted : 0;
+  const clipped = entries.filter(entry => entry.truncated === true).length;
+  const invalidIds = entries.filter(entry => typeof entry.id !== 'string' || !entry.id || entry.id.length > 256).length;
+  const countsAvailable = Boolean(snapshot) && (entries.length > 0 || snapshot.history === 'ready');
+  const reasons = [];
+  const labels = [];
+  if (!snapshot) {
+    labels.push(feedState === 'disconnected' ? 'Counts unavailable' : 'Waiting for event feed');
+    reasons.push('No event snapshot is available; counts are unknown.');
+  } else {
+    labels.push(`${entries.length} retained event${entries.length === 1 ? '' : 's'}`);
+    if (stale) {
+      labels.push('Stale snapshot');
+      reasons.push('The event feed is disconnected. These records and counts come from the previous snapshot and may be out of date.');
+    }
+    if (historyLabel) labels.push(historyLabel);
+    reasons.push(historyReason);
+    if (!entries.length) reasons.push('No retained supported events is not proof that nothing happened.');
+  }
+  if (omitted) {
+    labels.push('Older events omitted');
+    reasons.push(`Older events were omitted: ${omitted} older event${omitted === 1 ? '' : 's'} outside the retained window.`);
+  }
+  if (clipped) {
+    labels.push('Clipped evidence');
+    reasons.push(`${clipped} retained record${clipped === 1 ? ' has' : 's have'} Trace-clipped raw evidence. Host-shortened output is a separate fact, shown where recorded.`);
+  }
+  if (stats.unlinked) {
+    labels.push('Unlinked records');
+    reasons.push(`${stats.unlinked} turn, hook or tool events lack usable IDs and are excluded from those totals. Their retained evidence and reported outcomes remain available.`);
+  }
+  if (invalidIds) {
+    labels.push('Event IDs unavailable');
+    reasons.push(`${invalidIds} retained record${invalidIds === 1 ? ' has' : 's have'} no usable event ID; original-evidence links may be unavailable.`);
+  }
+  reasons.push('Trace records selected supported event types from this chat, keeps at most 300 recent events in memory and clips raw evidence to 12,000 UTF-16 code units per record, preserving surrogate pairs. Unsupported event types and malformed records may be absent; their number is unknown. Missing completion is unknown, not success or proof of running. Trace does not recover hidden context or unrecorded reasons, and event order does not establish cause. Capability snapshots have their own freshness, separate from this event feed.');
+  return { label: labels.join(' · '), detail: reasons.join(' '), countsAvailable, stale,
+    degraded: !snapshot || stale || snapshot.history !== 'ready' || Boolean(omitted || clipped || stats.unlinked || invalidIds) };
 }
 
 export function summarize(entries) {

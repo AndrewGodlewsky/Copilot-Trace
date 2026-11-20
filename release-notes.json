@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.29",
+    "summary": "See why retained counts or evidence may be incomplete, including when the event feed disconnects. Changing views now preserves the actual connection status."
+  },
+  {
     "version": "0.1.28",
     "summary": "See requested ranges, excerpts and explicitly shortened output separately from the evidence limits in Trace. Unknown coverage remains clear."
   },

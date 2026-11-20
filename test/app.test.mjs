@@ -7,9 +7,10 @@ import { createFollow } from '../com.github.copilot/extensions/trace/web/follow.
 import { createTrace } from '../com.github.copilot/extensions/trace/trace.mjs';
 import * as capabilities from '../com.github.copilot/extensions/trace/web/capabilities.mjs';
 import * as footer from '../com.github.copilot/extensions/trace/web/footer.mjs';
+import { createPoller } from '../com.github.copilot/extensions/trace/web/polling.mjs';
 
 // A small DOM boundary double exercises reconciliation, not browser layout or native focus behavior.
-function fixture(source, inventoryLoad = async () => { throw new Error('Unexpected inventory request'); }) {
+function fixture(source, inventoryLoad = async () => { throw new Error('Unexpected inventory request'); }, feedLoad) {
   let document;
   class Element {
     constructor(tagName) {
@@ -80,18 +81,23 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   };
   const selectors = new Map();
   for (const selector of ['main', '#timeline', '#connection', '#notice', '#empty', '#follow', '#actor-legend', '#stat-counts',
-    '#stat-scope', '#stat-unlinked', '#stat-hooks', '#stat-skills', '#statistics-peek', '#footer-dock', '#event-order',
+    '#stat-scope', '#stat-hooks', '#stat-skills', '#statistics-peek', '#footer-dock', '#event-order',
     '#activity-filter', '#reset-filter', '#filter-status', '#filter-empty', '#lane-help',
     '#event-target', '#jump-event', '#navigation-status', '#capabilities', '#capability-refresh', '#capability-status',
     '#capability-scope', '#capability-window', '#capability-list', '#glossary-button', '#glossary-panel',
     '#glossary-concept', '#glossary-definition', '#glossary-deeper', '#glossary-example', '#glossary-source', '#glossary-status',
     '#retrieval-ledger', '#retrieval-summary', '#retrieval-scope', '#retrieval-list', '#retrieval-unclassified', '#retrieval-unknown-list',
-    '#statistics-panel', '#statistics-button']) {
+    '#statistics-panel', '#statistics-button', '#evidence-scope', '#scope-summary', '#scope-view', '#stat-evidence-scope', '#stat-scope-summary']) {
     const element = new Element(['#event-order', '#activity-filter', '#event-target'].includes(selector) ? 'select' : selector === '#jump-event' ? 'button' : 'div');
     element.id = selector.slice(1); selectors.set(selector, element); document.body.append(element);
   }
   const glossary = selectors.get('#glossary-panel');
   const statistics = selectors.get('#statistics-panel');
+  for (const [id, summary, body] of [['#evidence-scope', '#scope-summary', '#notice'], ['#stat-evidence-scope', '#stat-scope-summary', '#stat-scope']]) {
+    const disclosure = selectors.get(id); disclosure.tagName = 'details';
+    selectors.get(summary).tagName = 'summary'; disclosure.append(selectors.get(summary), selectors.get(body));
+  }
+  statistics.append(selectors.get('#stat-evidence-scope'));
   statistics.tagName = 'dialog'; statistics.className = 'footer-panel';
   const statisticsClose = new Element('button'); statisticsClose.textContent = 'Close'; statisticsClose.dataset.closePanel = ''; statistics.append(statisticsClose);
   selectors.get('#statistics-button').dataset.panel = 'statistics-panel';
@@ -118,10 +124,13 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     ResizeObserver: class { observe() {} }, createDiagnostics: () => ({ record() {} }),
     createFollow,
     initCapabilities: options => capabilities.initCapabilities({ ...options, document, load: inventoryLoad }),
-    createPoller: () => ({ refresh() {}, stop() {} }), initFooter: options => footer.initPanels?.({ ...options, document }),
+    fetch: feedLoad, AbortSignal,
+    createPoller: options => feedLoad ? createPoller({ ...options, schedule: () => 1, cancel() {} }) : ({ refresh() {}, stop() {} }),
+    initFooter: options => footer.initPanels?.({ ...options, document }),
   });
   vm.runInContext(source.replace(/^import .*;\r?\n/gm, ''), context);
   return { document, get: selector => selectors.get(selector),
+    refreshFeed() { return vm.runInContext('poller.refresh();', context); },
     refreshCapabilities() { return vm.runInContext('capabilityView.refresh();', context); },
     closeCapabilities() { vm.runInContext('capabilityView.close();', context); },
     syncFollowing() { vm.runInContext('following.sync();', context); },
@@ -131,6 +140,86 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     } };
 }
 const appSource = await readFile(new URL('../com.github.copilot/extensions/trace/web/app.mjs', import.meta.url), 'utf8');
+
+const feedResponse = (snapshot, status = 200) => ({ status, headers: { get: () => 'fixture-revision' }, json: async () => snapshot });
+
+test('actual poller keeps initial failure counts unavailable and explains zero events after recovery', async () => {
+  let response = new Error('private fixture failure');
+  const ui = fixture(appSource, undefined, async () => { if (response instanceof Error) throw response; return response; });
+  assert.equal(await ui.refreshFeed(), false);
+  assert.match(ui.get('#connection').textContent, /Disconnected/);
+  assert.match(ui.get('#statistics-peek').textContent, /Counts unavailable/);
+  assert.match(ui.get('#notice').textContent, /No event snapshot.*counts are unknown/);
+  assert.deepEqual(walk(ui.get('#stat-counts')).filter(node => node.tagName === 'dd').map(node => node.textContent), ['—', '—', '—', '—']);
+  response = feedResponse({ entries: [], history: 'unavailable', omitted: 0 });
+  assert.equal(await ui.refreshFeed(), true);
+  assert.match(ui.get('#stat-scope').textContent, /Earlier history could not be read/);
+  assert.match(ui.get('#statistics-peek').textContent, /Counts unavailable/);
+  response = feedResponse({ entries: [], history: 'ready', omitted: 0 });
+  assert.equal(await ui.refreshFeed(), true);
+  assert.match(ui.get('#notice').textContent, /No retained supported events.*not proof that nothing happened/);
+  assert.deepEqual(walk(ui.get('#stat-counts')).filter(node => node.tagName === 'dd').map(node => node.textContent), ['0', '0', '0', '0']);
+  assert.doesNotMatch(ui.document.body.textContent, /private fixture failure/);
+});
+
+test('actual poller preserves offline status across filters and views, then clears stale context on 304 without rebuilding', async () => {
+  const entries = [{ id: 'fixture', type: 'user.message', category: 'chat', agentId: '', title: 'Fixture', evidence: '{}' }];
+  let response = feedResponse({ entries, history: 'ready', omitted: 0 });
+  const ui = fixture(appSource, undefined, async () => response);
+  assert.equal(await ui.refreshFeed(), true);
+  response = feedResponse(null, 503);
+  assert.equal(await ui.refreshFeed(), false);
+  for (const [selector, value] of [['#activity-filter', 'tools'], ['#event-order', 'chronological'], ['#activity-filter', 'everything']]) {
+    const control = ui.get(selector); control.value = value; control.dispatch('change');
+    assert.match(ui.get('#connection').textContent, /Disconnected/);
+    assert.match(ui.get('#statistics-peek').textContent, /Stale retained/);
+    assert.match(ui.get('#stat-scope').textContent, /previous snapshot.*out of date/);
+  }
+  const details = ui.get('#evidence-scope'), summary = ui.get('#scope-summary');
+  details.open = true; details.dispatch('toggle'); summary.focus();
+  const row = ui.get('#timeline').firstElementChild;
+  const eventDetails = row.querySelector('details'); eventDetails.open = true;
+  ui.document.scrollingElement.scrollTop = 250;
+  const statistics = ui.get('#stat-evidence-scope'); statistics.open = true; ui.get('#statistics-panel').scrollTop = 80;
+  response = feedResponse(null, 304);
+  assert.equal(await ui.refreshFeed(), true);
+  assert.match(ui.get('#connection').textContent, /Connected/);
+  assert.doesNotMatch(ui.get('#statistics-peek').textContent, /Stale/);
+  assert.doesNotMatch(ui.get('#stat-scope').textContent, /out of date/);
+  assert.equal(ui.get('#timeline').firstElementChild, row);
+  assert.equal(details.open, true); assert.equal(eventDetails.open, true); assert.equal(statistics.open, true);
+  assert.equal(ui.document.activeElement, summary);
+  assert.equal(ui.document.scrollingElement.scrollTop, 250); assert.equal(ui.get('#statistics-panel').scrollTop, 80);
+  assert.equal(ui.get('#follow').checked, false);
+  response = feedResponse(null, 500); await ui.refreshFeed();
+  response = feedResponse({ entries: [...entries, { ...entries[0], id: 'second' }], history: 'ready', omitted: 1 });
+  assert.equal(await ui.refreshFeed(), true);
+  assert.match(ui.get('#connection').textContent, /Connected/);
+  assert.doesNotMatch(ui.get('#stat-scope').textContent, /out of date/);
+  assert.match(ui.get('#scope-summary').textContent, /Older events omitted/);
+  assert.equal(ui.document.activeElement, summary); assert.equal(details.open, true);
+});
+
+test('scope disclosures keep healthy rows quiet and preserve inspection on live changes and eviction', () => {
+  const ui = fixture(appSource);
+  const entries = [{ id: 'first', type: 'user.message', category: 'chat', agentId: '', evidence: '{}', title: 'Fixture' }];
+  ui.render(entries);
+  assert.match(ui.get('#scope-summary').textContent, /1 retained event.*Scope and limits/);
+  assert.doesNotMatch(ui.get('#scope-summary').textContent, /unavailable|unknown|omitted|clipped|Stale/i);
+  assert.equal(ui.get('#evidence-scope').open, false);
+  assert.doesNotMatch(ui.get('#timeline').firstElementChild.querySelector('summary').textContent, /300|12,000|History.*unavailable/);
+  for (const [id, summaryId] of [['#evidence-scope', '#scope-summary'], ['#stat-evidence-scope', '#stat-scope-summary']]) {
+    const disclosure = ui.get(id), summary = ui.get(summaryId);
+    assert.equal(disclosure.tagName, 'details'); assert.equal(summary.tagName, 'summary');
+    ui.get('#follow').checked = true; disclosure.open = true; disclosure.dispatch('toggle');
+    assert.equal(ui.get('#follow').checked, false);
+    summary.focus(); ui.document.scrollingElement.scrollTop = 250;
+    ui.render([{ ...entries[0], id: 'replacement' }], { omitted: 1 });
+    assert.equal(disclosure.open, true); assert.equal(ui.document.activeElement, summary);
+    assert.equal(ui.document.scrollingElement.scrollTop, 250);
+    assert.match(summary.textContent, /Older events omitted/);
+  }
+});
 
 test('inventory controls fetch only on request and preserve disclosure, focus, literal text and scroll across live updates', async t => {
   let reads = 0;
@@ -345,7 +434,7 @@ test('retrieval evidence navigation closes Statistics, resets filters and opens 
     assert.match(visibleEvidence(ui)[1], /diagnostic <img>/);
     ui.render([], { history: 'unsupported' });
     assert.match(ui.get('#retrieval-summary').textContent, /no recognized.*retained/i);
-    assert.match(ui.get('#retrieval-scope').textContent, /incomplete or unavailable/i);
+    assert.match(ui.get('#retrieval-scope').textContent, /did not expose the session event API/i);
     ui.get('#statistics-button').dispatch('click');
     const top = ui.document.scrollingElement.scrollTop; button.dispatch('click');
     assert.equal(ui.get('#statistics-panel').open, true, 'An expired source action does not dismiss the current panel.');

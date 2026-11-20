@@ -1,4 +1,4 @@
-import { describeActor, explainStep, skillInstructions, retrievalLedger, toolExtents, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
+import { describeActor, explainStep, skillInstructions, retrievalLedger, toolExtents, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, observerScope, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -13,7 +13,6 @@ window.addEventListener('unhandledrejection', () => diagnostics.record('client_e
 
 const timeline = document.querySelector('#timeline');
 const connection = document.querySelector('#connection');
-const notice = document.querySelector('#notice');
 const empty = document.querySelector('#empty');
 const follow = document.querySelector('#follow');
 const eventOrder = document.querySelector('#event-order');
@@ -44,6 +43,11 @@ let chapters = [];
 let lanes = [];
 let etag;
 let lastSnapshot;
+let feedState;
+for (const selector of ['#evidence-scope', '#stat-evidence-scope']) {
+  const disclosure = document.querySelector(selector);
+  disclosure.addEventListener('toggle', () => { if (disclosure.open) follow.checked = false; });
+}
 const capabilityView = initCapabilities({ onInspect: () => { follow.checked = false; } });
 let navigationState;
 const glossaryButton = document.querySelector('#glossary-button');
@@ -207,19 +211,31 @@ function applyContext(node, context, entry) {
   if (node.context.textContent !== text) node.context.textContent = text;
 }
 
+function renderObserverScope() {
+  const stats = summarize(lastSnapshot?.entries || []);
+  const scope = observerScope(lastSnapshot, feedState, stats);
+  for (const [key, value] of statValues) {
+    const text = scope.countsAvailable ? String(stats[key]) : '—';
+    if (value.textContent !== text) value.textContent = text;
+  }
+  const preview = !scope.countsAvailable ? 'Counts unavailable · Open Statistics for scope'
+    : `${scope.stale ? 'Stale retained' : scope.degraded ? 'Partial retained' : 'Retained'}: ${stats.turns} ${stats.turns === 1 ? 'turn' : 'turns'} · ${stats.tools} ${stats.tools === 1 ? 'tool call' : 'tool calls'}`;
+  for (const [selector, text] of [
+    ['#statistics-peek', preview], ['#scope-summary', `${scope.label} · Scope and limits`],
+    ['#stat-scope-summary', `${scope.label} · Count scope`], ['#notice', scope.detail],
+    ['#stat-scope', `${scope.detail} Tool calls and hook pipeline invocations count once per exact source and call ID, including partial calls. Hook pipelines are not counts of configured scripts or callbacks. A pipeline can span hook groups, so group counts do not add up to this total. Conflicting boundaries count once; their outcome is unknown.`],
+  ]) {
+    const node = document.querySelector(selector); if (node.textContent !== text) node.textContent = text;
+  }
+  if (feedState === 'disconnected') setConnection('Disconnected · retrying', 'error');
+  else if (lastSnapshot) setConnection(lastSnapshot.history === 'unsupported' ? 'Events unavailable' : `Connected · ${lastSnapshot.entries.length} events`,
+    lastSnapshot.history === 'unsupported' ? 'error' : 'connected');
+}
+
 function renderStatistics(snapshot) {
   capabilityView.update(snapshot);
   renderRetrieval(snapshot);
   const stats = summarize(snapshot.entries);
-  for (const [key, value] of statValues) value.textContent = String(stats[key]);
-  const preview = snapshot.history === 'unsupported' ? 'Events unavailable'
-    : `Retained: ${stats.turns} ${stats.turns === 1 ? 'turn' : 'turns'} · ${stats.tools} ${stats.tools === 1 ? 'tool call' : 'tool calls'}`;
-  const peek = document.querySelector('#statistics-peek');
-  if (peek.textContent !== preview) peek.textContent = preview;
-  document.querySelector('#stat-scope').textContent = `${snapshot.entries.length} retained events only; not whole-chat totals. Tool calls and hook pipeline invocations count once per exact source and call ID, including partial calls. Hook pipelines are not counts of configured scripts or callbacks. A pipeline can span hook groups, so group counts do not add up to this total. Conflicting boundaries count once; their outcome is unknown.${snapshot.history !== 'ready' ? ' History is incomplete or unavailable.' : ''}${snapshot.omitted ? ' Older events have been omitted.' : ''}`;
-  const unlinked = document.querySelector('#stat-unlinked');
-  unlinked.hidden = !stats.unlinked;
-  unlinked.textContent = `${stats.unlinked} turn, hook or tool events lack usable IDs and are excluded from those totals.`;
   for (const [selector, values] of [['#stat-hooks', stats.hookNames], ['#stat-skills', stats.skillNames]]) {
     const list = document.querySelector(selector);
     const rows = values.length ? values.map(([name, count]) => `${name} · ${count}`) : ['None recorded'];
@@ -973,18 +989,12 @@ function render(snapshot) {
     focusTarget.focus({ preventScroll: true });
   }
   empty.hidden = snapshot.entries.length > 0;
-  const messages = {
-    loading: 'Reading available history; live events are already being collected.',
-    ready: 'Indented steps were recorded within a model turn. Open any step for its evidence.',
-    unavailable: 'Earlier history is unavailable. Showing live events received since this panel opened.',
-    unsupported: 'This host did not expose the session event API. Reopen in a compatible Copilot desktop session.',
-  };
-  notice.textContent = messages[snapshot.history] ?? 'History status unavailable.';
-  if (chapterView) notice.textContent += ' Request chapters are chronological intervals, not causal groups or completion reports.';
-  if (laneView) notice.textContent += ' Lanes keep exact recorded sources separate. Open a lane for its chronological events; lane order does not establish event order or parentage.';
-  if (snapshot.omitted) notice.textContent += ' Older events were omitted; showing the most recent supported events.';
-  setConnection(snapshot.history === 'unsupported' ? 'Events unavailable' : `Connected · ${snapshot.entries.length} events`,
-    snapshot.history === 'unsupported' ? 'error' : 'connected');
+  const viewHelp = chapterView ? 'Request chapters are chronological intervals, not causal groups or completion reports.'
+    : laneView ? 'Lanes keep exact recorded sources separate. Open a lane for its chronological events; lane order does not establish event order or parentage.'
+    : 'Indented steps were recorded within a model turn. Open any step for its evidence.';
+  const scopeView = document.querySelector('#scope-view');
+  if (scopeView.textContent !== viewHelp) scopeView.textContent = viewHelp;
+  renderObserverScope();
 }
 
 const following = createFollow(follow, () => document.scrollingElement);
@@ -1005,33 +1015,34 @@ const pageSize = new ResizeObserver(() => {
 pageSize.observe(document.querySelector('main'));
 pageSize.observe(dock);
 
-let feedState;
 const poller = createPoller({
   async load() {
     const response = await fetch('events', { headers: etag ? { 'If-None-Match': etag } : {}, signal: AbortSignal.timeout(5000) });
     if (response.status === 200) {
       lastSnapshot = await response.json();
       etag = response.headers.get('etag');
+      if (feedState !== 'connected') diagnostics.record('connected');
+      feedState = 'connected';
       render(lastSnapshot);
     } else if (response.status === 304 && lastSnapshot) {
-      setConnection(lastSnapshot.history === 'unsupported' ? 'Events unavailable' : `Connected · ${lastSnapshot.entries.length} events`,
-        lastSnapshot.history === 'unsupported' ? 'error' : 'connected');
+      if (feedState !== 'connected') diagnostics.record('connected');
+      feedState = 'connected';
+      renderObserverScope();
     } else {
       if (feedState !== 'disconnected') diagnostics.record('disconnected', { status: response.status });
       feedState = 'disconnected';
       throw new Error('Event feed unavailable.');
     }
-    if (feedState !== 'connected') diagnostics.record('connected');
-    feedState = 'connected';
     following.sync();
     return true;
   },
   onError() {
     if (feedState !== 'disconnected') diagnostics.record('disconnected');
     feedState = 'disconnected';
-    setConnection('Disconnected · retrying', 'error');
+    renderObserverScope();
   },
 });
 const footerPanels = initFooter({ diagnostics, refresh: poller.refresh, onInspect: () => { follow.checked = false; } });
 window.addEventListener('pagehide', () => { poller.stop(); capabilityView.close(); pageSize.disconnect(); });
+renderObserverScope();
 void poller.refresh();
