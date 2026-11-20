@@ -993,6 +993,97 @@ async function compactionFixture(data = {}, startOnly = false) {
   await trace.ready; const entries = trace.snapshot().entries; trace.close(); return entries;
 }
 
+async function handoffFixture(result = 'Exact returned <script>café 🧪</script>\r\n日', extra = []) {
+  const raw = [
+    { id: 'delegate-task', type: 'tool.execution_start', data: { toolCallId: 'delegate-call', toolName: 'task',
+      arguments: { prompt: 'Exact delegated <prompt> 🧪\r\n日', description: 'Literal <description>', agent_type: 'fixture', mode: 'sync' } } },
+    { id: 'delegate-start', type: 'subagent.started', agentId: 'child', data: { toolCallId: 'delegate-call', agentName: 'fixture', agentDisplayName: 'Same name' } },
+    { id: 'delegate-activity', type: 'assistant.message', agentId: 'child', data: { parentToolCallId: 'delegate-call', content: 'Child activity' } },
+    ...extra,
+    { id: 'delegate-end', type: 'subagent.completed', agentId: 'child', data: { toolCallId: 'delegate-call', agentName: 'fixture', cancelled: false } },
+    { id: 'delegate-result', type: 'tool.execution_complete', data: { toolCallId: 'delegate-call', success: true, result: { content: result } } },
+  ].map(entry => ({ timestamp: '2026-11-20T12:00:00Z', ...entry }));
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => raw });
+  await trace.ready; const entries = trace.snapshot().entries; trace.close(); return entries;
+}
+
+test('delegation disclosure connects literal handoff, child activity and separate parent result once per child', async () => {
+  const entries = await handoffFixture(); const ui = fixture(appSource); ui.get('#event-order').value = 'chronological'; ui.render(entries);
+  const sections = ui.get('#timeline').querySelectorAll('.delegation');
+  assert.equal(sections.length, 1, 'One optional disclosure belongs to the first retained child record.');
+  const section = sections[0]; assert.equal(section.tagName, 'details'); assert.equal(section.open, false);
+  assert.equal(byClass(section, 'delegation-prompt').textContent, 'Exact delegated <prompt> 🧪\r\n日');
+  assert.equal(byClass(section, 'delegation-description').textContent, 'Literal <description>');
+  assert.equal(byClass(section, 'delegation-result').textContent, 'Exact returned <script>café 🧪</script>\r\n日');
+  for (const name of ['prompt', 'description', 'result']) assert.equal(byClass(section, `delegation-${name}`).tabIndex, 0);
+  assert.match(section.textContent, /Main chat.*child.*delegate-call/s);
+  assert.match(section.textContent, /Completed.*correctness.*separate context.*included or excluded/s);
+  assert.equal(walk(section).some(node => ['script', 'a', 'img', 'code'].includes(node.tagName)), false);
+  assert.equal(section.querySelectorAll('button').length, entries.length);
+  assert.deepEqual(visibleEvidence(ui), entries.map(entry => entry.evidence));
+  section.open = true; section.dispatch('toggle'); assert.equal(ui.get('#follow').checked, false);
+});
+
+test('delegation live results, view changes and anchor eviction retain disclosure, focus and reading state', async () => {
+  const entries = await handoffFixture('日'.repeat(5000)); const ui = fixture(appSource); ui.render(entries.slice(0, -1));
+  const section = byClass(ui.get('#timeline'), 'delegation'); assert.ok(section);
+  assert.match(section.textContent, /Parent result not retained.*late/s);
+  reveal(section); section.open = true; section.dispatch('toggle'); section.firstElementChild.focus();
+  ui.document.scrollingElement.scrollTop = 247; ui.render(entries);
+  assert.equal(byClass(ui.get('#timeline'), 'delegation'), section); assert.equal(section.open, true);
+  assert.equal(ui.document.activeElement, section.firstElementChild); assert.equal(ui.document.scrollingElement.scrollTop, 247);
+  const body = byClass(section, 'delegation-result'); body.scrollTop = 110; body.focus();
+  for (const mode of ['chronological', 'chapters', 'lanes', 'grouped']) {
+    ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change');
+    assert.equal(ui.document.activeElement, body); assert.equal(body.scrollTop, 110); assert.equal(section.open, true);
+    assert.equal(ui.document.scrollingElement.scrollTop, 247); assert.equal(ui.get('#follow').checked, false);
+    filterMode(ui, 'tools'); assert.equal(ui.document.activeElement, ui.get('#activity-filter'));
+    filterMode(ui, 'everything'); body.focus();
+  }
+  section.firstElementChild.focus(); ui.render(entries.slice(2), { omitted: 2 });
+  assert.equal(byClass(ui.get('#timeline'), 'delegation'), section); assert.equal(section.open, true);
+  assert.equal(ui.document.activeElement, section.firstElementChild); assert.equal(ui.document.scrollingElement.scrollTop, 247);
+  assert.match(section.textContent, /Parent unknown.*Older events were omitted/s);
+  assert.equal(byClass(section, 'delegation-prompt').hidden, true);
+  ui.render([], { omitted: 5 }); assert.equal(section.isConnected, false); assert.equal(ui.document.activeElement.isConnected, true);
+});
+
+test('delegation original links reset filters without changing chronology and reject stale same-ID targets', async () => {
+  const entries = await handoffFixture(); const ui = fixture(appSource); ui.render(entries);
+  const section = byClass(ui.get('#timeline'), 'delegation'); assert.ok(section);
+  const link = section.querySelectorAll('button').find(button => button.textContent.startsWith('Parent returned result'));
+  assert.ok(link);
+  for (const mode of ['lanes', 'chapters', 'grouped']) {
+    ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change'); filterMode(ui, 'automation'); link.dispatch('click');
+    assert.equal(ui.get('#event-order').value, 'chronological'); assert.equal(ui.get('#activity-filter').value, 'everything');
+    assert.equal(ui.get('#follow').checked, false); assert.deepEqual(visibleEvidence(ui), entries.map(entry => entry.evidence));
+    const target = ui.get('#timeline').children.at(-1);
+    assert.equal(byClass(target, 'recorded-evidence').open, true); assert.equal(ui.document.activeElement, target.firstElementChild.firstElementChild);
+  }
+  const updated = await handoffFixture('Changed same-ID text'); ui.render(updated);
+  ui.document.scrollingElement.scrollTop = 333; ui.get('#follow').checked = true; link.dispatch('click');
+  assert.match(ui.get('#navigation-status').textContent, /no longer retained/);
+  assert.equal(ui.document.scrollingElement.scrollTop, 333); assert.equal(ui.get('#follow').checked, true);
+  ui.render(updated.slice(0, -1)); link.dispatch('click'); assert.equal(ui.document.scrollingElement.scrollTop, 333);
+});
+
+test('delegation clears clipped or changed content and bounds activity links to retained records', async () => {
+  const entries = await handoffFixture(); const ui = fixture(appSource); ui.render(entries);
+  const section = byClass(ui.get('#timeline'), 'delegation'); assert.ok(section);
+  const body = byClass(section, 'delegation-result'); reveal(body); body.focus();
+  ui.render([...entries.slice(0, -1), { ...entries.at(-1), truncated: true }]);
+  assert.equal(body.hidden, true); assert.equal(body.textContent, '');
+  assert.notEqual(ui.document.activeElement, body); assert.equal(ui.document.activeElement.isConnected, true);
+  assert.match(section.textContent, /clipped.*12,000 UTF-16.*cannot recover/s);
+  const many = await handoffFixture('Result', Array.from({ length: 120 }, (_, index) => ({ id: `child-${index}`,
+    type: 'assistant.message', agentId: 'child', data: { parentToolCallId: 'delegate-call', content: `Activity ${index}` } })));
+  ui.render(many);
+  assert.equal(ui.get('#timeline').querySelectorAll('.delegation').length, 1);
+  assert.equal(section.querySelectorAll('button').length, many.length);
+  ui.render(entries); assert.equal(section.querySelectorAll('button').length, entries.length);
+  ui.render([{ ...entries[1], agentId: '', evidence: '{}' }]); assert.equal(section.isConnected, false);
+});
+
 test('compaction details expose literal summary with source, units and explicitly limited meaning', async () => {
   const content = '# Café 🧪\r\n<script>literal only</script>\n' + '日'.repeat(8000);
   const entries = await compactionFixture({ summaryContent: content, outcome: 'future <outcome>' });
@@ -2116,7 +2207,7 @@ test('agent lane summaries visibly align overlapping intervals on one scale and 
   assert.match(a.textContent, /0–3 s.*3 s elapsed/);
   assert.match(b.textContent, /1–4 s.*3 s elapsed/);
   assert.match(ui.get('#lane-help').textContent, /1 pairs of lanes.*2026-11-20T12:00:01.000Z/);
-  assert.deepEqual(laneRows(a).map(row => walk(row).find(node => node.tagName === 'pre').textContent), [agentStart.evidence, agentEnd.evidence]);
+  assert.deepEqual(laneRows(a).map(row => byClass(row, 'recorded-evidence').querySelector('pre').textContent), [agentStart.evidence, agentEnd.evidence]);
   const laterStart = agentBoundary('b-start', 'subagent.started', 'b', 4);
   ui.render([agentStart, agentEnd, laterStart, bEnd]);
   assert.equal(Number(walk(b).find(node => node.tagName === 'rect').attributes.x), 750);

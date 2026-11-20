@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
-import { actionStages, agentLanes, compactionAttempts, hookInvocations, retrievalLedger, skillInstructions, toolExtents, toolProvenance, summarize } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
+import { actionStages, agentLanes, compactionAttempts, delegationHandoffs, hookInvocations, retrievalLedger, skillInstructions, toolExtents, toolProvenance, summarize } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
 import { compareCapabilities } from '../com.github.copilot/extensions/trace/web/capabilities.mjs';
 import { instructionSources } from '../com.github.copilot/extensions/trace/web/instructions.mjs';
 
@@ -23,7 +23,11 @@ let allowAgentResponses = false;
 let permissionFixture;
 let provenanceFixture;
 let retrievalFixture;
+let nestedFixture;
 const compactionSummary = 'Fixed local compaction summary. Literal café 🧪 <script>text</script>.';
+const nestedPrompt = 'Fixed nested handoff café 🧪 <script>text</script>.';
+const nestedLeafResult = 'Fixed leaf result café 🧪 <script>leaf</script>.';
+const nestedMiddleResult = 'Fixed middle result café 🧪 <script>middle</script>.';
 let mcpRequests = 0;
 const mcpMethods = [];
 let fixtureError;
@@ -64,7 +68,7 @@ const fixture = createServer(async (req, res) => {
     return;
   }
   const number = ++requests;
-  if (!allowSyntheticResponses || number > (retrievalFixture ? 14 + (retrievalFixture.allowCompaction ? 1 : 0) : provenanceFixture ? 12 : permissionFixture ? 10 : allowAgentResponses ? 7 : 3)) {
+  if (!allowSyntheticResponses || number > (nestedFixture ? 20 : retrievalFixture ? 14 + (retrievalFixture.allowCompaction ? 1 : 0) : provenanceFixture ? 12 : permissionFixture ? 10 : allowAgentResponses ? 7 : 3)) {
     req.resume(); res.writeHead(500); res.end('Unexpected fixture inference request.'); return;
   }
   try {
@@ -109,6 +113,19 @@ const fixture = createServer(async (req, res) => {
         assert.equal(retrievalFixture.allowCompaction, true);
         message = { role: 'assistant', content: compactionSummary };
       }
+    }
+    if (nestedFixture) {
+      assert.ok(nestedFixture.allowCalls && ++nestedFixture.responses <= 5);
+      const step = nestedFixture.responses;
+      assert.deepEqual((body.tools ?? []).map(tool => tool.function?.name), step === 3 ? [] : ['task']);
+      if (step === 1 || step === 2) {
+        const name = step === 1 ? 'outer' : 'inner';
+        message = { role: 'assistant', content: null, tool_calls: [{ id: `fixture-nested-${name}`, type: 'function',
+          function: { name: 'task', arguments: JSON.stringify({ name, description: `Owned ${name} delegation`,
+            prompt: `${nestedPrompt} ${name}`, agent_type: step === 1 ? 'trace-middle-agent' : 'trace-leaf-agent', mode: 'sync' }) } }] };
+        reason = 'tool_calls';
+      } else message = { role: 'assistant', content: step === 3 ? nestedLeafResult
+        : step === 4 ? nestedMiddleResult : 'Fixed parent response.' };
     }
     if (number === 4) {
       assert.ok(body.tools.some(tool => tool.function?.name === 'task'));
@@ -263,7 +280,9 @@ try {
   await session.sendAndWait({ prompt: 'Synthetic delegation fixture only.' }, 30000);
   if (fixtureError) throw fixtureError;
   const agentSnapshot = await until(() => fetch(agentPanel.url + 'events').then(r => r.json()),
-    value => value.history === 'ready' && value.entries.filter(entry => entry.type === 'subagent.completed').length === 2, 'agent lifecycle projection');
+    value => value.history === 'ready' && value.entries.filter(entry => entry.type === 'subagent.completed').length === 2
+      && agentEvents.filter(event => ['subagent.started', 'subagent.completed', 'assistant.turn_start', 'tool.execution_start', 'tool.execution_complete'].includes(event.type))
+        .every(event => value.entries.some(entry => entry.id === event.id)), 'agent lifecycle and result projection');
   stopAgentEvents();
   assert.equal(requests, 7, 'Only three input and four delegation fixture responses are permitted.');
   assert.equal(agentEvents.some(event => event.type === 'session.error'), false);
@@ -293,6 +312,8 @@ try {
     assert.equal(evidence.data.parentToolCallId, raw.data.parentToolCallId);
   }
   const laneView = agentLanes(agentSnapshot.entries, agentSnapshot);
+  const parallelHandoffs = delegationHandoffs(agentSnapshot.entries, agentSnapshot);
+  assert.equal(parallelHandoffs.length, 2);
   assert.ok(laneView.scale && laneView.scale.end > laneView.scale.start);
   assert.ok(laneView.overlaps >= 1, 'Actual retained child lifecycles produce recorded lane overlap.');
   for (const start of starts) {
@@ -303,6 +324,22 @@ try {
     assert.equal(lane.parentId, spawning.id);
     assert.deepEqual(lane.intervals, [{ start: Date.parse(start.timestamp), end: Date.parse(end.timestamp), startId: start.id, endId: end.id }]);
     assert.ok(lane.links.some(link => link.id === start.id) && lane.links.some(link => link.id === end.id));
+    const handoff = parallelHandoffs.find(value => value.agentId === start.agentId);
+    const returned = agentEvents.find(event => event.type === 'tool.execution_complete' && event.agentId === undefined && event.data.toolCallId === start.data.toolCallId);
+    assert.equal(handoff.status, 'linked');
+    assert.equal(handoff.lifecycle, 'completed');
+    assert.equal(handoff.parentAgentId, '');
+    assert.equal(handoff.toolCallId, spawning.data.toolCallId);
+    assert.equal(handoff.parentStart.id, spawning.id);
+    assert.equal(handoff.parentResult.id, returned.id);
+    assert.equal(handoff.handoff.status, 'complete');
+    assert.equal(handoff.handoff.prompt, spawning.data.arguments.prompt);
+    assert.equal(handoff.handoff.description, spawning.data.arguments.description);
+    assert.equal(handoff.result.status, 'complete');
+    assert.equal(handoff.result.success, true);
+    assert.equal(handoff.result.content, returned.data.result.content);
+    assert.ok(handoff.entries.every(entry => entry.agentId === start.agentId));
+    for (const id of [spawning.id, start.id, end.id, returned.id]) assert.ok(handoff.links.some(link => link.entry.id === id));
   }
   await session.rpc.canvas.close({ instanceId: input.instanceId });
   await until(() => fetch(agentPanel.url).then(() => false, () => true), Boolean, 'agent fixture server shutdown');
@@ -872,8 +909,85 @@ try {
   await until(() => fetch(retrievalPanel.url).then(() => false, () => true), Boolean, 'retrieval fixture server shutdown');
   await session.disconnect();
   assert.equal(requests, 15, 'Only the fifteen expected local synthetic responses are permitted.');
+
+  // A seventh owned session verifies nested handoffs through actual joined Trace evidence.
+  retrievalFixture = undefined;
+  nestedFixture = { responses: 0, allowCalls: false };
+  session = await client.createSession({ workingDirectory: project, configDirectory: home,
+    availableTools: ['builtin:task'], requestExtensions: true, requestCanvasRenderer: true,
+    extensionSdkPath: sdkDirectory, pluginDirectories: [root], enableConfigDiscovery: false, skipCustomInstructions: true,
+    customAgents: [
+      { name: 'trace-middle-agent', displayName: 'Same nested fixture agent', description: 'Owned middle fixture.',
+        prompt: 'Return the fixed local response.', tools: ['task'], model: 'fixture', modelPolicy: 'required', skills: [], mcpServers: {} },
+      { name: 'trace-leaf-agent', displayName: 'Same nested fixture agent', description: 'Owned leaf fixture.',
+        prompt: 'Return the fixed local response.', tools: [], model: 'fixture', modelPolicy: 'required', skills: [], mcpServers: {} },
+    ],
+    onPermissionRequest: () => { throw new Error('No permissions are authorized for the nested fixture.'); },
+    model: 'fixture', provider: { type: 'openai', baseUrl: `http://127.0.0.1:${fixture.address().port}/v1`, apiKey: 'fixture', wireApi: 'completions' } });
+  await session.rpc.tools.initializeAndValidate();
+  assert.deepEqual((await session.rpc.tools.getCurrentMetadata()).tools.map(tool => tool.name), ['task']);
+  const nestedEvents = [];
+  session.on(event => nestedEvents.push(event));
+  await until(() => session.rpc.canvas.list(), value => value.canvases?.some(canvas => canvas.canvasId === 'trace'), 'nested canvas registration');
+  const nestedPanel = await session.rpc.canvas.open({ canvasId: 'trace', instanceId: 'trace-nested-fixture', input: {} });
+  assert.equal(requests, 15, 'Opening the nested fixture does not ask a model to act.');
+  nestedFixture.allowCalls = true;
+  await session.sendAndWait({ prompt: 'Only the fixed nested delegation fixture.' }, 25000);
+  if (fixtureError) throw fixtureError;
+  assert.equal(nestedFixture.responses, 5);
+  assert.equal(nestedEvents.some(event => event.type === 'session.error'), false);
+  const nestedBoundaries = nestedEvents.filter(event => ['subagent.started', 'subagent.completed', 'assistant.turn_start',
+    'assistant.turn_end', 'assistant.message', 'tool.execution_start', 'tool.execution_complete'].includes(event.type));
+  const nestedSnapshot = await until(() => fetch(nestedPanel.url + 'events').then(response => response.json()),
+    value => value.history === 'ready' && nestedBoundaries.every(raw => value.entries.some(entry => entry.id === raw.id)), 'nested handoff projection');
+  for (const raw of nestedBoundaries) {
+    const projected = nestedSnapshot.entries.find(entry => entry.id === raw.id);
+    assert.equal(projected.agentId, raw.agentId ?? '');
+    assert.equal(projected.timestamp, raw.timestamp);
+    assert.equal(projected.truncated, false);
+    assert.deepEqual(JSON.parse(projected.evidence).data, raw.data);
+  }
+  const nestedStarts = nestedEvents.filter(event => event.type === 'subagent.started');
+  assert.equal(nestedStarts.length, 2);
+  assert.equal(new Set(nestedStarts.map(event => event.agentId)).size, 2);
+  assert.deepEqual([...new Set(nestedStarts.map(event => event.data.agentDisplayName))], ['Same nested fixture agent']);
+  const middle = nestedStarts.find(event => event.data.toolCallId === 'fixture-nested-outer');
+  const leaf = nestedStarts.find(event => event.data.toolCallId === 'fixture-nested-inner');
+  const nestedHandoffs = delegationHandoffs(nestedSnapshot.entries, nestedSnapshot);
+  assert.equal(nestedHandoffs.length, 2);
+  assert.equal(middle.data.parentId, undefined);
+  assert.equal(leaf.data.parentId, middle.agentId, 'The nested task-registry parent matches the recorded parent source in this installed build.');
+  for (const [start, parentAgentId, name, content] of [[middle, undefined, 'outer', nestedMiddleResult], [leaf, middle.agentId, 'inner', nestedLeafResult]]) {
+    const call = nestedEvents.find(event => event.type === 'tool.execution_start' && event.agentId === parentAgentId && event.data.toolCallId === start.data.toolCallId);
+    const result = nestedEvents.find(event => event.type === 'tool.execution_complete' && event.agentId === parentAgentId && event.data.toolCallId === start.data.toolCallId);
+    const end = nestedEvents.find(event => event.type === 'subagent.completed' && event.agentId === start.agentId);
+    assert.equal(call.data.arguments.prompt, `${nestedPrompt} ${name}`);
+    assert.equal(result.data.success, true);
+    assert.equal(result.data.result.content, content);
+    assert.equal(end.data.toolCallId, call.data.toolCallId);
+    assert.ok(nestedEvents.some(event => event.type === 'assistant.turn_start' && event.agentId === start.agentId && event.data.parentToolCallId === call.data.toolCallId));
+    const handoff = nestedHandoffs.find(value => value.agentId === start.agentId);
+    assert.equal(handoff.status, 'linked');
+    assert.equal(handoff.lifecycle, 'completed');
+    assert.equal(handoff.parentAgentId, parentAgentId ?? '');
+    assert.equal(handoff.toolCallId, call.data.toolCallId);
+    assert.equal(handoff.parentStart.id, call.id);
+    assert.equal(handoff.parentResult.id, result.id);
+    assert.equal(handoff.handoff.status, 'complete');
+    assert.equal(handoff.handoff.prompt, `${nestedPrompt} ${name}`);
+    assert.equal(handoff.handoff.description, `Owned ${name} delegation`);
+    assert.equal(handoff.result.status, 'complete');
+    assert.equal(handoff.result.content, content);
+    assert.equal(handoff.result.success, true);
+    assert.ok(handoff.entries.every(entry => entry.agentId === start.agentId));
+    for (const id of [call.id, start.id, end.id, result.id]) assert.ok(handoff.links.some(link => link.entry.id === id));
+  }
+  await session.rpc.canvas.close({ instanceId: 'trace-nested-fixture' });
+  await until(() => fetch(nestedPanel.url).then(() => false, () => true), Boolean, 'nested fixture server shutdown');
+  await session.disconnect();
+  assert.equal(requests, 20, 'Only the twenty expected local synthetic responses are permitted.');
   assert.equal(expired, false);
-  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping agents, approved/denied action boundaries, distinct MCP provenance, hook pipelines, historical skill instructions, read-only capability comparison, retrieval ledger, host-shortened preview, current instruction sources versus recorded loads and compaction summaries verified with fifteen fixed local responses across six disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
+  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping/nested agent handoffs and returns, approved/denied action boundaries, distinct MCP provenance, hook pipelines, historical skill instructions, read-only capability comparison, retrieval ledger, host-shortened preview, current instruction sources versus recorded loads and compaction summaries verified with twenty fixed local responses across seven disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
 } finally {
   clearTimeout(timer);
   releaseFirst();

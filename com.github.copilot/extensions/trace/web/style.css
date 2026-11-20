@@ -174,6 +174,9 @@ input { accent-color: var(--model); margin: 0; }
 .compaction { overflow-wrap: anywhere; }
 .compaction button { max-width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
 .compaction-summary { max-height: min(22rem, 45vh); overscroll-behavior: contain; }
+.delegation { overflow-wrap: anywhere; }
+.delegation button { max-width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.delegation pre { max-height: min(22rem, 45vh); overscroll-behavior: contain; }
 .metadata { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 14px; font-size: 0.786rem; margin: 16px 0; }
 .metadata dt { color: var(--muted); }
 .metadata dd { margin: 0; overflow-wrap: anywhere; }

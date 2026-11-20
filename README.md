@@ -1,6 +1,6 @@
 # Trace
 
-Current version: **0.1.32**
+Current version: **0.1.33**
 
 A GitHub Copilot desktop plugin for understanding the activity inside your current chat. `/trace` opens a live timeline with turn markers and expandable recorded evidence. This is an initial proof of concept: explanations describe what events mean; they do not infer why the model made a decision.
 
@@ -43,6 +43,8 @@ Open **Glossary** from the footer or a term button in an event's details for exp
 The glossary also compares instruction and skill guidance, configured hook automation and permission controls. Recorded examples distinguish a hook's explicit decision request from a permission outcome; missing output stays unknown. General explanations describe what each mechanism can do without claiming that a rule was enforced or the task is correct. See [guidance and controls](docs/guidance-and-controls.md).
 
 Compaction details explain recorded attempts and show a retained summary when the host supplies one. Before/after context-token estimates appear only with a supported accounting basis and comparable measurements. Missing boundaries, clipped summaries and unknown outcomes stay explicit; reported compaction success does not prove that meaning was preserved or reveal what the model remembers. See [compaction](docs/compaction.md).
+
+Subagent handoff details connect the recorded delegated task, child activity and returned parent-tool result through explicit identities. Same-name and nested agents stay distinct, with original evidence links and literal bounded text. Missing links and results stay unknown; a separate context does not establish which parent instructions or files reached the child. See [delegation handoffs](docs/delegation-handoffs.md).
 
 Trace keeps up to 300 recent supported events per panel in memory, with up to 12,000 UTF-16 code units of evidence per event; omissions and shortening are labeled. Token deltas, canvas bookkeeping and replay checkpoint copies are excluded. Encrypted/opaque reasoning fields are omitted. Closing the panel releases its observer and server. Trace makes no model requests and saves no transcripts. Instruction refresh requests bounded source content from the host; Trace does not scan project paths. The host may retain its own logs; event payloads and source snapshots can contain sensitive instruction text, chat content, file paths and tool arguments.
 

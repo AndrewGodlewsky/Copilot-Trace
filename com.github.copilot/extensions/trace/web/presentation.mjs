@@ -668,6 +668,136 @@ export function describeToolGroup(entries, operation = toolOperations(entries).g
 const identityText = (value, limit = 256) => typeof value === 'string' && value.trim().length > 0 && value.length <= limit;
 const mcpFields = ['mcpConfigServerName', 'mcpServerName', 'mcpToolName', 'mcpServerDisplayName', 'mcpConfigSource', 'mcpTransport'];
 
+// Link retained records, never reconstruct a child transcript or infer a causal tree.
+export function delegationHandoffs(entries, { history = 'ready', omitted = 0 } = {}) {
+  const rows = [], byAgent = new Map(), tools = new Map(), records = new Map(), positions = new Map(), counts = new Map();
+  const source = entry => entry.agentId === '' || identityText(entry.agentId) ? entry.agentId : null;
+  const lifecycleEvent = entry => ['subagent.started', 'subagent.completed', 'subagent.failed'].includes(entry.type);
+  const key = (agent, call) => JSON.stringify([agent, call]);
+  for (const [index, entry] of entries.entries()) {
+    positions.set(entry, index); counts.set(entry.id, (counts.get(entry.id) || 0) + 1);
+    records.set(entry, source(entry) !== null && identityText(entry.id) ? explanationData(entry) : null);
+    if (['tool.execution_start', 'tool.execution_complete'].includes(entry.type) && identityText(entry.toolCallId)) {
+      const identity = key(source(entry), entry.toolCallId);
+      if (!tools.has(identity)) tools.set(identity, []);
+      tools.get(identity).push(entry);
+    }
+    const agent = source(entry);
+    if (agent === '' || (agent === null && !lifecycleEvent(entry))) continue;
+    let row = agent === null ? null : byAgent.get(agent);
+    if (!row) {
+      row = { id: `delegation:${agent === null ? `unknown:${entry.id}` : JSON.stringify(agent)}`,
+        anchorId: entry.id, agentId: agent, entries: [] };
+      rows.push(row);
+      if (agent !== null) byAgent.set(agent, row);
+    }
+    row.entries.push(entry);
+  }
+  const claims = new Map();
+  for (const row of rows) {
+    const starts = row.entries.filter(entry => entry.type === 'subagent.started');
+    const ends = row.entries.filter(entry => ['subagent.completed', 'subagent.failed'].includes(entry.type));
+    const boundaries = row.entries.filter(lifecycleEvent);
+    const calls = boundaries.map(entry => records.get(entry)?.toolCallId);
+    const activityCalls = row.entries.filter(entry => !lifecycleEvent(entry) && records.get(entry)?.parentToolCallId !== undefined)
+      .map(entry => records.get(entry).parentToolCallId);
+    const call = calls[0] ?? activityCalls[0];
+    const valid = row.agentId !== null && identityText(call) && [...calls, ...activityCalls].every(value => value === call)
+      && boundaries.every(entry => records.get(entry)?.toolCallId === entry.toolCallId);
+    const names = boundaries.map(entry => records.get(entry)?.agentName).filter(value => value !== undefined);
+    let conflict = starts.length > 1 || ends.length > 1 || row.entries.some(entry => counts.get(entry.id) > 1)
+      || (calls.length > 1 && calls.some(value => value !== calls[0]))
+      || (identityText(call) && activityCalls.some(value => value !== call))
+      || names.some(value => !identityText(value) || value !== names[0])
+      || (starts.length === 1 && ends.length === 1 && positions.get(ends[0]) < positions.get(starts[0]));
+    const startData = starts.length === 1 ? records.get(starts[0]) : null;
+    let parent = null, candidates = [];
+    if (valid && !conflict) {
+      if (startData) {
+        parent = startData.parentId === undefined ? '' : identityText(startData.parentId) ? startData.parentId : null;
+        candidates = parent === null ? [] : tools.get(key(parent, call)) || [];
+        if (parent === row.agentId || parent === null
+          || (!candidates.length && [...tools.values()].some(items => items[0].toolCallId === call))) conflict = true;
+      } else {
+        const sources = [...tools.values()].filter(items => items[0].toolCallId === call && source(items[0]) !== row.agentId);
+        if (sources.length === 1) { candidates = sources[0]; parent = source(candidates[0]); }
+        else if (sources.length > 1) conflict = true;
+      }
+    }
+    const toolStarts = candidates.filter(entry => entry.type === 'tool.execution_start');
+    const toolEnds = candidates.filter(entry => entry.type === 'tool.execution_complete');
+    const task = toolStarts[0], result = toolEnds[0], data = task && records.get(task);
+    if (toolStarts.length > 1 || toolEnds.length > 1 || candidates.some(entry => counts.get(entry.id) > 1)
+      || (task && result && positions.get(result) < positions.get(task))
+      || (task && starts[0] && positions.get(task) > positions.get(starts[0]))) conflict = true;
+    const linked = valid && !conflict && parent !== null && task && data?.toolCallId === call
+      && data.toolName === task.toolName && source(task) === parent;
+    row.status = conflict ? 'conflict' : linked ? 'linked' : 'unlinked';
+    row.toolCallId = valid ? call : null;
+    row.parentAgentId = linked ? parent : null;
+    row.parentStart = linked ? task : null;
+    row.parentResult = null;
+    row._candidate = { starts, ends, startData, task, result, data, candidates, valid };
+    if (linked) {
+      const identity = key(parent, call);
+      if (!claims.has(identity)) claims.set(identity, []);
+      claims.get(identity).push(row);
+    }
+  }
+  for (const sharing of claims.values()) if (sharing.length > 1) for (const row of sharing) {
+    row.status = 'conflict'; row.parentAgentId = null; row.parentStart = null;
+  }
+  for (const row of rows) {
+    const { starts, ends, startData, task, result, data, candidates, valid } = row._candidate;
+    delete row._candidate;
+    const linked = row.status === 'linked';
+    const end = ends[0], endData = end && records.get(end);
+    row.lifecycle = !valid || ends.length > 1 || starts.length > 1 ? 'unknown' : !end ? 'missing'
+      : !endData ? 'unknown' : end.type === 'subagent.failed' ? 'failed'
+        : endData.cancelled === true ? 'cancelled'
+          : endData.cancelled === undefined || endData.cancelled === false ? 'completed' : 'unknown';
+    const args = data?.arguments;
+    const recognized = linked && startData && data.toolName === 'task' && mcpFields.every(field => data[field] === undefined)
+      && args && typeof args === 'object' && !Array.isArray(args) && args.mode === 'sync'
+      && identityText(args.agent_type) && args.agent_type === startData.agentName
+      && (startData.agentType === undefined || startData.agentType === args.agent_type)
+      && (startData.executionMode === undefined || startData.executionMode === 'sync')
+      && typeof args.prompt === 'string' && typeof args.description === 'string';
+    const clipped = label => `${label} unavailable: Trace clipped event evidence to at most 12,000 UTF-16 code units and cannot recover the complete text.`;
+    row.handoff = {
+      status: !recognized ? 'unavailable' : args.prompt === '' && args.description === '' ? 'empty' : 'complete',
+      prompt: recognized ? args.prompt : null, description: recognized ? args.description : null,
+      note: recognized ? 'Exact recorded parent task arguments; these are the delegated prompt and description, not the child’s entire context.'
+        : task?.truncated ? clipped('Handoff') : linked ? 'Handoff unavailable: the retained task contract is unrecognized or incomplete.'
+          : 'Handoff unavailable: a unique parent task with complete matching evidence is not retained.',
+    };
+    const resultData = result && records.get(result);
+    const matchedResult = recognized && resultData?.toolCallId === row.toolCallId
+      && (resultData.toolName === undefined || resultData.toolName === 'task')
+      && (typeof resultData.success === 'boolean' ? resultData.success : null) === result.success;
+    const content = matchedResult && typeof resultData.result?.content === 'string' ? resultData.result.content : null;
+    if (linked && resultData?.toolCallId === row.toolCallId) row.parentResult = result;
+    row.result = {
+      status: content === null ? 'unavailable' : content === '' ? 'empty' : 'complete', content,
+      success: matchedResult && typeof resultData.success === 'boolean' ? resultData.success : null,
+      note: (content !== null ? content === '' ? 'The parent recorded an empty result.content.' : 'Exact parent task result.content retained.'
+        : result?.truncated ? clipped('Result') : !result ? 'Parent result not retained: it may be late, absent or omitted. This does not mean the child is still running.'
+          : 'Parent result text unavailable: a recognized task contract and a unique complete matching text result are required.')
+        + ' Child lifecycle completion is separate from the parent’s returned text. Reported success and text do not establish task correctness.',
+    };
+    row.notes = [row.status === 'conflict' ? 'Conflicting or duplicate source, call or child boundaries; parent unknown and no handoff/result association is inferred.'
+      : linked ? 'Parent and child are linked by explicit recorded source and spawning tool-call identities.'
+        : 'Parent unknown: matching evidence is missing or invalid. Names, proximity and chronological envelope parent IDs do not establish parentage.',
+    'Delegation uses separate context. This does not prove that a particular file, instruction or parent message was included or excluded.',
+    ...(history !== 'ready' ? ['History is incomplete or unavailable.'] : []), ...(omitted ? ['Older events were omitted.'] : [])];
+    const selected = new Set([...row.entries, ...(linked ? [row.parentStart, row.parentResult].filter(Boolean) : [])]);
+    row.links = entries.filter(entry => selected.has(entry) && counts.get(entry.id) === 1).map(entry => ({ entry,
+      label: entry === row.parentStart ? 'Parent task arguments' : entry === row.parentResult ? 'Parent returned result'
+        : entry.type === 'subagent.started' ? 'Child start' : lifecycleEvent(entry) ? 'Child lifecycle outcome' : 'Child activity' }));
+  }
+  return rows;
+}
+
 function validMcpMetadata(data) {
   return identityText(data.mcpToolName) && (identityText(data.mcpConfigServerName) || identityText(data.mcpServerName))
     && mcpFields.slice(0, 4).every(field => data[field] === undefined || identityText(data[field], field === 'mcpServerDisplayName' ? 180 : 256))

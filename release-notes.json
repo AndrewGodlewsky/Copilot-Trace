@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.33",
+    "summary": "Inspect recorded subagent handoffs, child activity and returned results. Missing links and separate-context limits stay explicit."
+  },
+  {
     "version": "0.1.32",
     "summary": "Inspect recorded compaction summaries and comparable context-token estimates. Missing boundaries, shortened evidence and unknown memory effects remain explicit."
   },

@@ -1,4 +1,4 @@
-import { describeActor, explainStep, skillInstructions, compactionAttempts, guidanceComparison, retrievalLedger, toolExtents, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, observerScope, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
+import { describeActor, explainStep, skillInstructions, compactionAttempts, delegationHandoffs, guidanceComparison, retrievalLedger, toolExtents, describeHookGroup, hookInvocations, describeToolGroup, toolProvenance, toolOperations, actionStages, describeStep, describeTurn, groupSteps, requestChapters, agentLanes, turnContext, summarize, observerScope, filterLabels, matchesFilter, navigationLabels, latestRetainedEvent } from './presentation.mjs';
 import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
@@ -39,6 +39,7 @@ for (const [key, label] of [['turns', 'Model turns'], ['hooks', 'Hook pipelines'
   statValues.set(key, value);
 }
 const nodes = new Map();
+const delegationViews = new Map();
 let groups = [];
 let chapters = [];
 let lanes = [];
@@ -547,6 +548,60 @@ function renderCompaction(node, attempt) {
   for (const [id, button] of view.buttons) if (!ids.has(id)) { button.remove(); view.buttons.delete(id); }
 }
 
+function renderDelegation(node, handoff) {
+  let view = delegationViews.get(handoff.id);
+  if (!view) {
+    const details = element('details', undefined, 'delegation');
+    const source = element('p'), lifecycle = element('p'), taskNote = element('p'), resultNote = element('p'), limits = element('p');
+    const prompt = element('pre', '', 'delegation-prompt'), description = element('pre', '', 'delegation-description');
+    const result = element('pre', '', 'delegation-result');
+    for (const [body, label] of [[prompt, 'Exact retained delegated prompt'], [description, 'Exact retained delegated description'], [result, 'Exact retained parent task result']]) {
+      body.tabIndex = 0; body.setAttribute('aria-label', label);
+    }
+    const links = element('div', undefined, 'boundary-links');
+    links.setAttribute('role', 'group'); links.setAttribute('aria-label', 'Original delegation evidence in recorded event order');
+    details.append(element('summary', 'Delegated task and returned result'), source, lifecycle,
+      element('h4', 'Delegated task'), taskNote, element('h5', 'Description'), description, element('h5', 'Prompt'), prompt,
+      element('h4', 'Parent returned result'), resultNote, result, limits, links);
+    details.addEventListener('toggle', () => { if (details.open) follow.checked = false; });
+    view = { details, source, lifecycle, taskNote, resultNote, limits, prompt, description, result, links, buttons: new Map() };
+    delegationViews.set(handoff.id, view);
+  }
+  if (view.details.parentElement !== node.body) node.body.insertBefore(view.details, node.recordedEvidence);
+  const parent = handoff.parentAgentId === null ? 'Parent unknown' : handoff.parentAgentId === '' ? 'Main chat' : `Agent ${handoff.parentAgentId}`;
+  const lifecycle = { completed: 'Completed · Task correctness not established.', failed: 'Failed.', cancelled: 'Cancelled.',
+    missing: 'Completion not retained; this does not mean the child is still running.', unknown: 'Lifecycle outcome unknown.' }[handoff.lifecycle];
+  const success = handoff.result.success === null ? 'Parent task success field unavailable.'
+    : `Parent task reports ${handoff.result.success ? 'success' : 'failure'}.`;
+  for (const [target, value] of [
+    [view.source, `Parent source: ${parent} · Child source: ${handoff.agentId === null ? 'Unknown' : `Agent ${handoff.agentId}`} · Spawning call: ${handoff.toolCallId ?? 'unknown'}`],
+    [view.lifecycle, `Child lifecycle: ${lifecycle}`], [view.taskNote, handoff.handoff.note],
+    [view.description, handoff.handoff.description ?? ''], [view.prompt, handoff.handoff.prompt ?? ''],
+    [view.resultNote, `${success} ${handoff.result.note}`], [view.result, handoff.result.content ?? ''], [view.limits, handoff.notes.join(' ')],
+  ]) if (target.textContent !== value) target.textContent = value;
+  view.description.hidden = handoff.handoff.description === null || handoff.handoff.description === '';
+  view.prompt.hidden = handoff.handoff.prompt === null || handoff.handoff.prompt === '';
+  view.result.hidden = handoff.result.status !== 'complete';
+  let previous;
+  const ids = new Set();
+  for (const { entry, label } of handoff.links) {
+    if (!retainedExample(lastSnapshot.entries, entry)) continue;
+    ids.add(entry.id);
+    let button = view.buttons.get(entry.id);
+    if (button && !retainedExample([entry], button.entry)) { button.remove(); button = null; }
+    if (!button) {
+      button = element('button'); button.type = 'button'; button.entry = Object.freeze({ ...entry });
+      button.addEventListener('click', () => showBoundary(entry.id,
+        'Showing the delegation disclosure’s original retained evidence. Follow live is paused.', button.entry));
+      view.buttons.set(entry.id, button);
+    }
+    const text = `${label} · ${entry.type} · ${entry.timestamp || 'Time unavailable'}`;
+    if (button.textContent !== text) button.textContent = text;
+    previous = place(view.links, button, previous);
+  }
+  for (const [id, button] of view.buttons) if (!ids.has(id)) { button.remove(); view.buttons.delete(id); }
+}
+
 function renderHookInvocation(owner, call) {
   if (!owner.hook) {
     owner.hook = element('details', undefined, 'hook-invocation');
@@ -918,6 +973,10 @@ function render(snapshot) {
   const extents = toolExtents(snapshot.entries, snapshot);
   const compactions = compactionAttempts(snapshot.entries);
   const compactionByEvent = new Map(compactions.flatMap(attempt => attempt.entries.map(entry => [entry.id, attempt])));
+  const delegations = delegationHandoffs(snapshot.entries, snapshot);
+  const delegationByEvent = new Map(delegations.map(handoff => [handoff.anchorId, handoff]));
+  const delegationIds = new Set(delegations.map(handoff => handoff.id));
+  for (const [id, view] of delegationViews) if (!delegationIds.has(id)) { view.details.remove(); delegationViews.delete(id); }
   const hooks = hookInvocations(snapshot.entries);
   const hookByEvent = new Map(hooks.flatMap(call => call.entries.map(entry => [entry.id, call])));
   renderStatistics(snapshot);
@@ -936,6 +995,7 @@ function render(snapshot) {
     node.entry = entry;
     renderExtent(node, extents.get(entry.id));
     renderCompaction(node, compactionByEvent.get(entry.id));
+    if (delegationByEvent.has(entry.id)) renderDelegation(node, delegationByEvent.get(entry.id));
     if (node.glossary) {
       const concept = conceptForEntry(entry);
       node.glossary.hidden = !concept;
