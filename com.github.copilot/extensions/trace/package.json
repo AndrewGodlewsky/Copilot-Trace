@@ -1,0 +1,6 @@
+{
+  "name": "trace-canvas",
+  "version": "0.1.1",
+  "type": "module",
+  "description": "Copilot Trace canvas; the host supplies the SDK and runtime."
+}

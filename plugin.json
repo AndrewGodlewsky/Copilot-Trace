@@ -1,0 +1,16 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "trace",
+  "version": "0.1.1",
+  "description": "Open the Copilot Trace starter canvas with /trace.",
+  "repository": "https://github.com/AndrewGodlewsky/Copilot-Trace",
+  "keywords": [
+    "copilot",
+    "canvas"
+  ],
+  "extensions": {
+    "com.github.copilot": {
+      "logo": "assets/trace.svg"
+    }
+  }
+}

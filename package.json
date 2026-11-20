@@ -1,0 +1,19 @@
+{
+  "name": "copilot-trace",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "description": "A starter canvas for the Copilot Trace desktop plugin.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "node scripts/check.mjs",
+    "e2e": "node scripts/e2e.mjs",
+    "install:copilot": "node scripts/install.mjs",
+    "package": "node scripts/package.mjs",
+    "iteration": "node scripts/iteration.mjs",
+    "verify:iteration": "node scripts/iteration.mjs verify"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "copilot-trace",
+  "owner": {
+    "name": "AndrewGodlewsky"
+  },
+  "plugins": [
+    {
+      "name": "trace",
+      "source": "./",
+      "description": "Copilot Trace starter canvas.",
+      "version": "0.1.1"
+    }
+  ]
+}
