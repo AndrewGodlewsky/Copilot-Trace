@@ -6,7 +6,7 @@ import { createFollow } from './follow.mjs';
 import { initCapabilities } from './capabilities.mjs';
 import { initInstructionSources } from './instructions.mjs';
 import { vocabulary, conceptForEntry, glossaryExample, retainedExample } from './glossary.mjs';
-import { validationClaims, validationChecks, validationOverview, linkValidationClaim, retainedValidationLink, observedActivity } from './presentation.mjs';
+import { validationClaims, validationChecks, validationOverview, linkValidationClaim, retainedValidationLink, observedActivity, repeatedActivity } from './presentation.mjs';
 
 const diagnostics = createDiagnostics();
 diagnostics.record('panel_started');
@@ -35,6 +35,9 @@ const validationRows = new Map(), validationDisclosure = document.querySelector(
 validationDisclosure.addEventListener('toggle', () => { if (validationDisclosure.open) follow.checked = false; });
 const observedRows = new Map(), observedDisclosure = document.querySelector('#observed-activity');
 observedDisclosure.addEventListener('toggle', () => { if (observedDisclosure.open) follow.checked = false; });
+const repeatedRows = new Map(), repeatedDisclosure = document.querySelector('#repeated-activity');
+repeatedDisclosure.addEventListener('toggle', () => { if (repeatedDisclosure.open) follow.checked = false; });
+let repetition;
 let observation, lastFeedReceipt, unchangedFeed = false, panelClosed = false;
 for (const [key, label] of [['turns', 'Model turns'], ['hooks', 'Hook pipelines'], ['tools', 'Tool calls'], ['skills', 'Skill loads']]) {
   const cell = element('div');
@@ -309,6 +312,7 @@ function renderStatistics(snapshot) {
   renderRetrieval(snapshot);
   renderValidation(snapshot);
   renderObservedActivity(snapshot);
+  renderRepetition(snapshot);
   const stats = summarize(snapshot.entries);
   for (const [selector, values] of [['#stat-hooks', stats.hookNames], ['#stat-skills', stats.skillNames]]) {
     const list = document.querySelector(selector);
@@ -372,6 +376,87 @@ function renderObservedActivity(snapshot) {
   }
   const ids = new Set(observation.items.map(item => item.id));
   for (const [id, node] of observedRows) if (!ids.has(id)) { node.item.remove(); observedRows.delete(id); }
+  if (inspected && !unhidden(focused)) { follow.checked = false; list.focus({ preventScroll: true }); }
+  panel.scrollTop = scroll;
+}
+
+function renderRepetition(snapshot) {
+  repetition = repeatedActivity(snapshot.entries, snapshot);
+  const list = document.querySelector('#repeated-list'), panel = document.querySelector('#statistics-panel');
+  const focused = document.activeElement, inspected = repeatedDisclosure.contains(focused), scroll = panel.scrollTop;
+  const summary = repetition.patterns.length ? `${repetition.patterns.length} repeated request pattern${repetition.patterns.length === 1 ? '' : 's'} in retained evidence.`
+    : 'No exact repeated requests recognized in retained evidence.';
+  const scope = `${repetition.unclassifiedCalls} unclassified tool calls; repetition unknown. ${repetition.unlinkedBoundaries} boundaries with unusable identities are not counted as calls. ${repetition.notes.join(' ')}`;
+  for (const [selector, text] of [['#repeated-summary', summary], ['#repeated-scope', scope]]) {
+    const target = document.querySelector(selector); if (target.textContent !== text) target.textContent = text;
+  }
+  let previous;
+  for (const pattern of repetition.patterns) {
+    let node = repeatedRows.get(pattern.id);
+    if (!node) {
+      const item = element('li'), details = element('details'), title = element('summary'), counts = element('p');
+      const rule = element('p'), provider = element('p'), args = element('pre'), occurrences = element('ol');
+      args.tabIndex = 0; args.setAttribute('aria-label', 'Recorded arguments from the first retained occurrence');
+      occurrences.setAttribute('aria-label', 'Repeated invocations in retained order');
+      details.append(title, counts, provider, rule, args, occurrences); item.append(details);
+      details.addEventListener('toggle', () => { if (details.open) follow.checked = false; });
+      node = { item, title, counts, provider, rule, args, occurrences, rows: new Map() }; repeatedRows.set(pattern.id, node);
+    }
+    const source = pattern.source === '' ? 'Main chat' : `Agent ${pattern.source}`;
+    const counts = `${pattern.toolFailures} reported tool failures${pattern.toolFailures >= 2 ? ' (recurring)' : ''}; `
+      + `${pattern.processFailures} typed process failures${pattern.processFailures >= 2 ? ' (recurring)' : ''}; `
+      + `${pattern.missingResults} results not retained; ${pattern.unknownResults} conflicting or incomplete results.`;
+    for (const [target, text] of [[node.title, `${pattern.count} exact repeated invocations · ${pattern.toolName} · ${source}`],
+      [node.counts, counts], [node.provider, pattern.provider], [node.rule, `Matching rule: ${pattern.rule}`], [node.args, pattern.arguments]]) {
+      if (target.textContent !== text) target.textContent = text;
+    }
+    let previousOccurrence;
+    for (const occurrence of pattern.occurrences) {
+      let row = node.rows.get(occurrence.id);
+      if (row && !retainedExample([occurrence.start], row.start)) { row.item.remove(); node.rows.delete(occurrence.id); row = null; }
+      if (!row) {
+        const item = element('li'), identity = element('p'), status = element('p'), links = element('div', undefined, 'boundary-links');
+        links.setAttribute('role', 'group'); links.setAttribute('aria-label', 'Original repeated operation evidence');
+        item.append(identity, status, links); row = { item, identity, status, links, start: occurrence.start, buttons: new Map() };
+        node.rows.set(occurrence.id, row);
+      }
+      const timestamp = occurrence.start.timestamp;
+      const time = timestamp && Number.isFinite(Date.parse(timestamp)) ? timestamp : `Time unknown${timestamp ? ` (recorded: ${timestamp})` : ''}`;
+      const status = `Tool protocol: ${occurrence.toolSuccess === null ? 'unknown' : occurrence.toolSuccess ? 'success' : 'failure'}. `
+        + `Process exit: ${occurrence.exitCode === null ? 'unknown' : occurrence.exitCode}. `
+        + (occurrence.resultState === 'missing' ? 'Result not retained; not necessarily still running.'
+          : occurrence.resultState === 'unknown' ? 'Result incomplete or conflicting; inspect original timeline boundaries.' : 'Recorded result retained.');
+      for (const [target, text] of [[row.identity, `Call ${occurrence.start.toolCallId} · ${time}`], [row.status, status]]) {
+        if (target.textContent !== text) target.textContent = text;
+      }
+      let previousButton;
+      for (const entry of occurrence.links) {
+        let button = row.buttons.get(entry.id);
+        if (button && !retainedExample([entry], button.entry)) { button.remove(); row.buttons.delete(entry.id); button = null; }
+        if (!button) {
+          button = element('button', entry.id === occurrence.start.id ? 'Original arguments' : 'Original result'); button.type = 'button'; button.entry = entry;
+          button.addEventListener('click', () => {
+            const current = !panelClosed && repetition?.patterns.find(item => item.id === pattern.id)?.occurrences.find(item => item.id === occurrence.id);
+            if (!current || !retainedExample(current.links, entry) || !retainedExample(lastSnapshot?.entries || [], entry)) {
+              navigationStatus.textContent = 'That evidence no longer describes this retained repetition. Reading position unchanged.'; return;
+            }
+            footerPanels.closePanel('statistics-panel', { restoreFocus: false });
+            showBoundary(entry.id, 'Showing the repeated operation’s original evidence. Follow live is paused.', entry);
+          });
+          row.buttons.set(entry.id, button);
+        }
+        previousButton = place(row.links, button, previousButton);
+      }
+      const linked = new Set(occurrence.links.map(entry => entry.id));
+      for (const [id, button] of row.buttons) if (!linked.has(id)) { button.remove(); row.buttons.delete(id); }
+      previousOccurrence = place(node.occurrences, row.item, previousOccurrence);
+    }
+    const ids = new Set(pattern.occurrences.map(item => item.id));
+    for (const [id, row] of node.rows) if (!ids.has(id)) { row.item.remove(); node.rows.delete(id); }
+    previous = place(list, node.item, previous);
+  }
+  const ids = new Set(repetition.patterns.map(pattern => pattern.id));
+  for (const [id, node] of repeatedRows) if (!ids.has(id)) { node.item.remove(); repeatedRows.delete(id); }
   if (inspected && !unhidden(focused)) { follow.checked = false; list.focus({ preventScroll: true }); }
   panel.scrollTop = scroll;
 }
@@ -1522,6 +1607,8 @@ window.addEventListener('pagehide', () => {
   validationRows.clear();
   for (const node of observedRows.values()) { node.buttons.clear(); node.item.remove(); }
   observedRows.clear(); observation = undefined;
+  for (const node of repeatedRows.values()) { node.rows.clear(); node.item.remove(); }
+  repeatedRows.clear(); repetition = undefined;
 });
 renderObserverScope();
 void poller.refresh();

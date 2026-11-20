@@ -90,6 +90,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     '#guidance-comparison', '#guidance-examples',
     '#retrieval-ledger', '#retrieval-summary', '#retrieval-scope', '#retrieval-list', '#retrieval-unclassified', '#retrieval-unknown-list',
     '#validation-overview', '#validation-summary', '#validation-scope', '#validation-list',
+    '#repeated-activity', '#repeated-summary', '#repeated-scope', '#repeated-list',
     '#observed-activity', '#observed-summary', '#observed-time', '#observed-feed', '#observed-scope', '#observed-list',
     '#instruction-sources', '#instruction-refresh', '#instruction-status', '#instruction-scope', '#instruction-window', '#instruction-current', '#instruction-loads',
     '#instruction-inspector', '#instruction-title', '#instruction-detail', '#instruction-body', '#instruction-original', '#instruction-selection-status',
@@ -114,6 +115,8 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   selectors.get('#retrieval-unclassified').append(selectors.get('#retrieval-unknown-list'));
   const validation = selectors.get('#validation-overview'); validation.tagName = 'details'; statistics.append(validation);
   for (const id of ['summary', 'scope', 'list']) validation.append(selectors.get(`#validation-${id}`));
+  const repeated = selectors.get('#repeated-activity'); repeated.tagName = 'details'; statistics.append(repeated);
+  for (const id of ['summary', 'scope', 'list']) repeated.append(selectors.get(`#repeated-${id}`));
   const observed = selectors.get('#observed-activity'); observed.tagName = 'details'; statistics.append(observed);
   for (const id of ['summary', 'time', 'feed', 'scope', 'list']) observed.append(selectors.get(`#observed-${id}`));
   const instruction = selectors.get('#instruction-sources'); instruction.tagName = 'details'; statistics.append(instruction);
@@ -166,6 +169,74 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
 const appSource = await readFile(new URL('../com.github.copilot/extensions/trace/web/app.mjs', import.meta.url), 'utf8');
 
 const feedResponse = (snapshot, status = 200) => ({ status, headers: { get: () => 'fixture-revision' }, json: async () => snapshot });
+
+async function repeatedFixture() {
+  const trace = createTrace({ on() { return () => {}; }, getEvents: async () => [0, 1, 2].flatMap(index => [
+    { id: `repeat-${index}-start`, type: 'tool.execution_start', data: { toolCallId: `repeat-${index}`, toolName: 'view',
+      arguments: { path: '<script>日🧪</script>\n file' } } },
+    { id: `repeat-${index}-end`, type: 'tool.execution_complete', data: { toolCallId: `repeat-${index}`, success: index === 2 } },
+  ]) });
+  await trace.ready; const entries = trace.snapshot().entries; trace.close(); return entries;
+}
+
+test('repeated operations stay quiet and preserve occurrence focus, disclosures and reading position through arrivals and eviction', async () => {
+  const entries = await repeatedFixture(), ui = fixture(appSource); ui.render(entries.slice(0, 3));
+  const list = ui.get('#repeated-list'), disclosure = ui.get('#repeated-activity');
+  assert.equal(list.children.length, 1); assert.equal(disclosure.open, false);
+  assert.match(list.textContent, /2 exact repeated invocations/); assert.match(list.textContent, /Result not retained/);
+  ui.get('#statistics-button').dispatch('click'); disclosure.open = true; disclosure.dispatch('toggle');
+  const row = list.firstElementChild, details = row.querySelector('details'), occurrences = row.querySelector('ol');
+  details.open = true; const link = occurrences.children[1].querySelector('button'); link.focus();
+  list.scrollTop = 55; ui.get('#statistics-panel').scrollTop = 120; ui.document.scrollingElement.scrollTop = 230;
+  ui.render(entries);
+  assert.match(row.textContent, /3 exact repeated invocations/); assert.match(row.textContent, /2 reported tool failures/);
+  assert.equal(row.querySelector('pre').textContent, JSON.stringify({ path: '<script>日🧪</script>\n file' }, null, 2));
+  for (const mode of ['chronological', 'chapters', 'lanes', 'grouped']) {
+    ui.get('#event-order').value = mode; ui.get('#event-order').dispatch('change'); filterMode(ui, 'automation');
+    assert.equal(list.firstElementChild, row); assert.equal(ui.document.activeElement, link); assert.equal(details.open, true);
+    assert.equal(list.scrollTop, 55); assert.equal(ui.get('#statistics-panel').scrollTop, 120);
+    assert.equal(ui.document.scrollingElement.scrollTop, 230); assert.equal(ui.get('#follow').checked, false);
+  }
+  ui.render(entries.slice(2), { omitted: 2 });
+  assert.equal(list.firstElementChild, row); assert.equal(ui.document.activeElement, link);
+  assert.match(row.textContent, /2 exact repeated invocations/); assert.match(ui.get('#repeated-scope').textContent, /2 older events.*omitted/i);
+  assert.equal(disclosure.attributes['aria-live'], undefined); assert.equal(list.attributes.role, undefined);
+  assert.equal(list.querySelectorAll('script').length, 0); assert.equal(list.querySelectorAll('a').length, 0);
+  ui.render(entries.slice(4)); assert.equal(list.children.length, 0); assert.equal(ui.document.activeElement, list);
+  assert.equal(ui.document.scrollingElement.scrollTop, 230); assert.equal(ui.get('#statistics-panel').scrollTop, 120);
+});
+
+test('repetition links navigate exact originals and reject changed, evicted, reused and closed evidence', async () => {
+  const entries = await repeatedFixture();
+  for (const mutate of [items => { items[0] = { ...items[0], timestamp: 'changed' }; }, items => items.splice(0, 1),
+    items => items.push({ ...items[0] })]) {
+    const ui = fixture(appSource); ui.render(entries); ui.get('#statistics-button').dispatch('click');
+    const button = ui.get('#repeated-list').querySelector('button'); const changed = structuredClone(entries); mutate(changed); ui.render(changed);
+    ui.document.scrollingElement.scrollTop = 210; button.dispatch('click');
+    assert.equal(ui.document.scrollingElement.scrollTop, 210); assert.equal(ui.get('#statistics-panel').open, true);
+    assert.match(ui.get('#navigation-status').textContent, /no longer|unchanged/i);
+  }
+  const ui = fixture(appSource); ui.render(entries); ui.get('#statistics-button').dispatch('click'); filterMode(ui, 'automation');
+  const button = ui.get('#repeated-list').querySelector('button'); button.dispatch('click');
+  assert.equal(ui.get('#statistics-panel').open, false); assert.equal(ui.get('#activity-filter').value, 'everything');
+  assert.equal(ui.get('#event-order').value, 'chronological'); assert.equal(ui.get('#follow').checked, false);
+  ui.closePage(); ui.document.scrollingElement.scrollTop = 210; button.dispatch('click');
+  assert.equal(ui.get('#repeated-list').children.length, 0); assert.equal(ui.document.scrollingElement.scrollTop, 210);
+});
+
+test('late repeated results retain argument focus and replaced result links cannot target new evidence', async () => {
+  const entries = await repeatedFixture(), ui = fixture(appSource); ui.render(entries.slice(0, 3));
+  const list = ui.get('#repeated-list'), pattern = list.firstElementChild;
+  ui.get('#statistics-button').dispatch('click');
+  const occurrence = pattern.querySelector('ol').children[1], argument = occurrence.querySelector('button'); argument.focus();
+  ui.document.scrollingElement.scrollTop = 180; ui.render(entries.slice(0, 4));
+  assert.equal(pattern.querySelector('ol').children[1], occurrence); assert.equal(ui.document.activeElement, argument);
+  const result = occurrence.querySelectorAll('button').find(button => button.textContent === 'Original result');
+  assert.ok(result); assert.match(occurrence.textContent, /Tool protocol: failure/);
+  const changed = structuredClone(entries.slice(0, 4)); changed[3].evidence = '{}'; ui.render(changed);
+  result.dispatch('click'); assert.equal(ui.document.scrollingElement.scrollTop, 180); assert.equal(ui.get('#statistics-panel').open, true);
+  assert.match(occurrence.textContent, /Tool protocol: unknown/); assert.equal(occurrence.querySelectorAll('button').length, 1);
+});
 
 async function observedFixture() {
   const trace = createTrace({ on() { return () => {}; }, getEvents: async () => [

@@ -252,6 +252,13 @@ body:has(.footer-panel[open]) { overflow: hidden; }
 .observed-activity li { margin-block: 12px; }
 .observed-activity button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 #observed-list { max-height: min(28rem, 50vh); overflow: auto; overscroll-behavior: contain; padding: 0 4px 0 22px; }
+.repeated-activity { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 10px; overflow-wrap: anywhere; }
+.repeated-activity summary { cursor: pointer; padding: 6px 0; color: var(--model); }
+.repeated-activity > summary { font-weight: 600; }
+.repeated-activity li { margin-block: 8px; }
+.repeated-activity button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.repeated-activity pre { max-height: min(16rem, 35vh); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+#repeated-list { max-height: min(28rem, 50vh); overflow: auto; overscroll-behavior: contain; padding: 0 4px 0 22px; }
 #capability-list { max-height: min(24rem, 45vh); overflow: auto; overscroll-behavior: contain; padding: 6px 8px 6px 24px; }
 #capability-list li { white-space: pre-wrap; margin-bottom: 10px; }
 .footer-panel label { flex-wrap: wrap; font-size: inherit; }

@@ -1020,6 +1020,76 @@ function validationExit(data) {
   return shell;
 }
 
+function canonicalArguments(value) {
+  let nodes = 0;
+  function encode(value, depth) {
+    if (depth > 12 || ++nodes > 512) throw new Error('Argument bound');
+    if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
+    if (typeof value === 'number' && Number.isFinite(value)) return Object.is(value, -0) ? '-0' : JSON.stringify(value);
+    if (Array.isArray(value)) return `[${value.map(item => encode(item, depth + 1)).join(',')}]`;
+    if (value && typeof value === 'object') return `{${Object.keys(value).sort()
+      .map(key => `${JSON.stringify(key)}:${encode(value[key], depth + 1)}`).join(',')}}`;
+    throw new Error('Unsupported argument');
+  }
+  try { const encoded = encode(value, 0); return encoded.length <= 8000 ? encoded : null; } catch { return null; }
+}
+
+// Exact recorded requests only; a repeated request is not evidence of a retry or a loop.
+export function repeatedActivity(retained, { history = 'ready', omitted = 0 } = {}) {
+  const entries = retained.slice(-300), counts = new Map(), positions = new Map(entries.map((entry, index) => [entry, index]));
+  for (const entry of entries) counts.set(entry.id, (counts.get(entry.id) || 0) + 1);
+  const patterns = new Map(); let unclassifiedCalls = 0, unlinkedBoundaries = 0;
+  for (const { boundaries, start } of toolBuckets(entries)) {
+    if (toolIdentity(boundaries[0]) === null) { unlinkedBoundaries++; continue; }
+    const starts = boundaries.filter(entry => entry.type === 'tool.execution_start');
+    const ends = boundaries.filter(entry => entry.type === 'tool.execution_complete'), end = ends[0];
+    const unique = starts.length === 1 && ends.length <= 1 && (!end || positions.get(start) < positions.get(end))
+      && boundaries.every(entry => counts.get(entry.id) === 1 && identityText(entry.id) && identityText(entry.toolCallId)
+        && typeof entry.truncated === 'boolean' && (entry.agentId === '' || identityText(entry.agentId)));
+    const data = unique && explanationData(start), args = data?.arguments;
+    const hasMcp = data && mcpFields.some(field => Object.hasOwn(data, field));
+    const supported = data && data.toolCallId === start.toolCallId && data.toolName === start.toolName && identityText(data.toolName, 180)
+      && !['origin', 'overridesBuiltInTool'].some(field => Object.hasOwn(data, field))
+      && args && typeof args === 'object' && !Array.isArray(args)
+      && (hasMcp ? validMcpMetadata(data) && identityText(data.mcpConfigServerName) : requestedOperation(data));
+    const canonical = supported ? canonicalArguments(args) : null;
+    if (canonical === null) { unclassifiedCalls++; continue; }
+    const providerKey = hasMcp ? mcpFields.map(field => Object.hasOwn(data, field) ? [field, data[field]] : [field]) : 'provider-unrecorded';
+    const key = JSON.stringify([start.agentId, data.toolName, providerKey, canonical]);
+    if (!patterns.has(key)) patterns.set(key, { id: key, toolName: data.toolName, source: start.agentId,
+      provider: hasMcp ? `Configured MCP server: ${data.mcpConfigServerName} · Tool: ${data.mcpToolName}`
+        : 'Provider / origin unknown; matching names do not establish the same implementation.',
+      rule: 'Same exact source, recorded tool name and provider metadata; all supported recorded arguments equal after object key order only is normalized. Array order, types, literal Unicode and whitespace remain significant.'
+        + (hasMcp ? ' MCP arguments are compared as recorded JSON; their historical tool schema and meaning are unknown.' : ' Ordinary requests use the supported authored argument contracts; their implementation is unknown.'),
+      arguments: JSON.stringify(args, null, 2), occurrences: [], count: 0, toolFailures: 0, processFailures: 0, missingResults: 0, unknownResults: 0 });
+    const pattern = patterns.get(key), endData = end && explanationData(end);
+    const validResult = endData && endData.toolCallId === end.toolCallId
+      && (endData.toolName === undefined || endData.toolName === data.toolName)
+      && (end.toolName === '' || end.toolName === data.toolName)
+      && typeof endData.success === 'boolean' && endData.success === end.success
+      && [...mcpFields, 'origin', 'overridesBuiltInTool'].every(field => !Object.hasOwn(endData, field)
+        || (Object.hasOwn(data, field) && endData[field] === data[field]));
+    const result = validResult ? end : null, toolSuccess = result ? endData.success : null;
+    const exitCode = result && !hasMcp && data.toolName === 'powershell' ? validationExit(endData)?.exitCode ?? null : null;
+    const freeze = entry => Object.freeze({ ...entry, ...(entry.hostOutput ? { hostOutput: Object.freeze({ ...entry.hostOutput }) } : {}) });
+    const originalStart = freeze(start), originalResult = result ? freeze(result) : null;
+    pattern.occurrences.push({ id: toolIdentity(start), start: originalStart, result: originalResult, toolSuccess, exitCode,
+      resultState: result ? 'recorded' : end ? 'unknown' : 'missing', links: [originalStart, originalResult].filter(Boolean) });
+    pattern.count++;
+    if (toolSuccess === false) pattern.toolFailures++;
+    if (exitCode !== null && exitCode !== 0) pattern.processFailures++;
+    if (!end) pattern.missingResults++; else if (!result) pattern.unknownResults++;
+  }
+  return { patterns: [...patterns.values()].filter(pattern => pattern.count >= 2), unclassifiedCalls, unlinkedBoundaries,
+    notes: [`Only up to 300 retained events are compared (${entries.length} here), across all timeline filters and views. Two or more distinct usable call IDs form a pattern; start and result count as one invocation.`,
+      'Argument comparison is bounded to depth 12, 512 values and 8,000 serialized characters. Unsupported requests, clipped starts, incomplete MCP identities, unsupported provider markers and ambiguous identities remain unclassified; they may conceal repetition.',
+      'Counts describe exact recorded requests, not semantic similarity, retry intent, cause, wasted work or an agent being stuck. No action is taken. Later success does not change an earlier failure or establish recovery.',
+      'Tool protocol failure and typed nonzero process exit are separate counts and can overlap. Missing or conflicting results remain unknown, not necessarily still running. Process exit is inspected only for supported ordinary powershell requests, never from output text.',
+      ...(history !== 'ready' ? ['Earlier history is unavailable or still loading.'] : []),
+      ...(omitted ? [`${omitted} older events were omitted from the retained window.`] : []),
+      ...(retained.length > entries.length ? [`${retained.length - entries.length} additional supplied events are outside this comparison window.`] : [])] };
+}
+
 // These literal requests describe scope only; neither a tool name nor exit zero verifies a suite.
 export function validationChecks(entries, { includeIncomplete = false } = {}) {
   const counts = new Map(), positions = new Map(entries.map((entry, index) => [entry, index]));

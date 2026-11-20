@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.39",
+    "summary": "Inspect exact repeated operations and recurring recorded failures in an optional retained-window overview. Counts link to original evidence and keep tool results, process exits and missing outcomes separate."
+  },
+  {
     "version": "0.1.38",
     "summary": "Inspect retained activity with missing decisions or outcomes, keeping connection status and unknown current activity separate."
   },
