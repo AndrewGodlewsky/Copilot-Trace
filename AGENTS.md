@@ -1,16 +1,16 @@
 # Working on Trace
 
-Trace is a GitHub Copilot desktop plugin. `/trace` opens a live timeline of the current chat with expandable recorded evidence. The owner chose a small proof of concept using recorded evidence and general explanations only. Keep missing origins/reasons explicitly unknown; chronology is not causality. AI interpretation, transcript persistence/exports and cross-chat access are deferred. The footer supports user-requested export of bounded plugin diagnostics; keep those logs free of chat content, IDs, paths, URLs, raw errors and credentials.
+Trace is a GitHub Copilot desktop plugin. `/trace` opens a live timeline of the current chat with expandable recorded evidence. General explanations describe recorded activity; an explicit Investigate click can request a short AI interpretation of a direct failure using bounded retained evidence. Keep missing origins/reasons explicitly unknown; chronology is not causality. General chat assistance, transcript persistence/exports and cross-chat browsing remain deferred. The footer supports user-requested export of bounded plugin diagnostics; keep those logs free of chat content, IDs, paths, URLs, raw errors and credentials.
 
 ## Integration and boundaries
 
 - Before changing host integration, read [Copilot integration](docs/copilot-integration.md) and inspect the installed SDK declarations. The host supplies `@github/copilot-sdk/extension`; keep it external and do not download or bundle a replacement runtime.
-- Shipped code lives in `com.github.copilot/extensions/trace/`: `extension.mjs` joins the host, `canvas.mjs` owns instances, `server.mjs` serves local assets and read-only snapshots, `trace.mjs` observes session events, and `web/` renders the panel.
+- Shipped code lives in `com.github.copilot/extensions/trace/`: `extension.mjs` joins the host, `canvas.mjs` owns instances, `server.mjs` serves local assets/snapshots and authorized investigation requests, `trace.mjs` observes session events, and `web/` renders the panel.
 - Validate session/instance ownership and correlate future async requests. Closing an instance must release its resources; stale results must not overwrite newer user input.
-- Model operations are not implemented. Before adding them, read [session ownership and background helpers](docs/copilot-integration.md#model-operations). Keep parent model and permission ownership with the host; isolate and account for plugin-owned work.
-- Keep HTTP bound to loopback, require the per-instance token, validate Host, and serve only allowlisted assets. Future write endpoints also need exact Origin checks, bounded JSON and request authorization.
+- Before changing investigation, read [failure investigation](docs/failure-investigation.md) and [session ownership and background helpers](docs/copilot-integration.md#model-operations). Preserve explicit-click inference, server-selected evidence, exact account/model/effort checks, tool-free isolation, cancellation and accounting. Keep parent model and permission ownership with the host.
+- Keep HTTP bound to loopback, require the per-instance token, validate Host, and serve only allowlisted assets. Write endpoints require exact Origin, a client marker, bounded strict JSON and operation authorization.
 - Validate untrusted input at boundaries. Render user/model content as text; link only validated HTTP(S) URLs. Preserve exact user text and Unicode.
-- Before adding saved data or project access, read [storage and project context](docs/copilot-integration.md#storage-and-project-context). Use Trace's own data namespace, atomic saves, writer/revision checks and explicit project selection.
+- Before changing saved data or adding project access, read [storage and project context](docs/copilot-integration.md#storage-and-project-context). Model/effort preferences and bounded content-free helper receipts use Trace's own namespace with atomic saves and writer/revision checks. Prompts and answers stay in memory; retained runtime recovery files require honest disclosure. Project reads need explicit selection.
 - Keep the panel usable in narrow/short panes, with semantic HTML, keyboard access and visible focus for interactive controls. Metadata logos use compact flat-color SVGs.
 
 ## Development and completion

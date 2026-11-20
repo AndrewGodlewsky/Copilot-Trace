@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.53",
+    "summary": "Read nested event fields and multiline text beside exact JSON. Investigate a failed event for a short AI explanation, with remembered model and reasoning settings."
+  },
+  {
     "version": "0.1.52",
     "summary": "A small red exclamation mark highlights recorded failures, including failures inside collapsed actions. Parent markers point to contained evidence without judging the whole task."
   },

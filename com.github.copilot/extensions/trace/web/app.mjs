@@ -11,6 +11,8 @@ import { vocabulary, conceptForEntry, glossaryExample, retainedExample } from '.
 import { validationClaims, validationChecks, validationOverview, linkValidationClaim, retainedValidationLink, observedActivity, repeatedActivity, argumentComparisonCalls, retainedArgumentCall, compareToolArguments } from './presentation.mjs';
 import { plausibleActions, retainedPlausibleScenario } from './presentation.mjs';
 import { observedRecap, retainedRecapEntry, observedTimeAndUsage } from './presentation.mjs';
+import { createEventData } from './event-data.mjs';
+import { initInvestigation } from './investigation.mjs';
 
 const diagnostics = createDiagnostics();
 diagnostics.record('panel_started');
@@ -71,6 +73,7 @@ const surprisesButton = document.querySelector('#surprises-button'), surprisesPa
 const surprisesList = document.querySelector('#surprises-list'), surprisesClear = document.querySelector('#surprises-clear');
 let surprisesOpening;
 const liveMarking = () => !panelClosed && !practice && !playback && !activeExample;
+const investigationView = initInvestigation({ navigate: id => showBoundary(id, 'Showing the investigation’s original retained evidence.') });
 function clearSurpriseView() {
   surprisesOpening = undefined; surpriseRows.clear(); surprisesList.replaceChildren();
   for (const id of ['scope', 'count', 'status']) document.querySelector(`#surprises-${id}`).textContent = '';
@@ -1137,7 +1140,10 @@ function row(entry, outcome) {
   node.pre = element('pre', entry.evidence);
   node.pre.tabIndex = 0;
   node.pre.setAttribute('aria-label', 'Recorded event data');
-  node.recordedEvidence.append(node.truncated, node.protectedContent, node.pre);
+  node.eventData = createEventData(document, entry);
+  node.originalData = element('details', undefined, 'original-json');
+  node.originalData.append(element('summary', 'Original JSON · exact retained source'), node.pre);
+  node.recordedEvidence.append(node.truncated, node.protectedContent, node.eventData.view, node.originalData);
   body.append(node.recordedEvidence, node.surprise, node.surpriseHelp, node.surpriseMode);
   node.details.append(body);
   return node;
@@ -1695,6 +1701,7 @@ function showBoundary(id, message = 'Showing original retained event. Follow liv
   render(lastSnapshot);
   node.details.open = true;
   node.recordedEvidence.open = true;
+  node.originalData.open = true;
   node.summary.focus({ preventScroll: true });
   node.summary.scrollIntoView({ block: 'center' });
   navigationStatus.textContent = message;
@@ -1891,6 +1898,7 @@ function render(snapshot, liveFrame = false) {
   updateRecap();
   updatePlausibleActions();
   const focused = document.activeElement;
+  investigationView.reconcile(snapshot.entries, liveMarking());
   const focusedId = [...nodes].find(([, node]) => node.item.contains(focused))?.[0];
   const focusedGroup = groups.find(group => group.item.contains(focused) || group.ids.has(focusedId));
   const focusedChapter = chapters.find(chapter => chapter.item.contains(focused) || chapter.ids.has(focusedId));
@@ -1934,6 +1942,12 @@ function render(snapshot, liveFrame = false) {
     if (node && node.entry.type !== entry.type) { node.item.remove(); nodes.delete(entry.id); node = null; }
     if (!node) { node = row(entry, outcomes.get(entry.id)); nodes.set(entry.id, node); }
     node.entry = entry;
+    if (recordedFailure(entry, outcomes.get(entry.id)) && !node.investigation) {
+      node.investigation = investigationView.attach(entry, liveMarking());
+      node.body.insertBefore(node.investigation.section, node.recordedEvidence);
+      node.details.addEventListener('toggle', () => { if (node.details.open && !node.investigation.section.hidden) node.investigation.prepare(); });
+    }
+    if (node.investigation) node.investigation.section.hidden = !recordedFailure(entry, outcomes.get(entry.id));
     node.details.failureEntries = [entry]; node.details.failureIsDirect = true;
     renderValidationRoute(node, entry);
     renderExtent(node, extents.get(entry.id));
@@ -1970,6 +1984,7 @@ function render(snapshot, liveFrame = false) {
     if (node.explanation.textContent !== lesson.general) node.explanation.textContent = lesson.general;
     renderSkillInstructions(node, entry);
     if (node.pre.textContent !== (entry.evidence || '')) node.pre.textContent = entry.evidence || '';
+    node.eventData.update(entry);
     node.truncated.hidden = !entry.truncated;
     const protection = protectedEvidenceNotice(entry);
     if (node.protectedContent.textContent !== protection) node.protectedContent.textContent = protection;
@@ -2184,6 +2199,7 @@ const poller = createPoller({
       throw new Error('Event feed unavailable.');
     }
     following.sync();
+    investigationView.check();
     return true;
   },
   onError() {
@@ -2196,7 +2212,7 @@ const poller = createPoller({
     renderObserverScope();
   },
 });
-const footerPanels = initFooter({ diagnostics, refresh: poller.refresh, onInspect: () => { follow.checked = false; pausePlayback(); } });
+const footerPanels = initFooter({ diagnostics, refresh: poller.refresh, onSettings: investigationView.openSettings, onInspect: () => { follow.checked = false; pausePlayback(); } });
 const exampleContexts = ['statistics-panel', 'glossary-panel', 'arguments-panel', 'recap-panel'].map(id => {
   const panel = document.querySelector(`#${id}`), note = element('p', '', 'example-banner');
   note.hidden = true; panel.insertBefore(note, panel.children[1] || null); return note;
@@ -2442,6 +2458,7 @@ function changeMotion(event) {
 motionPreference.addEventListener('change', changeMotion);
 document.querySelector('#playback').addEventListener('toggle', () => { if (!document.querySelector('#playback').open) pausePlayback(); });
 window.addEventListener('pagehide', () => {
+  investigationView.close();
   panelClosed = true;
   livePresentation.close();
   clearTimeUsage();

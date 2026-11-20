@@ -361,3 +361,14 @@ body:has(.footer-panel[open]) { overflow: hidden; }
 #examples-notes h3 { font-size: 1rem; }
 #examples .playback-actions > label { min-width: 0; max-width: 100%; }
 #examples-select { max-width: 100%; }
+/* Event strings retain whitespace while wrapping inside narrow canvas panes. */
+.event-data, .original-json { margin-block: .7rem; }
+.event-data-group { margin: .5rem 0 .5rem .65rem; padding-left: .65rem; border-left: 2px solid var(--border, #727272); }
+.event-data-field { margin-block: .7rem; min-width: 0; }
+.event-data-field strong { overflow-wrap: anywhere; }
+.event-data pre, .failure-investigation pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 22rem; overflow: auto; }
+.failure-investigation { margin-block: 1rem; padding-block: .8rem; border-block: 1px solid var(--border, #727272); min-width: 0; }
+.failure-investigation button { margin: .3rem .5rem .3rem 0; }
+.failure-investigation p, .failure-investigation summary { overflow-wrap: anywhere; }
+.investigation-note { font-size: .9em; }
+#investigation-model, #investigation-effort { max-width: 100%; }

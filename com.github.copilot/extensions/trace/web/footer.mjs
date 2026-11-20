@@ -93,7 +93,7 @@ function initPromptPreparation() {
   return { clear, open() { clear(); if (!disposed) { dialogIdentity = {}; edited(); } } };
 }
 
-export function initFooter({ diagnostics, refresh, onInspect }) {
+export function initFooter({ diagnostics, refresh, onInspect, onSettings }) {
   let version = 'unknown';
   let metadata;
   let metadataRequest;
@@ -102,6 +102,7 @@ export function initFooter({ diagnostics, refresh, onInspect }) {
   let logsRequest;
   const prompt = initPromptPreparation();
   const panels = initPanels({ onInspect, onOpen(id) {
+    if (id === 'settings-panel') void onSettings?.();
     if (id === 'prompt-panel') prompt.open();
     if (id === 'releases-panel') void loadMetadata();
     if (id === 'logs-panel') void loadLogs();

@@ -9,6 +9,7 @@ import { compareCapabilities } from '../com.github.copilot/extensions/trace/web/
 import { instructionSources } from '../com.github.copilot/extensions/trace/web/instructions.mjs';
 import { armLivePrediction, classifyPredictionEvent, resolveLivePrediction } from '../com.github.copilot/extensions/trace/web/learning.mjs';
 import { parseExampleLibrary } from '../com.github.copilot/extensions/trace/web/examples.mjs';
+import { runInvestigationFixture } from './investigation-fixture.mjs';
 
 const sdkDirectory = process.env.COPILOT_SDK_DIR;
 const cli = process.env.COPILOT_CLI_PATH;
@@ -1304,6 +1305,7 @@ try {
   assert.equal(overviewCheck.latestResult, true);
   await session.rpc.canvas.close({ instanceId: 'trace-validation-fixture' });
   await until(() => fetch(validationPanel.url).then(() => false, () => true), Boolean, 'validation fixture server shutdown');
+  await runInvestigationFixture({ sdk: { CopilotClient, RuntimeConnection }, cli, parent: session, failureId: validationResult.id, temporary });
   await session.disconnect();
   assert.equal(requests, 22, 'Only the twenty-two expected local synthetic responses are permitted.');
   assert.equal(expired, false);

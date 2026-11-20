@@ -320,6 +320,12 @@
           <select id="text-size"><option value="100">Default · 100%</option><option value="115">Comfortable · 115%</option><option value="130">Large · 130%</option><option value="150">Extra large · 150%</option></select>
         </label>
         <p>Applies to this open panel. Resets when you reopen Trace.</p>
+        <h3>Failure investigation</h3>
+        <p>Use a separate tool-free Copilot chat after an explicit Investigate click. Default: Haiku 5.5 at its highest supported reasoning effort. An unavailable selection needs your choice; Trace never switches automatically.</p>
+        <label for="investigation-model">Investigation model <select id="investigation-model"></select></label>
+        <label for="investigation-effort">Reasoning effort <select id="investigation-effort"></select></label>
+        <div class="panel-actions"><button id="investigation-refresh" type="button">Refresh models</button><button id="investigation-save" type="button" disabled>Save investigation settings</button></div>
+        <p id="investigation-settings-status" role="status" aria-live="polite">Model and reasoning preferences are remembered across sessions. Parent chat settings are unchanged.</p>
       </dialog>
       <dialog id="logs-panel" class="footer-panel" aria-labelledby="logs-title">
         <div class="panel-heading"><h2 id="logs-title">Plugin logs</h2><button type="button" data-close-panel>Close</button></div>

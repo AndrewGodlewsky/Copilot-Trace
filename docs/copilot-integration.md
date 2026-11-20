@@ -16,13 +16,13 @@ During this setup, the successful executable was `copilot.exe` adjacent to the s
 
 The host's canvas catalog supplies provider identity. `createCanvas` binds `open`, `onClose` and any declared actions. Reopening an existing instance focuses that panel; rendering reload and creating a new instance are separate concepts.
 
-Trace checks the attached session identity, shares one startup promise per instance, gives separate instances separate tokenized servers, and closes pending or active servers on close/shutdown. A new open after close gets a new capability URL. The panel has no action API. Its browser module polls a protected read-only snapshot once per second; unchanged revisions return HTTP 304.
+Trace checks the attached session identity, shares one startup promise per instance, gives separate instances separate tokenized servers, and closes pending or active servers on close/shutdown. A new open after close gets a new capability URL. The panel has no agent-callable action API. Its browser polls a protected read-only snapshot once per second; unchanged revisions return HTTP 304. Explicit user investigation controls use a separate strict POST endpoint and close their owned helper with the instance.
 
 For future actions, define bounded input schemas and validate runtime data. Bind asynchronous results to session, instance and request identity, plus any user-input revision that makes the result valid. Timeouts and UI cancellation do not themselves prove a worker stopped. Reject late results and preserve user edits.
 
 ## Loopback security
 
-Implemented: bind `127.0.0.1`, use an unpredictable per-instance capability path, require exact Host, allow only known static assets and the read-only events endpoint, reject non-read methods and apply restrictive CSP, no-store, no-sniff and no-referrer headers. Assets are read from packaged paths, never arbitrary request paths.
+Implemented: bind `127.0.0.1`, use an unpredictable per-instance capability path, require exact Host, allow only known static assets and explicit read/POST routes, and apply restrictive CSP, no-store, no-sniff and no-referrer headers. Assets are read from packaged paths, never arbitrary request paths. Investigation POSTs additionally require exact Origin, the client marker, a strict action schema and a 4,096-byte JSON body; evidence is selected on the server.
 
 When writes are added, require exact Origin and an intentional client marker, validate content type, enforce byte limits before parsing JSON, and authorize each operation. A local port alone is not authorization. Keep capability URLs, prompts and credentials out of error messages and support exports. Render untrusted text literally; sanitize any deliberately supported markup and validate link schemes.
 
@@ -92,7 +92,7 @@ The retained validation overview reuses supported literal command contracts and 
 
 The browser can read snapshots only with the capability URL and exact Host. Supplied Origin must match the loopback origin; cross-site fetch metadata is rejected. CSP permits only same-origin script/style/connect/img. An endpoint connection does not prove every host event is available.
 
-The footer reads packaged version/release metadata and a separate read-only diagnostics endpoint. Diagnostics use the same capability/Host/Origin boundaries as events. A shared fixed-code journal accepts only allowlisted bounded numeric fields and keeps 200 entries per server/panel, without chat data or raw exceptions. Copy/export is explicitly user-triggered and stays separate from transcript evidence. Client reports label server snapshots with capture time and retain the last one when disconnected. Text size is panel-local; no preference file or cross-origin persistence is implemented. Manual refresh shares the single polling scheduler, preserving disclosures and avoiding overlapping requests.
+The footer reads packaged version/release metadata and a separate read-only diagnostics endpoint. Diagnostics use the same capability/Host/Origin boundaries as events. A shared fixed-code journal accepts only allowlisted bounded numeric fields and keeps 200 entries per server/panel, without chat data or raw exceptions. Copy/export is explicitly user-triggered and stays separate from transcript evidence. Client reports label server snapshots with capture time and retain the last one when disconnected. Text size is panel-local; investigation model/effort preferences use a private versioned file. Manual refresh shares the single polling scheduler, preserving disclosures and avoiding overlapping requests.
 
 ## Observed usage receipts and timing
 
@@ -108,12 +108,14 @@ The installed-runtime fixture adds these fixed token payloads to its existing tw
 
 ## Model operations
 
-These are future design options, not implemented features:
+Failure investigation is the owner-authorized implemented helper operation. Its exact scope, guards, storage and limits are in [failure investigation](failure-investigation.md). The broader attached-chat/general-assistant path remains deferred:
 
 | Path | Ownership and constraints |
 | --- | --- |
 | Attached-chat request | Use only when the product explicitly needs the user's existing conversation. Explorer used `send({ mode: 'enqueue' })`. Keep model selection, billing and permission decisions with the host. Correlate callbacks; cancelling the plugin request cannot be claimed to cancel that chat turn. |
 | Plugin-owned helper | Create a new isolated client/session with a disposable workspace/configuration, an explicitly bounded input and its own cancellation/accounting. Stop only owned work. Keep its conversation out of unrelated sessions. |
+
+The installed declarations expose `model.list().list[].supportedReasoningEfforts`, provider identity, `model.switchTo({ modelId, providerId, reasoningEffort })` and `model.getCurrent().reasoningEffort`. Trace validates the exact catalog pair and effort, switches only the owned helper and verifies the resulting snapshot before sending. Haiku 5.5/max is an account-catalog-dependent default, not an entitlement claim. The installed local fixture uses synthetic auth/catalog/provider-identity adapters around real SDK sessions and a fixed loopback provider; it adds one helper response/session to the existing twenty-two-response/eight-session fixture. It checks actual empty tools, own workspace, requested/transmitted effort, strict response, accounting and cleanup. Live model quality and native UI remain separate evidence.
 
 Before helper inference, verify the host-paired runtime, signed-in account identity, eligible Copilot catalog model, actual helper workspace and initialized tool metadata. Read the parent model; do not change it. Recheck identities/model after startup where needed. Honor managed settings and model policy. Fail visibly if prerequisites do not hold; do not silently switch provider, model or account.
 
@@ -148,7 +150,7 @@ The local custom-provider fixture in Explorer established readiness/filtering be
 
 ## Storage and project context
 
-Future persistence should use a dedicated Trace namespace (for example `COPILOT_HOME/plugin-data/trace`) and keep shared user artifacts separate from private drafts, session bindings, preferences, locks, recovery and usage records. Imported session IDs and paths must not confer authority. Validate an allowlisted document schema, preserve Unicode and use atomic replacement, serialized writes and revision/digest checks against overlapping writers. Keep the last valid document recoverable after failed saves.
+Investigation preferences and bounded content-free receipts use the dedicated `COPILOT_HOME/plugin-data/trace` namespace (default `~/.copilot/plugin-data/trace`). See [failure investigation](failure-investigation.md#storage-and-security) for the private versioned file, exclusive lock, atomic save, recovery and deletion contracts. Future shared artifacts must stay separate from private drafts, session bindings and operation state. Imported session IDs and paths never confer authority. Validate schemas, preserve Unicode and use revision checks against overlapping writers; failed saves must preserve the last valid document.
 
 For authorized project access, use fresh `session.rpc.metadata.snapshot().workingDirectory`; the source found `session.workspacePath` was an artifact location, not the project root. Verify local/current session metadata. Select and bound files explicitly, exclude secrets by default, and validate canonical roots, ancestor/file identity and links before and after reading. A stored path is not fresh read permission. Treat excerpts as untrusted data and show the actual selected context; avoid retaining it in exports, receipts or prompts for unrelated operations. Native runtime logs can retain content even when plugin storage does not.
 

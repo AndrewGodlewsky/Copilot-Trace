@@ -1,8 +1,8 @@
 # Trace
 
-Current version: **0.1.52**
+Current version: **0.1.53**
 
-A GitHub Copilot desktop plugin for understanding the activity inside your current chat. `/trace` opens a live timeline with turn markers and expandable recorded evidence. This is an initial proof of concept: explanations describe what events mean; they do not infer why the model made a decision.
+A GitHub Copilot desktop plugin for understanding the activity inside your current chat. `/trace` opens a live timeline with turn markers and expandable recorded evidence. General explanations describe what events mean. Inside a failed event, **Investigate** can request a short possible explanation based on the evidence you inspect.
 
 ## Install Trace
 
@@ -94,6 +94,12 @@ Keep the original checkout and any unfinished work. Do not force marketplace rem
 
 ## Use Trace
 
+Event details include **Readable event fields**, with expandable nested objects and actual line breaks inside strings. **Original JSON** preserves the exact retained source, including number text and duplicate keys. Clipped or malformed data remains available in its original form.
+
+Open a directly failed event to see its investigation model and a collapsible **Evidence scope**. Click **Investigate** to send only that failure and, when available, its matching start to a separate tool-free Copilot chat. The short result separates what failed, a possible cause, what remains unknown and a next check, with links to the original events. **Cancel** stops owned work; changed or evicted evidence invalidates its answer. Investigation is available in the current live view.
+
+**Settings → Failure investigation** remembers the model and reasoning effort across sessions. The default is exact eligible Haiku 5.5 at its highest catalog-supported effort. If unavailable, Trace asks you to choose an eligible model; it does not fall back automatically. Your main chat model stays unchanged. Investigation uses your Copilot account and can consume model usage. See [failure investigation](docs/failure-investigation.md) for scope, storage and verification limits.
+
 Open `/trace` beside a chat, then continue chatting. Available history appears first and new events arrive about once per second. Compact, color-coded nodes form a vertical flow; connecting arrows show event order only. Collapsed nodes show message excerpts, recorded model/tool names and short states. Timestamps, event types and evidence stay inside the expandable details. Consecutive hook events from the same agent share a **Hooks** section: expand it for invocation summaries and the original boundaries in recorded order. Pipeline counts are separate from event counts; one invocation can include multiple callbacks or no configured handler. Open an event to inspect its recorded inputs, results and identifiers. Opening a step or scrolling upward away from the bottom turns off **Follow live**, so incoming events do not pull you away. Checking it again jumps to the bottom of the entire plugin, including the footer, and resumes following. Scrolling back down manually does not re-enable it.
 
 Open **Statistics** in the persistent bottom bar for model turns, hook pipelines, tool calls and skill loads, plus hook and skill names. The bar shows a small retained turn/tool count while you scroll. Statistics opens upward as an overlay drawer; Close or Escape returns focus to its button. Opening it pauses Follow live. Counts cover retained events only, pair boundaries by agent and recorded ID, and include invocations with only one boundary available. Events without usable IDs are reported separately. These are not whole-chat totals.
@@ -160,7 +166,7 @@ Open an optional factual recap of a selected request interval or retained range 
 
 Mark a live event as surprising to revisit its original evidence from an optional compact list. Up to 20 marks stay in memory for the open panel; expired evidence leaves an unavailable placeholder. Unmark or clear them without changing recorded activity. Marking is unavailable during practice, playback and examples; live marks remain separate until you return. See [bookmarks](docs/bookmarks.md) for limits and lifetime.
 
-Trace keeps up to 300 recent supported events per panel in memory, with up to 12,000 UTF-16 code units of evidence per event; omissions and shortening are labeled. Token deltas, canvas bookkeeping and replay checkpoint copies are excluded. Encrypted/opaque reasoning fields are omitted. Closing the panel releases its observer and server. Trace makes no model requests and saves no transcripts. Instruction refresh requests bounded source content from the host; Trace does not scan project paths. The host may retain its own logs; event payloads and source snapshots can contain sensitive instruction text, chat content, file paths and tool arguments.
+Trace keeps up to 300 recent supported events per panel in memory, with up to 12,000 UTF-16 code units of evidence per event; omissions and shortening are labeled. Token deltas, canvas bookkeeping and replay checkpoint copies are excluded. Encrypted/opaque reasoning fields are omitted. Closing the panel releases its observer, server and owned investigation helper. Opening Trace makes no model request; only an explicit Investigate click requests inference. Trace saves model/effort preferences and bounded content-free usage/recovery receipts, not transcript archives or answers. Instruction refresh requests bounded source content from the host; Trace does not scan project paths. Host/provider logs may retain content. Helper runtime files are removed after confirmed release and accounting; failures may leave private recovery files. Event payloads and source snapshots can contain sensitive instruction text, chat content, file paths and tool arguments.
 
 ## Footer controls
 
@@ -168,7 +174,7 @@ The footer opens Versions, Settings and Logs as centered overlay dialogs, with a
 
 - **Version:** expand the installed version and browse the short explanation for every release.
 - **Refresh:** immediately check the latest observer snapshot while keeping expanded steps open. Automatic polling continues. This does not reconstruct history that the host could not provide.
-- **Settings:** adjust all panel text from 100% to 150%. The setting lasts for this open panel.
+- **Settings:** adjust all panel text from 100% to 150% for this panel, and save the investigation model and reasoning effort across sessions.
 - **Show logs:** inspect, copy or download a text file of plugin diagnostics. Each server/panel keeps its latest 200 structured log entries in memory, with omitted-entry counts. Logs include connection/history status and plugin failures, never chat evidence, tool arguments, IDs, paths, URLs, credentials or raw exception text. A disconnected server uses an explicitly dated cached snapshot if available. Clipboard/download restrictions have selectable-text fallbacks. Startup failures before the panel is available are outside these logs.
 - **Feedback:** open a new GitHub issue form for this repository. Nothing is submitted automatically; paste diagnostic logs if useful.
 
@@ -242,4 +248,4 @@ Automated HTTP/SDK tests do not establish visual rendering or slash-command disc
 
 ## Future work
 
-AI interpretations, cross-session browsing, exports, saved traces and deeper causal analysis are deferred. The [integration guide](docs/copilot-integration.md) preserves the constraints for adding those systems. The [first-version design](docs/superpowers/specs/2026-11-19-live-evidence-design.md) records this proof of concept's scope.
+General chat assistance, web/project investigation, cross-session browsing, transcript exports, saved traces and deeper causal analysis are deferred. The [integration guide](docs/copilot-integration.md) preserves the constraints for adding those systems. The [first-version design](docs/superpowers/specs/2026-11-19-live-evidence-design.md) records the original proof of concept's scope; explicit failure investigation is the later bounded exception.

@@ -12,9 +12,11 @@ import { createPoller } from '../com.github.copilot/extensions/trace/web/polling
 import * as learning from '../com.github.copilot/extensions/trace/web/learning.mjs';
 import * as examples from '../com.github.copilot/extensions/trace/web/examples.mjs';
 import { createDiagnostics } from '../com.github.copilot/extensions/trace/web/diagnostics.mjs';
+import { createEventData } from '../com.github.copilot/extensions/trace/web/event-data.mjs';
+import { initInvestigation } from '../com.github.copilot/extensions/trace/web/investigation.mjs';
 
 // A small DOM boundary double exercises reconciliation, not browser layout or native focus behavior.
-function fixture(source, inventoryLoad = async () => { throw new Error('Unexpected inventory request'); }, feedLoad, instructionLoad = async () => { throw new Error('Unexpected instruction request'); }, clock = Date, exampleLoad) {
+function fixture(source, inventoryLoad = async () => { throw new Error('Unexpected inventory request'); }, feedLoad, instructionLoad = async () => { throw new Error('Unexpected instruction request'); }, clock = Date, exampleLoad, investigationLoad = async () => { throw new Error('Unexpected investigation request'); }) {
   let document;
   class Element {
     constructor(tagName) {
@@ -103,7 +105,7 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     '#event-target', '#jump-event', '#navigation-status', '#capabilities', '#capability-refresh', '#capability-status',
     '#capability-scope', '#capability-window', '#capability-list', '#glossary-button', '#glossary-panel',
     '#glossary-concept', '#glossary-definition', '#glossary-deeper', '#glossary-example', '#glossary-source', '#glossary-status',
-    '#guidance-comparison', '#guidance-examples',
+    '#guidance-comparison', '#guidance-examples', '#investigation-model', '#investigation-effort', '#investigation-settings-status', '#investigation-save', '#investigation-refresh',
     '#prompt-panel', '#prompt-button', '#prompt-draft',
     '#arguments-button', '#arguments-panel', '#arguments-first', '#arguments-second', '#arguments-first-detail', '#arguments-second-detail',
     '#arguments-status', '#arguments-limits', '#arguments-diff', '#arguments-scope',
@@ -204,7 +206,8 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
   } },
     ResizeObserver: class { observe() {} disconnect() {} }, createDiagnostics: () => diagnostics,
     localStorage: storage, sessionStorage: storage,
-    createFollow,
+    createFollow, createEventData,
+    initInvestigation: options => initInvestigation({ ...options, document, request: investigationLoad, schedule: () => 1, cancelTimer() {} }),
     createLivePresentation: options => createLivePresentation({ ...options, now: () => liveTime,
       requestFrame(callback) { liveCallbacks.push(callback); liveFrames.set(++liveFrameId, callback); return liveFrameId; },
       cancelFrame(id) { liveFrames.delete(id); } }),
@@ -236,6 +239,46 @@ function fixture(source, inventoryLoad = async () => { throw new Error('Unexpect
     } };
 }
 const appSource = await readFile(new URL('../com.github.copilot/extensions/trace/web/app.mjs', import.meta.url), 'utf8');
+
+test('failed details expose exact multiline data lazily and investigate only after an inspected scope', async () => {
+  const calls = [], pending = [];
+  const entry = { id: 'failure', type: 'session.error', timestamp: '2026-11-20T12:00:00Z', agentId: '', truncated: false,
+    evidence: '{"id":"failure","type":"session.error","data":{"message":"日本語\\n<script>"}}' };
+  const ui = fixture(appSource, undefined, undefined, undefined, Date, undefined, async (action, values) => {
+    calls.push({ action, values });
+    if (action === 'preview') return { captureId: 'captured', eventId: entry.id, records: [{ ref: 'E1', id: entry.id, type: entry.type, evidence: entry.evidence }], scope: 'Retained failure only', model: { name: 'Haiku 5.5', effort: 'max' } };
+    if (action === 'start') return new Promise(resolve => pending.push(resolve));
+    return { state: 'cancelled' };
+  });
+  ui.render([entry]); assert.equal(calls.length, 0);
+  const evidence = ui.get('#timeline').querySelector('.recorded-evidence'), readable = evidence.querySelector('.event-data');
+  assert.equal(readable.querySelectorAll('pre').length, 0);
+  readable.open = true; readable.dispatch('toggle');
+  const data = readable.querySelector('.event-data-group'); data.open = true; data.dispatch('toggle');
+  assert.equal(data.querySelector('pre').textContent, '日本語\n<script>');
+  assert.equal(evidence.querySelectorAll('pre').at(-1).textContent, entry.evidence);
+  const section = ui.get('#timeline').querySelector('.failure-investigation');
+  const start = section.querySelectorAll('button').find(button => button.textContent === 'Investigate');
+  assert.equal(start.disabled, true); const failureDetails = section.closest('details'); failureDetails.open = true; failureDetails.dispatch('toggle'); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, 1); assert.equal(start.disabled, false); assert.match(section.textContent, /Haiku 5.5.*max/);
+  start.dispatch('click'); assert.equal(calls.at(-1).action, 'start');
+  ui.render([{ ...entry, evidence: entry.evidence + ' ' }]);
+  assert.equal(calls.at(-1).action, 'cancel');
+  pending[0]({ requestId: calls.find(row => row.action === 'start').values.requestId, state: 'completed', busy: false, result: { what: 'stale secret' } });
+  await new Promise(resolve => setImmediate(resolve)); assert.doesNotMatch(section.textContent, /stale secret/);
+  ui.closePage();
+});
+
+test('a failure first attached by playback cannot prepare or send an investigation', () => {
+  const calls = [], ui = fixture(appSource, undefined, undefined, undefined, Date, undefined, async action => { calls.push(action); });
+  const first = { id: 'first', type: 'session.info', timestamp: '2026-11-20T12:00:00Z', agentId: '', evidence: '{}', truncated: false };
+  const failure = { ...first, id: 'failure', type: 'session.error', timestamp: '2026-11-20T12:00:01Z' };
+  ui.render([first, failure]); ui.get('#playback-start').dispatch('click'); ui.get('#playback-next').dispatch('click');
+  const section = ui.get('#timeline').querySelector('.failure-investigation'); assert.ok(section);
+  const details = section.closest('details'); details.open = true; details.dispatch('toggle');
+  for (const button of section.querySelectorAll('button')) button.dispatch('click');
+  assert.equal(calls.length, 0); assert.match(section.textContent, /only in the current live view/); ui.closePage();
+});
 
 const feedResponse = (snapshot, status = 200) => ({ status, headers: { get: () => 'fixture-revision' }, json: async () => snapshot });
 
