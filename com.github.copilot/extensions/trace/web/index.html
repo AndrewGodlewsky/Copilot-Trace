@@ -101,6 +101,14 @@
           <p id="stat-unlinked" hidden></p>
           <h3>Recorded hook pipeline types</h3><ul id="stat-hooks"></ul>
           <h3>Skills loaded</h3><ul id="stat-skills"></ul>
+          <details id="capabilities" class="capabilities">
+            <summary>Capabilities and observed use</summary>
+            <p id="capability-scope"></p>
+            <button id="capability-refresh" type="button">Refresh capability snapshot</button>
+            <p id="capability-status" role="status" aria-atomic="true">Inventory unknown until you request a snapshot.</p>
+            <p id="capability-window"></p>
+            <ul id="capability-list" tabindex="0" aria-label="Capability comparison" aria-describedby="capability-window"></ul>
+          </details>
         </div>
       </dialog>
       <dialog id="releases-panel" class="footer-panel" aria-labelledby="releases-title">

@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createTrace } from './trace.mjs';
 import { createDiagnostics } from './web/diagnostics.mjs';
+import { createCapabilities } from './capabilities.mjs';
 
 export async function startServer(session) {
   const assets = new Map(await Promise.all([
@@ -14,6 +15,7 @@ export async function startServer(session) {
     ['polling.mjs', 'polling.mjs', 'text/javascript; charset=utf-8'],
     ['footer.mjs', 'footer.mjs', 'text/javascript; charset=utf-8'],
     ['follow.mjs', 'follow.mjs', 'text/javascript; charset=utf-8'],
+    ['capabilities.mjs', 'capabilities.mjs', 'text/javascript; charset=utf-8'],
     ['trace.svg', '../../../../assets/trace.svg', 'image/svg+xml'],
   ].map(async ([route, file, type]) => [route, { type, body: await readFile(new URL(`./web/${file}`, import.meta.url)) }])));
   const { version } = JSON.parse(await readFile(new URL('../../../plugin.json', import.meta.url), 'utf8'));
@@ -23,6 +25,7 @@ export async function startServer(session) {
   let host;
   const diagnostics = createDiagnostics();
   const trace = createTrace(session, diagnostics);
+  const capabilities = createCapabilities(session);
   const server = createServer((req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -32,9 +35,20 @@ export async function startServer(session) {
     if (req.headers.host !== host) return fail(403);
     if (!req.url?.startsWith(prefix)) return fail(404);
     if (!['GET', 'HEAD'].includes(req.method)) { res.setHeader('Allow', 'GET, HEAD'); return fail(405); }
-    if (req.url === `${prefix}events` || req.url === `${prefix}diagnostics`) {
+    if (req.url === `${prefix}events` || req.url === `${prefix}diagnostics` || req.url === `${prefix}capabilities`) {
       if (req.headers.origin && req.headers.origin !== `http://${host}`) return fail(403);
       if (req.headers['sec-fetch-site'] === 'cross-site') return fail(403);
+      if (req.url === `${prefix}capabilities`) {
+        if (req.method === 'HEAD') { res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(); }
+        void capabilities.read().then(snapshot => {
+          if (res.destroyed) return;
+          const body = JSON.stringify(snapshot);
+          if (Buffer.byteLength(body) > 2 * 1024 * 1024) return fail(503);
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
+          res.end(body);
+        }).catch(() => { if (!res.destroyed) fail(503); });
+        return;
+      }
       const snapshot = trace.snapshot();
       if (req.url === `${prefix}diagnostics`) {
         const body = JSON.stringify({ version, history: snapshot.history, retained: snapshot.entries.length, omitted: snapshot.omitted, diagnostics: diagnostics.snapshot() });
@@ -60,7 +74,7 @@ export async function startServer(session) {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
     });
-  } catch (error) { trace.close(); throw error; }
+  } catch (error) { trace.close(); capabilities.close(); throw error; }
   host = `127.0.0.1:${server.address().port}`;
   diagnostics.record('server_started');
   let closing;
@@ -68,6 +82,7 @@ export async function startServer(session) {
     url: `http://${host}${prefix}`,
     close() {
       trace.close();
+      capabilities.close();
       return closing ??= new Promise((resolve, reject) => {
         server.close(error => error ? reject(error) : resolve());
         server.closeAllConnections();

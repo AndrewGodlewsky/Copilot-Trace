@@ -5,6 +5,7 @@ import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { actionStages, agentLanes, hookInvocations, skillInstructions, toolProvenance, summarize } from '../com.github.copilot/extensions/trace/web/presentation.mjs';
+import { compareCapabilities } from '../com.github.copilot/extensions/trace/web/capabilities.mjs';
 
 const sdkDirectory = process.env.COPILOT_SDK_DIR;
 const cli = process.env.COPILOT_CLI_PATH;
@@ -159,7 +160,7 @@ try {
   assert.match(await page.text(), /<title>Trace<\/title>/);
   assert.equal((await fetch(first.url + 'app.mjs')).status, 200);
   assert.equal((await fetch(first.url + 'presentation.mjs')).status, 200);
-  for (const asset of ['footer.mjs', 'diagnostics.mjs', 'polling.mjs', 'follow.mjs']) assert.equal((await fetch(first.url + asset)).status, 200);
+  for (const asset of ['footer.mjs', 'diagnostics.mjs', 'polling.mjs', 'follow.mjs', 'capabilities.mjs']) assert.equal((await fetch(first.url + asset)).status, 200);
   const metadata = await (await fetch(first.url + 'metadata')).json();
   assert.equal(metadata.version, JSON.parse(await readFile(join(root, 'plugin.json'), 'utf8')).version);
   assert.equal(metadata.releases[0].version, metadata.version);
@@ -392,6 +393,7 @@ try {
   const skillBody = '# Fixture instructions\n\nKeep this exact Unicode text: café 🧪.\n\n<script>literal only</script>\n\n```text\n  preserve whitespace\n```\n';
   let currentSkillBody = skillBody;
   let skillReads = 0;
+  let skillLists = 0;
   const fixtureHook = type => input => {
     hookCalls.push({ type, toolName: input.toolName, toolCallId: input.toolCallId });
     return { additionalContext: 'Fixed local hook context.' };
@@ -402,7 +404,11 @@ try {
     requestExtensions: true, requestCanvasRenderer: true,
     extensionSdkPath: sdkDirectory, pluginDirectories: [root], enableConfigDiscovery: false, enableSkills: true,
     skillProvider: {
-      listSkills: () => [{ name: 'fixture-auto', description: 'Fixed local skill content fixture.' }],
+      listSkills() {
+        skillLists++;
+        return [{ name: 'fixture-auto', description: 'Fixed local skill content fixture.' },
+          { name: 'fixture-manual', description: 'Fixed manual-only fixture.', disableModelInvocation: true }];
+      },
       readSkill(name) { assert.equal(name, 'fixture-auto'); skillReads++; return currentSkillBody; },
     },
     hooks: { onPreToolUse: fixtureHook('preToolUse'), onPostToolUse: fixtureHook('postToolUse'),
@@ -424,10 +430,42 @@ try {
   assert.equal(new Set(mcpMetadata.tools.map(tool => tool.name)).size, 2);
   const stopMcpEvents = session.on(event => mcpEvents.push(event));
   const mcpPanel = await session.rpc.canvas.open(input);
-  await until(() => fetch(mcpPanel.url + 'events').then(response => response.json()), value => value.history === 'ready', 'provenance observation');
+  const initialMcpSnapshot = await until(() => fetch(mcpPanel.url + 'events').then(response => response.json()), value => value.history === 'ready', 'provenance observation');
   assert.equal(mcpRequests, beforeMetadata, 'Opening and observing Trace makes no additional MCP requests.');
   assert.equal(requests, 10, 'Metadata reads and Trace observation make no inference requests.');
   assert.equal(skillReads, 0, 'Observing Trace must not read a skill body.');
+  const beforeInventoryLists = skillLists;
+  const readInventory = async () => {
+    const response = await fetch(mcpPanel.url + 'capabilities');
+    assert.equal(response.status, 200);
+    const inventory = await response.json();
+    assert.equal(inventory.schemaVersion, 1);
+    assert.equal(inventory.scope, 'main-session');
+    assert.ok(Number.isFinite(Date.parse(inventory.capturedAt)));
+    assert.equal(inventory.tools.status, 'ready');
+    assert.equal(inventory.skills.status, 'ready');
+    assert.equal(inventory.tools.omitted, 0);
+    assert.equal(inventory.tools.invalid, 0);
+    assert.deepEqual(inventory.tools.items.map(tool => tool.name).sort(), mcpMetadata.tools.map(tool => tool.name).sort());
+    assert.deepEqual(inventory.tools.items.map(tool => tool.mcpServerName).sort(), ['first', 'second']);
+    assert.ok(inventory.tools.items.every(tool => tool.mcpToolName === 'echo' && tool.identityValid));
+    assert.deepEqual(inventory.skills.items.map(skill => skill.name).sort(), ['fixture-auto', 'fixture-manual']);
+    assert.ok(inventory.skills.items.every(skill => skill.enabled === true && skill.userInvocable === true
+      && skill.modelInvocable === 'unknown'), 'The runtime catalog omits the manual-only model-invocation restriction.');
+    assert.equal(skillLists, beforeInventoryLists, 'Inventory reads do not reload the skill provider.');
+    return inventory;
+  };
+  const initialInventory = await readInventory();
+  const initialComparison = compareCapabilities(initialInventory, initialMcpSnapshot);
+  assert.equal(initialComparison.rows.length, 4);
+  assert.ok(initialComparison.rows.every(row => row.source === '' && !row.observed && row.count === 0));
+  assert.ok(initialComparison.rows.filter(row => row.kind === 'tool').every(row => row.current === 'available'));
+  assert.ok(initialComparison.rows.filter(row => row.kind === 'skill').every(row => row.current === 'listed' && row.modelInvocable === 'unknown'));
+  await readInventory();
+  assert.equal((await fetch(mcpPanel.url + 'capabilities', { method: 'HEAD' })).status, 200);
+  assert.equal(mcpRequests, beforeMetadata, 'Trace inventory refresh never starts or calls an MCP service.');
+  assert.equal(requests, 10, 'Trace inventory refresh never calls a model.');
+  assert.equal(skillReads, 0, 'Trace inventory refresh never reads a skill body.');
   const skillInvocation = await session.rpc.commands.invoke({ name: 'fixture-auto', input: 'exact fixture arguments 🧪' });
   assert.equal(skillInvocation.kind, 'agent-prompt');
   assert.ok(skillInvocation.prompt.includes('exact fixture arguments 🧪'));
@@ -469,6 +507,35 @@ try {
   assert.equal(instructions.preview, skillBody);
   assert.equal(instructions.previewTruncated, false);
   assert.equal(instructions.arguments, null, 'Missing arguments stay unknown, not reconstructed from the prompt.');
+  const afterToolMcpRequests = mcpRequests;
+  const observedInventory = await readInventory();
+  assert.deepEqual(observedInventory.tools, initialInventory.tools);
+  assert.deepEqual(observedInventory.skills, initialInventory.skills);
+  assert.equal(mcpRequests, afterToolMcpRequests);
+  assert.equal(skillReads, 1);
+  assert.equal(requests, 12, 'Comparing observed use does not ask a model to interpret it.');
+  const comparison = compareCapabilities(observedInventory, mcpSnapshot);
+  assert.equal(comparison.rows.length, 4);
+  for (const tool of mcpMetadata.tools) {
+    const row = comparison.rows.find(row => row.kind === 'tool' && row.name === tool.name);
+    assert.equal(row.source, '');
+    assert.equal(row.mcpServerName, tool.mcpServerName);
+    assert.equal(row.mcpToolName, 'echo');
+    assert.equal(row.current, 'available');
+    assert.equal(row.observed, true);
+    assert.equal(row.count, 1, 'A start and result represent one observed tool invocation.');
+    assert.ok(mcpSnapshot.entries.some(entry => entry.id === row.eventId && entry.type === 'tool.execution_start'));
+  }
+  const usedSkill = comparison.rows.find(row => row.kind === 'skill' && row.name === 'fixture-auto');
+  const unobservedSkill = comparison.rows.find(row => row.kind === 'skill' && row.name === 'fixture-manual');
+  assert.equal(usedSkill.catalogSource, 'sdk');
+  assert.equal(usedSkill.eventId, projectedSkill.id);
+  assert.equal(usedSkill.observed, true);
+  assert.equal(usedSkill.count, 1);
+  assert.equal(unobservedSkill.observed, false);
+  assert.equal(unobservedSkill.count, 0);
+  assert.equal(usedSkill.modelInvocable, 'unknown');
+  assert.equal(unobservedSkill.modelInvocable, 'unknown');
   assert.equal(hookCalls.filter(call => call.type === 'preToolUse').length, 2);
   assert.equal(hookCalls.filter(call => call.type === 'postToolUse').length, 2);
   assert.equal(hookCalls.filter(call => call.type === 'userPromptSubmitted').length, 1);
@@ -547,7 +614,7 @@ try {
   await session.disconnect();
   assert.equal(requests, 12, 'Only the twelve expected local synthetic responses are permitted.');
   assert.equal(expired, false);
-  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping agents, approved/denied action boundaries, distinct MCP provenance, hook pipelines and historical skill instructions verified with twelve fixed local responses across five disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
+  console.log('PASS: installed SDK discovery, ownership, history/live events, canvas lifecycle, assets and zero automatic inference; input delivery, overlapping agents, approved/denied action boundaries, distinct MCP provenance, hook pipelines, historical skill instructions and read-only capability comparison verified with twelve fixed local responses across five disposable sessions, no paid inference. Native rendering and /trace discovery remain manual checks.');
 } finally {
   clearTimeout(timer);
   releaseFirst();

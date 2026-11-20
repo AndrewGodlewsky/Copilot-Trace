@@ -5,9 +5,10 @@ import vm from 'node:vm';
 import * as presentation from '../com.github.copilot/extensions/trace/web/presentation.mjs';
 import { createFollow } from '../com.github.copilot/extensions/trace/web/follow.mjs';
 import { createTrace } from '../com.github.copilot/extensions/trace/trace.mjs';
+import * as capabilities from '../com.github.copilot/extensions/trace/web/capabilities.mjs';
 
 // A small DOM boundary double exercises reconciliation, not browser layout or native focus behavior.
-function fixture(source) {
+function fixture(source, inventoryLoad = async () => { throw new Error('Unexpected inventory request'); }) {
   let document;
   class Element {
     constructor(tagName) {
@@ -67,7 +68,8 @@ function fixture(source) {
   for (const selector of ['main', '#timeline', '#connection', '#notice', '#empty', '#follow', '#actor-legend', '#stat-counts',
     '#stat-scope', '#stat-unlinked', '#stat-hooks', '#stat-skills', '#statistics-peek', '#footer-dock', '#event-order',
     '#activity-filter', '#reset-filter', '#filter-status', '#filter-empty', '#lane-help',
-    '#event-target', '#jump-event', '#navigation-status']) {
+    '#event-target', '#jump-event', '#navigation-status', '#capabilities', '#capability-refresh', '#capability-status',
+    '#capability-scope', '#capability-window', '#capability-list']) {
     const element = new Element(['#event-order', '#activity-filter', '#event-target'].includes(selector) ? 'select' : selector === '#jump-event' ? 'button' : 'div');
     selectors.set(selector, element); document.body.append(element);
   }
@@ -79,10 +81,13 @@ function fixture(source) {
   const context = vm.createContext({ ...presentation, document, window: { addEventListener() {} },
     ResizeObserver: class { observe() {} }, createDiagnostics: () => ({ record() {} }),
     createFollow,
+    initCapabilities: options => capabilities.initCapabilities({ ...options, document, load: inventoryLoad }),
     createPoller: () => ({ refresh() {}, stop() {} }), initFooter() {},
   });
   vm.runInContext(source.replace(/^import .*;\r?\n/gm, ''), context);
   return { document, get: selector => selectors.get(selector),
+    refreshCapabilities() { return vm.runInContext('capabilityView.refresh();', context); },
+    closeCapabilities() { vm.runInContext('capabilityView.close();', context); },
     syncFollowing() { vm.runInContext('following.sync();', context); },
     render(entries, extra = {}) {
       context.fixtureSnapshot = { entries, history: 'ready', omitted: 0, ...extra };
@@ -90,6 +95,122 @@ function fixture(source) {
     } };
 }
 const appSource = await readFile(new URL('../com.github.copilot/extensions/trace/web/app.mjs', import.meta.url), 'utf8');
+
+test('inventory controls fetch only on request and preserve disclosure, focus, literal text and scroll across live updates', async t => {
+  let reads = 0;
+  const ui = fixture(appSource, async () => { reads++; return {
+    schemaVersion: 1, scope: 'main-session', capturedAt: new Date().toISOString(),
+    tools: { status: 'ready', omitted: 0, invalid: 0, items: [{ name: '<tool> 🧪', identityValid: true, mcpServerName: null, mcpToolName: null }] },
+    skills: { status: 'unsupported', items: [], omitted: 0, invalid: 0 },
+  }; });
+  t.after(() => ui.closeCapabilities());
+  ui.render([]); assert.equal(reads, 0);
+  const disclosure = ui.get('#capabilities'), button = ui.get('#capability-refresh'), list = ui.get('#capability-list');
+  disclosure.open = true; disclosure.dispatch('toggle'); assert.equal(reads, 0);
+  button.focus(); button.dispatch('click'); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads, 1); assert.match(list.textContent, /<tool> 🧪/); assert.match(list.textContent, /Not observed here/);
+  assert.match(ui.get('#capability-status').textContent, /unsupported/i);
+  assert.equal(walk(list).some(node => ['script', 'a', 'tool'].includes(node.tagName)), false);
+  const row = list.firstElementChild; list.scrollTop = 50;
+  ui.document.scrollingElement.scrollTop = 250; ui.render([]);
+  assert.equal(reads, 1); assert.equal(list.firstElementChild, row); assert.equal(disclosure.open, true);
+  assert.equal(ui.document.activeElement, button); assert.equal(list.scrollTop, 50); assert.equal(ui.document.scrollingElement.scrollTop, 250);
+});
+
+function inventoryClock(t) {
+  let now = Date.parse('2026-11-20T12:00:00Z'), nextId = 0;
+  const timers = new Map();
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(globalThis, 'setTimeout', (callback, delay) => {
+    const id = ++nextId; timers.set(id, { callback, due: now + delay }); return id;
+  });
+  t.mock.method(globalThis, 'clearTimeout', id => timers.delete(id));
+  return { timers, now: () => now, advance(ms) {
+    now += ms;
+    for (const [id, timer] of [...timers]) if (timer.due <= now) { timers.delete(id); timer.callback(); }
+  } };
+}
+const emptyInventory = capturedAt => ({ schemaVersion: 1, scope: 'main-session', capturedAt,
+  tools: { status: 'ready', items: [], omitted: 0, invalid: 0 }, skills: { status: 'ready', items: [], omitted: 0, invalid: 0 } });
+
+test('idle inventory becomes stale after a minute without new events or reads and keeps reading state', async t => {
+  const clock = inventoryClock(t); let reads = 0;
+  const ui = fixture(appSource, async () => { reads++; return emptyInventory(new Date(clock.now()).toISOString()); });
+  t.after(() => ui.closeCapabilities());
+  ui.render([]); await ui.refreshCapabilities();
+  const button = ui.get('#capability-refresh'), list = ui.get('#capability-list'), disclosure = ui.get('#capabilities');
+  const row = list.firstElementChild;
+  button.focus(); list.scrollTop = 50; ui.document.scrollingElement.scrollTop = 250;
+  clock.advance(59999); assert.doesNotMatch(ui.get('#capability-status').textContent, /Stale snapshot/);
+  clock.advance(2); assert.match(ui.get('#capability-status').textContent, /Stale snapshot/);
+  disclosure.open = true; disclosure.dispatch('toggle');
+  assert.equal(reads, 1); assert.equal(clock.timers.size, 0, 'The age update is one-shot, not a polling loop.');
+  assert.equal(ui.document.activeElement, button); assert.equal(list.firstElementChild, row);
+  assert.equal(disclosure.open, true); assert.equal(list.scrollTop, 50); assert.equal(ui.document.scrollingElement.scrollTop, 250);
+  const message = ui.get('#capability-status').textContent;
+  clock.advance(600000); assert.equal(ui.get('#capability-status').textContent, message);
+});
+
+test('refresh replaces the stale-age timer and close clears it with any pending request timer', async t => {
+  const clock = inventoryClock(t); let finish, calls = 0;
+  const ui = fixture(appSource, async () => {
+    calls++;
+    if (calls > 1) await new Promise(resolve => { finish = resolve; });
+    return emptyInventory(new Date(clock.now()).toISOString());
+  });
+  t.after(() => ui.closeCapabilities());
+  await ui.refreshCapabilities();
+  assert.equal(clock.timers.size, 1);
+  const ageTimer = [...clock.timers.keys()][0]; clock.advance(10000);
+  const refreshing = ui.refreshCapabilities();
+  assert.equal(clock.timers.has(ageTimer), false);
+  assert.equal(clock.timers.size, 1, 'Only the request deadline remains while refreshing.');
+  finish(); await refreshing;
+  assert.equal(clock.timers.size, 1, 'A fresh snapshot gets only one new age timer.');
+  assert.equal([...clock.timers.values()][0].due, clock.now() + 60001);
+  ui.closeCapabilities(); assert.equal(clock.timers.size, 0);
+  const message = ui.get('#capability-status').textContent;
+  clock.advance(61000); assert.equal(ui.get('#capability-status').textContent, message);
+
+  const pending = fixture(appSource, () => new Promise(resolve => { finish = resolve; }));
+  const request = pending.refreshCapabilities(); assert.equal(clock.timers.size, 1);
+  pending.closeCapabilities(); assert.equal(clock.timers.size, 0);
+  finish(emptyInventory(new Date(clock.now()).toISOString())); await request;
+  assert.equal(clock.timers.size, 0, 'A late closed result cannot recreate an age timer.');
+});
+
+test('newer refresh wins and closed panels ignore late inventory results', async () => {
+  const requests = [];
+  const ui = fixture(appSource, () => new Promise(resolve => requests.push(resolve)));
+  const value = name => ({ schemaVersion: 1, scope: 'main-session', capturedAt: new Date().toISOString(),
+    tools: { status: 'ready', items: [{ name, identityValid: true }], omitted: 0, invalid: 0 },
+    skills: { status: 'ready', items: [], omitted: 0, invalid: 0 } });
+  const old = ui.refreshCapabilities(), newer = ui.refreshCapabilities();
+  requests[1](value('new')); await newer;
+  requests[0](value('old')); await old;
+  assert.match(ui.get('#capability-list').textContent, /Tool: new/);
+  assert.doesNotMatch(ui.get('#capability-list').textContent, /Tool: old/);
+  const closing = ui.refreshCapabilities(); ui.closeCapabilities();
+  const before = ui.get('#capability-list').textContent;
+  requests[2](value('closed')); await closing;
+  assert.equal(ui.get('#capability-list').textContent, before);
+});
+
+test('inventory failures keep the previous snapshot explicitly stale and later activity exposes its age', async () => {
+  let fail = false;
+  const ui = fixture(appSource, async () => {
+    if (fail) throw new Error('private path credential');
+    return { schemaVersion: 1, scope: 'main-session', capturedAt: '2026-01-01T00:00:00Z',
+      tools: { status: 'ready', items: [], omitted: 0, invalid: 0 }, skills: { status: 'ready', items: [], omitted: 0, invalid: 0 } };
+  });
+  await ui.refreshCapabilities();
+  assert.match(ui.get('#capability-status').textContent, /Stale snapshot/);
+  fail = true; await ui.refreshCapabilities();
+  assert.match(ui.get('#capability-status').textContent, /Refresh unavailable.*Previous snapshot/);
+  assert.doesNotMatch(ui.get('#capability-status').textContent, /private|credential/);
+  ui.render([{ id: 'message', type: 'user.message', category: 'chat', agentId: '', evidence: '{}', timestamp: '2026-11-20T12:00:00Z' }]);
+  assert.equal(ui.get('#timeline').children.length, 1);
+});
 const boundary = (id, type, extra = {}) => ({ id, type: `tool.execution_${type}`, category: 'tool',
   agentId: '', toolCallId: 'call', toolName: 'view', timestamp: '2026-11-20T12:00:00Z',
   evidence: JSON.stringify({ id }), explanation: 'Recorded boundary.', ...extra });

@@ -127,7 +127,7 @@ const stepLessons = new Map(Object.entries({
     'The initiator, cause and whether other work continued are not established by the event type alone.'],
 }));
 
-function explanationData(entry) {
+export function explanationData(entry) {
   if (entry.truncated || typeof entry.id !== 'string' || !entry.id || entry.id.length > 256
     || typeof entry.evidence !== 'string' || entry.evidence.length > 12000) return null;
   let event;
@@ -551,7 +551,7 @@ function validMcpMetadata(data) {
     && (data.mcpTransport === undefined || ['stdio', 'http', 'sse', 'memory'].includes(data.mcpTransport));
 }
 
-function toolBuckets(entries) {
+export function toolBuckets(entries) {
   return groupSteps(entries).filter(section => section.kind === 'tool').map(section => {
     const boundaries = section.entries;
     const starts = boundaries.filter(entry => entry.type === 'tool.execution_start');

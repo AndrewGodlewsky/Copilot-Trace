@@ -198,6 +198,11 @@ body:has(.footer-panel[open]) { overflow: hidden; }
 .footer-panel.statistics-drawer { inset: auto 0 0; width: min(48rem, 100%); max-height: min(85vh, 42rem); margin: 0 auto; padding: 0; border-radius: 14px 14px 0 0; border-bottom: 0; }
 .drawer-grip { width: 32px; height: 3px; margin: 10px auto 0; border-radius: 3px; background: var(--line); }
 .statistics-drawer .panel-heading { position: sticky; top: 0; z-index: 1; margin: 0; padding: 12px 20px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.capabilities { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 10px; overflow-wrap: anywhere; }
+.capabilities > summary { cursor: pointer; padding: 6px 0; font-weight: 600; color: var(--model); }
+.capabilities button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+#capability-list { max-height: min(24rem, 45vh); overflow: auto; overscroll-behavior: contain; padding: 6px 8px 6px 24px; }
+#capability-list li { white-space: pre-wrap; margin-bottom: 10px; }
 .footer-panel label { flex-wrap: wrap; font-size: inherit; }
 .footer-panel select { max-width: 100%; }
 #release-list { max-height: min(24rem, 55vh); overflow: auto; }

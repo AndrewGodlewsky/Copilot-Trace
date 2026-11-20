@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.25",
+    "summary": "Statistics can compare a current capability snapshot with retained tool and skill use. Scope, freshness and unknown availability stay explicit."
+  },
+  {
     "version": "0.1.24",
     "summary": "Skill events now preview the recorded instructions and trigger, with exact retained text available. Missing or shortened content stays explicit, and loading is distinguished from execution."
   },

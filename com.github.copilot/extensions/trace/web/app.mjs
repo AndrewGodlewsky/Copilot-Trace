@@ -3,6 +3,7 @@ import { createDiagnostics } from './diagnostics.mjs';
 import { createPoller } from './polling.mjs';
 import { initFooter } from './footer.mjs';
 import { createFollow } from './follow.mjs';
+import { initCapabilities } from './capabilities.mjs';
 
 const diagnostics = createDiagnostics();
 diagnostics.record('panel_started');
@@ -39,6 +40,7 @@ let chapters = [];
 let lanes = [];
 let etag;
 let lastSnapshot;
+const capabilityView = initCapabilities({ onInspect: () => { follow.checked = false; } });
 let navigationState;
 eventOrder.addEventListener('change', () => {
   follow.checked = false;
@@ -152,6 +154,7 @@ function applyContext(node, context, entry) {
 }
 
 function renderStatistics(snapshot) {
+  capabilityView.update(snapshot);
   const stats = summarize(snapshot.entries);
   for (const [key, value] of statValues) value.textContent = String(stats[key]);
   const preview = snapshot.history === 'unsupported' ? 'Events unavailable'
@@ -869,5 +872,5 @@ const poller = createPoller({
   },
 });
 initFooter({ diagnostics, refresh: poller.refresh, onInspect: () => { follow.checked = false; } });
-window.addEventListener('pagehide', () => { poller.stop(); pageSize.disconnect(); });
+window.addEventListener('pagehide', () => { poller.stop(); capabilityView.close(); pageSize.disconnect(); });
 void poller.refresh();
