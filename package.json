@@ -1,6 +1,6 @@
 {
   "name": "trace",
-  "version": "0.1.53",
+  "version": "0.1.54",
   "private": true,
   "type": "module",
   "description": "A live recorded-evidence timeline for GitHub Copilot chats.",
@@ -14,6 +14,7 @@
     "install:copilot": "node scripts/install.mjs",
     "package": "node scripts/package.mjs",
     "iteration": "node scripts/iteration.mjs",
-    "verify:iteration": "node scripts/iteration.mjs verify"
+    "verify:iteration": "node scripts/iteration.mjs verify",
+    "bench": "node --expose-gc scripts/bench.mjs"
   }
 }

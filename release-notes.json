@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.54",
+    "summary": "Trace opens long chats much faster and keeps the panel responsive under heavy activity. Nothing you see changes; only the work behind it is lighter."
+  },
+  {
     "version": "0.1.53",
     "summary": "Read nested event fields and multiline text beside exact JSON. Investigate a failed event for a short AI explanation, with remembered model and reasoning settings."
   },

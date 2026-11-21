@@ -36,8 +36,19 @@ function clip(value, limit) {
   return prefix + '…';
 }
 
+// The same acceptance rule as project(), without serializing evidence.
+function projectable(event) {
+  return Boolean(event) && !event.checkpoint && typeof event.id === 'string' && event.id.length <= 256 && definitions.has(event.type);
+}
+
+// Retained order key: recorded time, with missing/invalid times last. Equal keys keep insertion order.
+function retainedTime(timestamp) {
+  const parsed = Date.parse(clip(timestamp, 80));
+  return Number.isFinite(parsed) ? parsed : Infinity;
+}
+
 function project(event) {
-  if (!event || event.checkpoint || typeof event.id !== 'string' || event.id.length > 256 || !definitions.has(event.type)) return null;
+  if (!projectable(event)) return null;
   const data = event.data && typeof event.data === 'object' ? event.data : {};
   const [category, label, general] = definitions.get(event.type);
   let title = label;
@@ -84,8 +95,32 @@ function identifier(value) {
   return typeof value === 'string' && value.length <= 256 ? value : '';
 }
 
+// Retained records ordered by (time, insertion). Each insert lands after equal times, then the
+// oldest record is trimmed past `limit`, so the window always holds the `limit` greatest keys.
+// Trimming advances `head` instead of shifting, so in-order appends stay O(log n) amortized.
+function createWindow(limit) {
+  let records = [], times = [], head = 0, ids = new Map(), trimmed = 0;
+  return {
+    has: id => ids.has(id),
+    get size() { return records.length - head; },
+    get trimmed() { return trimmed; },
+    values: () => records.slice(head),
+    insert(id, time, record) {
+      let low = head, high = times.length;
+      while (low < high) { const mid = (low + high) >>> 1; if (times[mid] <= time) low = mid + 1; else high = mid; }
+      if (low === times.length) { records.push(record); times.push(time); } else { records.splice(low, 0, record); times.splice(low, 0, time); }
+      ids.set(id, record);
+      if (records.length - head > limit) {
+        ids.delete(records[head].id); records[head] = undefined; head++; trimmed++;
+        if (head > limit) { records = records.slice(head); times = times.slice(head); head = 0; }
+      }
+    },
+    clear() { records = []; times = []; head = 0; ids = new Map(); },
+  };
+}
+
 export function createTrace(session, diagnostics = { record() {} }) {
-  let events = new Map();
+  let events = createWindow(LIMIT);
   let history = 'loading';
   let revision = 0;
   let omitted = 0;
@@ -94,22 +129,38 @@ export function createTrace(session, diagnostics = { record() {} }) {
   let unsubscribe;
   let timer;
   let stopWaiting;
+  let cached;
   function insert(entry, source) {
     if (!entry || events.has(entry.id)) return;
     if (source) {
       if (source === 'live' && history === 'ready') liveReceipt = Number.isSafeInteger(liveReceipt) && liveReceipt < Number.MAX_SAFE_INTEGER ? liveReceipt + 1 : null;
       entry = { ...entry, observation: { source, receipt: source === 'live' && history === 'ready' ? liveReceipt : null } };
     }
-    events.set(entry.id, entry);
     // Ephemeral events are absent from history; merge by recorded time before trimming.
-    // Equal times keep insertion order. Missing/invalid times stay at the end.
-    const time = entry => {
-      const parsed = Date.parse(entry.timestamp);
-      return Number.isFinite(parsed) ? parsed : Infinity;
-    };
-    events = new Map([...events].sort((a, b) => time(a[1]) - time(b[1])));
-    if (events.size > LIMIT) { events.delete(events.keys().next().value); omitted++; }
+    const before = events.trimmed;
+    events.insert(entry.id, retainedTime(entry.timestamp), entry);
+    omitted += events.trimmed - before;
     revision++;
+  }
+  // History can hold a whole long-running chat. Select the retained window from cheap keys first and
+  // serialize evidence only for survivors. project() is pure, so for JSON-RPC (JSON-safe) history the result
+  // equals projecting every event; only a non-serializable older event could have made the old path fail.
+  function hydrate(past) {
+    const selection = createWindow(LIMIT), historyIds = new Set();
+    let inserted = 0;
+    for (const event of past) {
+      if (event?.type === 'assistant.usage' || !projectable(event)) continue;
+      historyIds.add(event.id);
+      if (selection.has(event.id)) continue;
+      selection.insert(event.id, retainedTime(event.timestamp), { id: event.id, event });
+      inserted++;
+    }
+    events = createWindow(LIMIT);
+    for (const { event } of selection.values()) {
+      const entry = project(event);
+      events.insert(entry.id, retainedTime(entry.timestamp), { ...entry, observation: { source: 'history', receipt: null } });
+    }
+    return { historyIds, inserted, trimmed: selection.trimmed };
   }
   let ready = Promise.resolve();
   if (typeof session?.on !== 'function' || typeof session?.getEvents !== 'function') {
@@ -127,17 +178,12 @@ export function createTrace(session, diagnostics = { record() {} }) {
       ready = Promise.race([Promise.resolve().then(() => session.getEvents()), timeout]).then(past => {
         if (closed) return;
         if (!Array.isArray(past)) throw new Error('Invalid history.');
-        const live = events;
+        const live = events.values();
         const liveOmitted = omitted;
-        events = new Map();
-        omitted = 0;
-        const historyIds = new Set();
-        for (const event of past) {
-          if (event?.type === 'assistant.usage') continue;
-          const entry = project(event);
-          if (entry) { historyIds.add(entry.id); insert(entry, 'history'); }
-        }
-        for (const entry of live.values()) if (!historyIds.has(entry.id)) insert(entry);
+        const { historyIds, inserted, trimmed } = hydrate(past);
+        omitted = trimmed;
+        revision += inserted;
+        for (const entry of live) if (!historyIds.has(entry.id)) insert(entry);
         omitted = Math.max(omitted, liveOmitted);
         history = 'ready';
         diagnostics.record('history_ready', { count: events.size });
@@ -152,18 +198,10 @@ export function createTrace(session, diagnostics = { record() {} }) {
   }
   return {
     ready,
+    // Built once per revision; each caller receives its own top-level object and entry array.
     snapshot() {
-      const tools = new Map();
-      const entries = [...events.values()].map(entry => {
-        const key = JSON.stringify([entry.agentId, entry.toolCallId]);
-        if (entry.type === 'tool.execution_start' && entry.toolCallId && entry.agentId !== null) tools.set(key, entry.toolName);
-        if (entry.type !== 'tool.execution_complete') return entry;
-        const toolName = entry.agentId !== null && entry.toolCallId ? tools.get(key) || '' : '';
-        const name = toolName || 'name unavailable';
-        const result = entry.success === false ? 'failed' : entry.success === true ? 'completed' : 'result recorded';
-        return { ...entry, toolName, title: `Tool ${result} · ${name}` };
-      });
-      return { revision, history, omitted, limit: LIMIT, liveReceipt, entries };
+      if (cached?.revision !== revision || cached.history !== history) cached = build();
+      return { ...cached, entries: [...cached.entries] };
     },
     close() {
       if (closed) return;
@@ -172,6 +210,20 @@ export function createTrace(session, diagnostics = { record() {} }) {
       stopWaiting?.();
       unsubscribe?.();
       events.clear();
+      cached = undefined;
     },
   };
+  function build() {
+    const tools = new Map();
+    const entries = events.values().map(entry => {
+      const key = JSON.stringify([entry.agentId, entry.toolCallId]);
+      if (entry.type === 'tool.execution_start' && entry.toolCallId && entry.agentId !== null) tools.set(key, entry.toolName);
+      if (entry.type !== 'tool.execution_complete') return entry;
+      const toolName = entry.agentId !== null && entry.toolCallId ? tools.get(key) || '' : '';
+      const name = toolName || 'name unavailable';
+      const result = entry.success === false ? 'failed' : entry.success === true ? 'completed' : 'result recorded';
+      return { ...entry, toolName, title: `Tool ${result} · ${name}` };
+    });
+    return { revision, history, omitted, limit: LIMIT, liveReceipt, entries };
+  }
 }

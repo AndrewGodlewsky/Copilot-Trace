@@ -135,7 +135,20 @@ const stepLessons = new Map(Object.entries({
     'The initiator, cause and whether other work continued are not established by the event type alone.'],
 }));
 
+// Every analysis reads the same evidence; parse each retained entry once. A hit must still match the fields
+// the result depends on, so an entry changed in place is parsed again. Callers never mutate the returned data.
+const explained = new WeakMap();
 export function explanationData(entry) {
+  const hit = explained.get(entry);
+  if (hit && hit.evidence === entry.evidence && hit.truncated === entry.truncated && hit.id === entry.id
+    && hit.type === entry.type && hit.agentId === entry.agentId && hit.timestamp === entry.timestamp) return hit.data;
+  const data = parseExplanationData(entry);
+  if (typeof entry === 'object') explained.set(entry, { evidence: entry.evidence, truncated: entry.truncated, id: entry.id, type: entry.type,
+    agentId: entry.agentId, timestamp: entry.timestamp, data });
+  return data;
+}
+
+function parseExplanationData(entry) {
   if (entry.truncated || typeof entry.id !== 'string' || !entry.id || entry.id.length > 256
     || typeof entry.evidence !== 'string' || entry.evidence.length > 12000) return null;
   let event;
@@ -541,8 +554,18 @@ export function requestChapters(entries, { history = 'ready', omitted = 0 } = {}
   return chapters;
 }
 
+// Pure in its string input; a bounded cache avoids re-validating the same timestamps in every analysis.
+const timestampCache = new Map();
 function timestampMilliseconds(value) {
   if (typeof value !== 'string') return NaN;
+  if (timestampCache.has(value)) return timestampCache.get(value);
+  if (timestampCache.size >= 4096) timestampCache.clear();
+  const time = parseTimestampMilliseconds(value);
+  timestampCache.set(value, time);
+  return time;
+}
+
+function parseTimestampMilliseconds(value) {
   const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(value);
   if (!parts) return NaN;
   const [year, month, day, hour, minute, second, offsetHour, offsetMinute] = parts.slice(1).map(part => Number(part || 0));
@@ -574,6 +597,18 @@ export function agentLanes(entries, { history = 'ready', omitted = 0 } = {}) {
       || times.some((time, i) => !Number.isFinite(time) || time < from || time > to || (i > 0 && time < times[i - 1]))) return null;
     return { start: from, end: to, startId: start.id, endId: end.id };
   }
+  // Tool boundaries by recorded call ID, in entry order; built once when a lane needs its spawning call.
+  let byCall;
+  const toolBoundaries = () => {
+    if (byCall) return byCall;
+    byCall = new Map();
+    for (const entry of entries) {
+      if (entry.type !== 'tool.execution_start' && entry.type !== 'tool.execution_complete') continue;
+      if (!byCall.has(entry.toolCallId)) byCall.set(entry.toolCallId, []);
+      byCall.get(entry.toolCallId).push(entry);
+    }
+    return byCall;
+  };
   for (const lane of lanes) {
     if (lane.agentId === null) {
       lane.status = 'Unknown identity; these records are not assigned to one agent';
@@ -621,8 +656,7 @@ export function agentLanes(entries, { history = 'ready', omitted = 0 } = {}) {
       for (const entry of boundaries) lane.links.push({ id: entry.id,
         label: entry.type === 'subagent.started' ? 'Agent start evidence' : 'Agent outcome evidence' });
       if (!conflicting) {
-        const calls = entries.filter(entry => ['tool.execution_start', 'tool.execution_complete'].includes(entry.type)
-          && entry.toolCallId === callIds[0]);
+        const calls = toolBoundaries().get(callIds[0]) || [];
         const toolStarts = calls.filter(entry => entry.type === 'tool.execution_start');
         const parent = toolStarts[0];
         if (toolStarts.length === 1 && source(parent) !== null && source(parent) !== lane.agentId
@@ -635,10 +669,18 @@ export function agentLanes(entries, { history = 'ready', omitted = 0 } = {}) {
   }
   const intervals = lanes.flatMap(lane => lane.intervals);
   const scale = intervals.length ? { start: Math.min(...intervals.map(item => item.start)), end: Math.max(...intervals.map(item => item.end)) } : null;
-  let overlaps = 0;
-  for (let i = 0; i < lanes.length; i++) for (let j = i + 1; j < lanes.length; j++) {
-    if (lanes[i].intervals.some(a => lanes[j].intervals.some(b => Math.min(a.end, b.end) > Math.max(a.start, b.start)))) overlaps++;
+  // Count lane pairs with any positive overlap. Every interval has finite end > start, so two intervals overlap
+  // iff the earlier-starting one is still active when the later one starts; ends sort before starts at equal
+  // times because touching intervals do not overlap. Work follows concurrency, not the number of lane pairs.
+  const sweep = lanes.flatMap((lane, index) => lane.intervals.flatMap(item => [[item.start, 1, index], [item.end, 0, index]]))
+    .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const active = new Map(), pairs = new Set();
+  for (const [, starting, index] of sweep) {
+    if (!starting) { const count = active.get(index) - 1; if (count) active.set(index, count); else active.delete(index); continue; }
+    for (const other of active.keys()) if (other !== index) pairs.add(other < index ? other * lanes.length + index : index * lanes.length + other);
+    active.set(index, (active.get(index) || 0) + 1);
   }
+  const overlaps = pairs.size;
   return { lanes, scale, overlaps, note: `${overlaps} pairs of lanes have positive recorded overlap. Bars share one timestamp scale; they do not establish continuous execution. Wall time covers the observed span; the sum of overlapping intervals can be larger. Missing, equal or reversed boundaries have unknown timing. Only retained events are shown; absence of a bar does not establish inactivity.${history !== 'ready' ? ' History is incomplete or unavailable.' : ''}${omitted ? ' Older events were omitted.' : ''}` };
 }
 
@@ -853,6 +895,12 @@ export function delegationHandoffs(entries, { history = 'ready', omitted = 0 } =
     }
     row.entries.push(entry);
   }
+  // Tool identities grouped by their shared call ID, in identity insertion order.
+  const toolsByCall = new Map();
+  for (const items of tools.values()) {
+    if (!toolsByCall.has(items[0].toolCallId)) toolsByCall.set(items[0].toolCallId, []);
+    toolsByCall.get(items[0].toolCallId).push(items);
+  }
   const claims = new Map();
   for (const row of rows) {
     const starts = row.entries.filter(entry => entry.type === 'subagent.started');
@@ -877,9 +925,9 @@ export function delegationHandoffs(entries, { history = 'ready', omitted = 0 } =
         parent = startData.parentId === undefined ? '' : identityText(startData.parentId) ? startData.parentId : null;
         candidates = parent === null ? [] : tools.get(key(parent, call)) || [];
         if (parent === row.agentId || parent === null
-          || (!candidates.length && [...tools.values()].some(items => items[0].toolCallId === call))) conflict = true;
+          || (!candidates.length && toolsByCall.has(call))) conflict = true;
       } else {
-        const sources = [...tools.values()].filter(items => items[0].toolCallId === call && source(items[0]) !== row.agentId);
+        const sources = (toolsByCall.get(call) || []).filter(items => source(items[0]) !== row.agentId);
         if (sources.length === 1) { candidates = sources[0]; parent = source(candidates[0]); }
         else if (sources.length > 1) conflict = true;
       }
@@ -951,7 +999,9 @@ export function delegationHandoffs(entries, { history = 'ready', omitted = 0 } =
     'Delegation uses separate context. This does not prove that a particular file, instruction or parent message was included or excluded.',
     ...(history !== 'ready' ? ['History is incomplete or unavailable.'] : []), ...(omitted ? ['Older events were omitted.'] : [])];
     const selected = new Set([...row.entries, ...(linked ? [row.parentStart, row.parentResult].filter(Boolean) : [])]);
-    row.links = entries.filter(entry => selected.has(entry) && counts.get(entry.id) === 1).map(entry => ({ entry,
+    // Count-1 entries occur once in `entries`, so their positions give recorded order.
+    row.links = [...selected].filter(entry => counts.get(entry.id) === 1)
+      .sort((a, b) => positions.get(a) - positions.get(b)).map(entry => ({ entry,
       label: entry === row.parentStart ? 'Parent task arguments' : entry === row.parentResult ? 'Parent returned result'
         : entry.type === 'subagent.started' ? 'Child start' : lifecycleEvent(entry) ? 'Child lifecycle outcome' : 'Child activity' }));
   }
@@ -1089,8 +1139,11 @@ function relatedTarget(data) {
 
 // Suggestions compare retained requests; the SDK does not expose a generic tool retry-of link.
 export function recoveryAttempts(entries, options = {}, observedStages = actionStages(entries, options)) {
-  const positions = new Map(entries.map((entry, index) => [entry, index])), counts = new Map();
-  for (const entry of entries) counts.set(entry.id, (counts.get(entry.id) || 0) + 1);
+  const positions = new Map(entries.map((entry, index) => [entry, index])), counts = new Map(), firstById = new Map();
+  for (const entry of entries) {
+    counts.set(entry.id, (counts.get(entry.id) || 0) + 1);
+    if (!firstById.has(entry.id)) firstById.set(entry.id, entry);
+  }
   const calls = toolBuckets(entries).map(({ boundaries, start }) => {
     const starts = boundaries.filter(entry => entry.type === 'tool.execution_start');
     const ends = boundaries.filter(entry => entry.type === 'tool.execution_complete'), end = ends[0];
@@ -1111,8 +1164,10 @@ export function recoveryAttempts(entries, options = {}, observedStages = actionS
       && counts.get(stage.id) === 1);
     const adverse = decisions.filter(stage => ['denied', 'cancelled'].includes(stage.outcome));
     const linkedDecisions = decisions.slice(0, 3);
-    const links = entries.filter(entry => boundaries.includes(entry) || linkedDecisions.some(stage => stage.id === entry.id))
+    // Linked records are unique in `entries`, so their single positions give recorded order.
+    const links = [...new Set([...boundaries, ...linkedDecisions.map(stage => firstById.get(stage.id))])]
       .filter(entry => counts.get(entry.id) === 1 && identityText(entry.id))
+      .sort((a, b) => positions.get(a) - positions.get(b))
       .map(entry => ({ entry, label: entry.type === 'tool.execution_start' ? 'Arguments'
         : entry.type === 'tool.execution_complete' ? 'Result / error' : 'Permission decision' }));
     const notes = [];
@@ -1126,7 +1181,7 @@ export function recoveryAttempts(entries, options = {}, observedStages = actionS
     if (!target) notes.push('Matching rule unavailable for this request or provider metadata; no suggestions are made.');
     const result = validResult ? Object.fromEntries(['result', 'error'].filter(field => Object.hasOwn(endData, field))
       .map(field => [field, endData[field]])) : null;
-    const anchor = end || entries.find(entry => entry.id === adverse[0]?.id) || start || boundaries[0];
+    const anchor = end || firstById.get(adverse[0]?.id) || start || boundaries[0];
     return { id: (start || boundaries[0]).id, identity: identity ?? `unlinked:${boundaries[0].id}`, anchorId: anchor.id, anchorPosition: positions.get(anchor),
       startPosition: positions.get(start), source, toolName: data?.toolName || start?.toolName || 'Unknown tool',
       provider: target?.provider || 'Provider identity unavailable for matching.',
@@ -1136,10 +1191,18 @@ export function recoveryAttempts(entries, options = {}, observedStages = actionS
         ? 'Permission unknown' : stages?.permission || 'Permission unknown', notes, links, target,
       failed: outcome === 'failure' || adverse.length > 0 };
   });
+  // Candidate calls indexed by exact source and target key, preserving call order.
+  const related = new Map();
+  for (const call of calls) {
+    if (!call.target) continue;
+    if (!related.has(call.source)) related.set(call.source, new Map());
+    const byKey = related.get(call.source);
+    if (!byKey.has(call.target.key)) byKey.set(call.target.key, []);
+    byKey.get(call.target.key).push(call);
+  }
   return calls.filter(call => call.failed).map(original => {
-    const matches = original.target ? calls.filter(call => call !== original && call.target
-      && call.source === original.source && call.target.key === original.target.key
-      && call.startPosition > original.anchorPosition) : [];
+    const matches = original.target ? (related.get(original.source)?.get(original.target.key) || [])
+      .filter(call => call !== original && call.startPosition > original.anchorPosition) : [];
     return { id: original.identity, anchorId: original.anchorId, original, candidates: matches.slice(0, 3), omittedCandidates: Math.max(0, matches.length - 3),
       rule: original.target?.rule || 'No supported matching rule for this retained request.',
       notes: ['Related-attempt suggestions are not recorded retries or proof of recovery. No generic tool retry-of relationship is available in the inspected SDK.',
@@ -1736,8 +1799,8 @@ export function actionStages(entries, { history = 'ready', omitted = 0 } = {}) {
   const usableId = value => typeof value === 'string' && value.length > 0 && value.length <= 256;
   const object = value => value && typeof value === 'object' && !Array.isArray(value);
   const identity = (entry, call) => toolIdentity({ agentId: entry.agentId, toolCallId: call });
-  const counts = new Map();
-  for (const entry of entries) counts.set(entry.id, (counts.get(entry.id) || 0) + 1);
+  const counts = new Map(), positions = new Map();
+  for (const [index, entry] of entries.entries()) { counts.set(entry.id, (counts.get(entry.id) || 0) + 1); positions.set(entry.id, index); }
   const unique = entry => counts.get(entry.id) === 1;
   const records = new Map(entries.map(entry => [entry, explanationData(entry)]));
   const proposals = new Map();
@@ -1811,7 +1874,8 @@ export function actionStages(entries, { history = 'ready', omitted = 0 } = {}) {
         }
       }
     }
-    const stages = entries.filter(entry => selected.has(entry.id)).map(entry => selected.get(entry.id));
+    // Every staged record is unique in `entries`, so its single position gives recorded order.
+    const stages = [...selected.values()].sort((a, b) => positions.get(a.id) - positions.get(b.id));
     const decisions = stages.filter(stage => stage.type === 'permission.completed');
     const requests = stages.filter(stage => stage.type === 'permission.requested');
     const settled = new Set(decisions.map(stage => stage.requestId));
@@ -1838,10 +1902,15 @@ export function observedActivity(entries, { history = 'ready', omitted = 0, now 
   const unique = entry => counts.get(entry.id) === 1;
   const records = new Map(entries.map(entry => [entry, explanationData(entry)]));
   const source = entry => entry.agentId === '' || identityText(entry.agentId) ? entry.agentId : null;
+  // The latest eligible interruption per source; an earlier one can only qualify if this one does.
+  const interruptions = new Map(), firstById = new Map();
+  for (const candidate of entries) {
+    if (!firstById.has(candidate.id)) firstById.set(candidate.id, candidate);
+    if (candidate.type === 'abort' && unique(candidate) && records.get(candidate)) interruptions.set(source(candidate), candidate);
+  }
   const add = (kind, entry, label, detail, links = [entry]) => {
-    const interruption = kind !== 'unknown' && entries.findLast(candidate => candidate.type === 'abort'
-      && source(candidate) === source(entry) && unique(candidate) && records.get(candidate)
-      && positions.get(candidate) > positions.get(entry));
+    const latest = kind !== 'unknown' && interruptions.get(source(entry));
+    const interruption = latest && positions.get(latest) > positions.get(entry) && latest;
     if (interruption) {
       detail += ' An interruption was recorded for this source; this operation’s outcome remains unknown. The interruption has no call ID.';
       links.push(interruption);
@@ -1865,7 +1934,7 @@ export function observedActivity(entries, { history = 'ready', omitted = 0, now 
     if (!starts.length || ends.length) continue;
     const entry = starts[0], action = stages.get(entry.id);
     const decisions = action.stages.filter(stage => stage.type === 'permission.completed');
-    const links = [entry, ...decisions.map(stage => entries.find(candidate => candidate.id === stage.id))];
+    const links = [entry, ...decisions.map(stage => firstById.get(stage.id))];
     add('tool', entry, 'Tool completion not observed',
       `${action.permission}. An invocation entry does not prove execution; a result may be absent, late or outside the retained window.`, links);
   }

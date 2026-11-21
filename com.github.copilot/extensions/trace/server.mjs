@@ -54,7 +54,7 @@ export async function startServer(session, { investigationFactory = createInvest
   const capabilities = createCapabilities(session);
   const instructions = createInstructionSources(session);
   const investigation = investigationFactory({ parent: session, snapshot: () => trace.snapshot() });
-  let closing;
+  let closing, encoded;
   const server = createServer((req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -118,9 +118,10 @@ export async function startServer(session, { investigationFactory = createInvest
       const etag = `"${snapshot.revision}"`;
       res.setHeader('ETag', etag);
       if (req.headers['if-none-match'] === etag) return fail(304);
-      const body = JSON.stringify(snapshot);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
-      return res.end(req.method === 'HEAD' ? undefined : body);
+      // A revision identifies one snapshot, so each is encoded once for every reader.
+      if (encoded?.etag !== etag || encoded.history !== snapshot.history) encoded = { etag, history: snapshot.history, body: Buffer.from(JSON.stringify(snapshot)) };
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': encoded.body.length });
+      return res.end(req.method === 'HEAD' ? undefined : encoded.body);
     }
     const asset = assets.get(req.url.slice(prefix.length));
     if (!asset) return fail(404);

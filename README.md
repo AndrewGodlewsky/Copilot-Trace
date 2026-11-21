@@ -1,6 +1,6 @@
 # Trace
 
-Current version: **0.1.53**
+Current version: **0.1.54**
 
 A GitHub Copilot desktop plugin for understanding the activity inside your current chat. `/trace` opens a live timeline with turn markers and expandable recorded evidence. General explanations describe what events mean. Inside a failed event, **Investigate** can request a short possible explanation based on the evidence you inspect.
 
@@ -193,6 +193,8 @@ npm run package
 ```
 
 Packaging creates a validated, self-contained plugin directory under ignored `dist/`. It does not publish or install anything.
+
+`npm test` includes scale tests over tens of thousands of synthetic events. `npm run bench` reproduces the hydration, polling and analysis measurements in the [efficiency review](docs/efficiency-review.md), which also lists measured trade-offs awaiting owner decisions.
 
 For repository development, start an issue brief with `npm run iteration -- start <id>`. Record the independent review, then use `npm run verify:iteration -- <id>` and `npm run iteration -- status <id>` before publication. For visible changes, first record the owner's actual UI acceptance with `npm run iteration -- ui <id> <report-file>`. Reports live under ignored `.iteration/`. See the [workflow](docs/development-workflow.md) for the complete sequence and optional measured usage ledger. These Git-based evidence commands run in the development checkout; a packaged plugin does not carry its Git history or private receipts.
 
