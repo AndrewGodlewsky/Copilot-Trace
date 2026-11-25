@@ -4,7 +4,7 @@ Trace is a GitHub Copilot desktop plugin. `/trace` opens a live timeline of the 
 
 ## Integration and boundaries
 
-- Before changing host integration, read [Copilot integration](docs/copilot-integration.md) and inspect the installed SDK declarations. The host supplies `@github/copilot-sdk/extension`; keep it external and do not download or bundle a replacement runtime.
+- Before changing host integration, read [Copilot integration](docs/copilot-integration.md) and inspect the installed SDK declarations. The host supplies `@github/copilot-sdk/extension` (current runtimes also resolve `@microsoft/copilot-sdk`; keep the legacy name while older runtimes are supported); keep it external and do not download or bundle a replacement runtime.
 - Shipped code lives in `com.github.copilot/extensions/trace/`: `extension.mjs` joins the host, `canvas.mjs` owns instances, `server.mjs` serves local assets/snapshots and authorized investigation requests, `trace.mjs` observes session events, and `web/` renders the panel.
 - Validate session/instance ownership and correlate future async requests. Closing an instance must release its resources; stale results must not overwrite newer user input.
 - Before changing investigation, read [failure investigation](docs/failure-investigation.md) and [session ownership and background helpers](docs/copilot-integration.md#model-operations). Preserve explicit-click inference, server-selected evidence, exact account/model/effort checks, tool-free isolation, cancellation and accounting. Keep parent model and permission ownership with the host.

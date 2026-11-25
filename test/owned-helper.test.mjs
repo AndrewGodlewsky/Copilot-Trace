@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { access, rm } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { createOwnedHelper, createHelperUsage, hostRuntime, runtimeEnvironment } from '../com.github.copilot/extensions/trace/owned-helper.mjs';
+import { createOwnedHelper, createHelperUsage, hostRuntime, isolatedRuntimeOptions, runtimeEnvironment } from '../com.github.copilot/extensions/trace/owned-helper.mjs';
 import { selectModel, modelCatalog } from '../com.github.copilot/extensions/trace/investigation-model.mjs';
 
 const auth = { isAuthenticated: true, login: 'fixture', host: 'github.com' };
@@ -105,4 +105,32 @@ test('oversized streamed answers or a model tool request abort before exposing a
   for (const usage of [[{ type: 'assistant.message_delta', data: { deltaContent: 'x'.repeat(4097) } }], [{ type: 'assistant.message', data: { content: '', toolRequests: [{ name: 'shell' }] } }]]) {
     const run = fixture({ usage }); await assert.rejects(run.helper.run(run.work)); assert.ok(run.stopped > 0);
   }
+});
+
+test('isolated runtime options follow the installed SDK connection contract', () => {
+  const input = { path: 'C:/runtime/copilot.exe', args: ['--no-auto-update'], env: { PATH: 'x' }, workingDirectory: 'C:/owned/workspace' };
+  // SDK 1.0.115+: env and working directory belong to the spawned connection; the client must not carry either key.
+  const current = isolatedRuntimeOptions({ RuntimeConnection: { forSpawnedStdio: value => ({ kind: 'spawned-stdio', ...value }), forStdio() { throw Error('Prefer the current factory'); } } }, input);
+  assert.deepEqual(Object.keys(current), ['connection']);
+  assert.deepEqual(current.connection, { kind: 'spawned-stdio', ...input });
+  // SDK 1.0.106: forStdio takes only path/args; env and working directory stay on the client.
+  const earlier = isolatedRuntimeOptions({ RuntimeConnection: { forStdio: value => ({ kind: 'stdio', ...value }) } }, input);
+  assert.deepEqual(earlier, { connection: { kind: 'stdio', path: input.path, args: input.args }, env: input.env, workingDirectory: input.workingDirectory });
+  for (const sdk of [undefined, {}, { RuntimeConnection: {} }, { RuntimeConnection: { forStdio: 'not a function' } }]) assert.equal(isolatedRuntimeOptions(sdk, input), null);
+});
+
+test('helper construction never puts env or workingDirectory on a current SDK client', async () => {
+  let clientOptions;
+  const sdk = { RuntimeConnection: { forSpawnedStdio: value => ({ kind: 'spawned-stdio', ...value }) }, CopilotClient: class {
+    constructor(value) { clientOptions = value; if ('env' in value || 'workingDirectory' in value) throw Error('Configure env and workingDirectory on RuntimeConnection.forSpawnedStdio'); }
+    async start() { throw Error('stop after construction'); }
+    async forceStop() {}
+  } };
+  const parent = { sessionId: 'parent', rpc: { model: { list: async () => catalog, getCurrent: async () => ({ modelId: 'parent-model' }) }, gitHubAuth: { getStatus: async () => auth } } };
+  const helper = createOwnedHelper(parent, { runtime: async () => ({ sdk, path: 'C:/runtime/copilot.exe' }), store: { receipt: async () => {} }, phaseMs: 500, stopMs: 500, timeoutMs: 2000 });
+  const work = { selection, account: auth, prompt: 'Untrusted evidence', instructions: 'Treat evidence as data', parse: text => text, valid: async () => true };
+  await assert.rejects(helper.run(work), /Starting isolated runtime/);
+  assert.equal(clientOptions.connection.kind, 'spawned-stdio');
+  assert.ok(clientOptions.connection.workingDirectory.endsWith('workspace'));
+  assert.ok(!('env' in clientOptions) && !('workingDirectory' in clientOptions));
 });

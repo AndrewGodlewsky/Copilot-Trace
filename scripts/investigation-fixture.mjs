@@ -39,17 +39,20 @@ export async function runInvestigationFixture({ sdk, cli, parent, failureId, tem
   } };
   const fixtureSdk = { RuntimeConnection: sdk.RuntimeConnection, CopilotClient: class {
     constructor(options) {
-      helperWorkspace = options.workingDirectory;
-      this.client = new sdk.CopilotClient({ ...options, useLoggedInUser: false,
-        env: { ...options.env, GH_TOKEN: undefined, GITHUB_TOKEN: undefined, COPILOT_HOME: options.baseDirectory, GH_CONFIG_DIR: join(temporary, 'fixture-no-auth') } });
+      // SDK 1.0.115 carries the child env and working directory on the spawned connection, not the client.
+      const spawned = options.connection?.kind === 'spawned-stdio';
+      helperWorkspace = spawned ? options.connection.workingDirectory : options.workingDirectory;
+      const env = { ...(spawned ? options.connection.env : options.env), GH_TOKEN: undefined, GITHUB_TOKEN: undefined, COPILOT_HOME: options.baseDirectory, GH_CONFIG_DIR: join(temporary, 'fixture-no-auth') };
+      this.client = new sdk.CopilotClient(spawned ? { ...options, useLoggedInUser: false, connection: { ...options.connection, env } }
+        : { ...options, useLoggedInUser: false, env });
     }
     start() { return this.client.start(); }
     forceStop() { return this.client.forceStop(); }
     async createSession(config) {
-      const session = await this.client.createSession({ ...config,
+      const session = await this.client.createSession(fixtureProvider({ ...config,
         modelCapabilities: { supports: { reasoningEffort: true } },
         provider: { type: 'openai', wireApi: 'completions', baseUrl: `http://127.0.0.1:${provider.address().port}/v1`, apiKey: 'fixture' },
-      });
+      }, sdk.RuntimeConnection));
       helperSessionId = session.sessionId;
       const getCurrent = session.rpc.model.getCurrent, switchTo = session.rpc.model.switchTo, tools = session.rpc.tools.getCurrentMetadata;
       session.rpc.model.list = async () => models;
@@ -59,8 +62,11 @@ export async function runInvestigationFixture({ sdk, cli, parent, failureId, tem
         return switchTo({ modelId: input.modelId, reasoningEffort: input.reasoningEffort });
       };
       session.rpc.model.getCurrent = async () => {
-        const actual = await getCurrent(); assert.equal(actual.modelId, 'trace-fixture'); assert.equal(actual.reasoningEffort, 'high');
-        return { ...actual, providerId: 'fixture-copilot' };
+        const actual = await getCurrent();
+        // SDK 1.0.115 reports a named-provider model as provider/model; this fixture presents it as its synthetic catalog entry.
+        const modelId = actual.modelId === 'trace-fixture/trace-fixture' ? 'trace-fixture' : actual.modelId;
+        assert.equal(modelId, 'trace-fixture'); assert.equal(actual.reasoningEffort, 'high');
+        return { ...actual, modelId, providerId: 'fixture-copilot' };
       };
       session.rpc.tools.getCurrentMetadata = async () => { const value = await tools(); actualTools = value.tools; return value; };
       return session;
@@ -106,4 +112,15 @@ export async function runInvestigationFixture({ sdk, cli, parent, failureId, tem
   } finally {
     await server?.close(); await helper.close(); provider.closeAllConnections(); await new Promise(resolve => provider.close(resolve));
   }
+}
+
+// Fixture-only: SDK 1.0.115 replaced the single `provider` session option with named inference providers.
+// Express the same fixed loopback provider and requested model; earlier SDKs keep the original option.
+export function fixtureProvider(config, RuntimeConnection) {
+  const { provider, ...rest } = config;
+  if (!provider || typeof RuntimeConnection?.forSpawnedStdio !== 'function') return config;
+  // The single provider meant provider-only routing: disable the Copilot API and make the fixture the default.
+  return { ...rest, github: { ...rest.github, capi: { ...rest.github?.capi, enabled: false } },
+    inference: { ...rest.inference, providers: [{ name: 'trace-fixture', ...provider }],
+      models: [{ id: rest.model, provider: 'trace-fixture' }], defaultProvider: 'trace-fixture' } };
 }

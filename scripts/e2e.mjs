@@ -10,6 +10,8 @@ import { instructionSources } from '../com.github.copilot/extensions/trace/web/i
 import { armLivePrediction, classifyPredictionEvent, resolveLivePrediction } from '../com.github.copilot/extensions/trace/web/learning.mjs';
 import { parseExampleLibrary } from '../com.github.copilot/extensions/trace/web/examples.mjs';
 import { runInvestigationFixture } from './investigation-fixture.mjs';
+import { isolatedRuntimeOptions } from '../com.github.copilot/extensions/trace/owned-helper.mjs';
+import { fixtureProvider } from './investigation-fixture.mjs';
 
 const sdkDirectory = process.env.COPILOT_SDK_DIR;
 const cli = process.env.COPILOT_CLI_PATH;
@@ -184,11 +186,14 @@ const fixture = createServer(async (req, res) => {
 });
 await new Promise(resolve => fixture.listen(0, '127.0.0.1', resolve));
 const client = new CopilotClient({
-  mode: 'empty', baseDirectory: home, workingDirectory: project, useLoggedInUser: false,
+  mode: 'empty', baseDirectory: home, useLoggedInUser: false,
   builtinPluginDirectories: [root],
-  connection: RuntimeConnection.forStdio({ path: cli, args: ['--no-auto-update'] }),
-  env: { ...process.env, GH_TOKEN: undefined, GITHUB_TOKEN: undefined, COPILOT_HOME: home, GH_CONFIG_DIR: join(temporary, 'gh') },
+  ...isolatedRuntimeOptions({ RuntimeConnection }, { path: cli, args: ['--no-auto-update'], workingDirectory: project,
+    env: { ...process.env, GH_TOKEN: undefined, GITHUB_TOKEN: undefined, COPILOT_HOME: home, GH_CONFIG_DIR: join(temporary, 'gh') } }),
 });
+// SDK 1.0.115 removed the single `provider` session option. Express the same fixed loopback provider as one
+// named provider with the requested model; earlier SDKs keep the original option.
+const createFixtureSession = config => client.createSession(fixtureProvider(config, RuntimeConnection));
 let session;
 let expired = false;
 const timer = setTimeout(() => { expired = true; void client.forceStop(); }, 45000);
@@ -202,7 +207,7 @@ async function until(read, accept, label) {
 }
 try {
   await client.start();
-  session = await client.createSession({
+  session = await createFixtureSession({
     workingDirectory: project, configDirectory: home, availableTools: [],
     requestExtensions: true, requestCanvasRenderer: true,
     extensionSdkPath: sdkDirectory, pluginDirectories: [root], enableConfigDiscovery: false,
@@ -325,7 +330,7 @@ try {
   await session.disconnect();
 
   // A second disposable session verifies actual delegation identities, using only the task tool.
-  session = await client.createSession({
+  session = await createFixtureSession({
     workingDirectory: project, configDirectory: home, availableTools: ['builtin:task'],
     requestExtensions: true, requestCanvasRenderer: true,
     extensionSdkPath: sdkDirectory, pluginDirectories: [root], enableConfigDiscovery: false,
@@ -559,7 +564,7 @@ try {
       + (approved ? "; Write-Output ('fixture-output-' * 10000)" : '');
     let permissionCalls = 0;
     const actionEvents = [];
-    session = await client.createSession({
+    session = await createFixtureSession({
       workingDirectory: project, configDirectory: home, availableTools: ['builtin:powershell'],
       requestExtensions: true, requestCanvasRenderer: true,
       extensionSdkPath: sdkDirectory, pluginDirectories: [root], enableConfigDiscovery: false,
@@ -706,7 +711,7 @@ try {
     return { additionalContext: 'Fixed local hook context.' };
   };
   const fixtureBase = `http://127.0.0.1:${fixture.address().port}`;
-  session = await client.createSession({
+  session = await createFixtureSession({
     workingDirectory: project, configDirectory: home, availableTools: ['mcp:*'],
     requestExtensions: true, requestCanvasRenderer: true,
     extensionSdkPath: sdkDirectory, pluginDirectories: [root], enableConfigDiscovery: false, enableSkills: true,
@@ -768,7 +773,9 @@ try {
     assert.deepEqual(scopedSource.applyTo, ['src/**/*.js']);
     assert.ok(inventory.sources.items.every(item => item.defaultDisabled === null));
     assert.equal(JSON.stringify(inventory).includes(organizationText), false);
-    assert.equal(skillLists, beforeInventoryLists, 'Instruction-source reads do not reload skills.');
+    // Runtime 1.0.115 fills a session's skill catalog lazily on its first skill-dependent query (one provider
+    // listing, then cached); 1.0.106 had it ready. Trace's reads may be that first query but never list again.
+    assert.ok(skillLists - beforeInventoryLists <= 1, 'Instruction-source reads cause at most the one-time catalog listing.');
     return inventory;
   };
   const initialInstructionSources = await readInstructionSources(initialInstructionBody);
@@ -795,18 +802,22 @@ try {
     assert.deepEqual(inventory.tools.items.map(tool => tool.name).sort(), mcpMetadata.tools.map(tool => tool.name).sort());
     assert.deepEqual(inventory.tools.items.map(tool => tool.mcpServerName).sort(), ['first', 'second']);
     assert.ok(inventory.tools.items.every(tool => tool.mcpToolName === 'echo' && tool.identityValid));
-    assert.deepEqual(inventory.skills.items.map(skill => skill.name).sort(), ['fixture-auto', 'fixture-manual']);
-    assert.ok(inventory.skills.items.every(skill => skill.enabled === true && skill.userInvocable === true
+    // Runtime 1.0.115 also lists the loaded Trace plugin's own launch skill; 1.0.106 listed only provider skills.
+    const skills = inventory.skills.items.filter(skill => skill.name !== 'trace');
+    assert.ok(inventory.skills.items.length - skills.length <= 1, 'Only the Trace plugin skill may join the provider skills.');
+    assert.deepEqual(skills.map(skill => skill.name).sort(), ['fixture-auto', 'fixture-manual']);
+    assert.ok(skills.every(skill => skill.enabled === true && skill.userInvocable === true
       && skill.modelInvocable === 'unknown'), 'The runtime catalog omits the manual-only model-invocation restriction.');
-    assert.equal(skillLists, beforeInventoryLists, 'Inventory reads do not reload the skill provider.');
+    assert.ok(skillLists - beforeInventoryLists <= 1, 'Inventory reads cause at most the one-time lazy catalog listing and never reload it.');
     return inventory;
   };
   const initialInventory = await readInventory();
   const initialComparison = compareCapabilities(initialInventory, initialMcpSnapshot);
-  assert.equal(initialComparison.rows.length, 4);
-  assert.ok(initialComparison.rows.every(row => row.source === '' && !row.observed && row.count === 0));
+  const initialRows = initialComparison.rows.filter(row => row.name !== 'trace');
+  assert.equal(initialRows.length, 4);
+  assert.ok(initialRows.every(row => row.source === '' && !row.observed && row.count === 0));
   assert.ok(initialComparison.rows.filter(row => row.kind === 'tool').every(row => row.current === 'available'));
-  assert.ok(initialComparison.rows.filter(row => row.kind === 'skill').every(row => row.current === 'listed' && row.modelInvocable === 'unknown'));
+  assert.ok(initialRows.filter(row => row.kind === 'skill').every(row => row.current === 'listed' && row.modelInvocable === 'unknown'));
   await readInventory();
   assert.equal((await fetch(mcpPanel.url + 'capabilities', { method: 'HEAD' })).status, 200);
   assert.equal(mcpRequests, beforeMetadata, 'Trace inventory refresh never starts or calls an MCP service.');
@@ -883,7 +894,10 @@ try {
   assert.equal(skillReads, 1);
   assert.equal(requests, 12, 'Comparing observed use does not ask a model to interpret it.');
   const comparison = compareCapabilities(observedInventory, mcpSnapshot);
-  assert.equal(comparison.rows.length, 4);
+  // Runtime 1.0.115 also lists the Trace plugin's own launch skill; it is listed and never observed here.
+  const pluginSkillRows = comparison.rows.filter(row => row.name === 'trace');
+  assert.ok(pluginSkillRows.length <= 1 && pluginSkillRows.every(row => row.kind === 'skill' && row.current === 'listed' && !row.observed && row.count === 0));
+  assert.equal(comparison.rows.length - pluginSkillRows.length, 4);
   for (const tool of mcpMetadata.tools) {
     const row = comparison.rows.find(row => row.kind === 'tool' && row.name === tool.name);
     assert.equal(row.source, '');
@@ -998,7 +1012,7 @@ try {
   ];
   retrievalFixture = { calls, responses: 0, allowCalls: false };
   const retrievalPermissions = [];
-  session = await client.createSession({ workingDirectory: retrievalDirectory, configDirectory: home,
+  session = await createFixtureSession({ workingDirectory: retrievalDirectory, configDirectory: home,
     availableTools: ['view', 'grep'], requestExtensions: true, requestCanvasRenderer: true,
     extensionSdkPath: sdkDirectory, pluginDirectories: [root], enableConfigDiscovery: false,
     onPermissionRequest: request => {
@@ -1130,7 +1144,7 @@ try {
   // A seventh owned session verifies nested handoffs through actual joined Trace evidence.
   retrievalFixture = undefined;
   nestedFixture = { responses: 0, allowCalls: false };
-  session = await client.createSession({ workingDirectory: project, configDirectory: home,
+  session = await createFixtureSession({ workingDirectory: project, configDirectory: home,
     availableTools: ['builtin:task'], requestExtensions: true, requestCanvasRenderer: true,
     extensionSdkPath: sdkDirectory, pluginDirectories: [root], enableConfigDiscovery: false, skipCustomInstructions: true,
     customAgents: [
@@ -1209,7 +1223,7 @@ try {
   validationFixture = { responses: 0, allowCalls: false, permissions: 0,
     command: 'node --test validation.test.mjs', callId: 'fixture-validation-call' };
   await writeFile(join(project, 'validation.test.mjs'), "import {test} from 'node:test'; import assert from 'node:assert/strict'; test('owned deliberately failing fixture',()=>assert.equal(1,2));\n");
-  session = await client.createSession({ workingDirectory: project, configDirectory: home,
+  session = await createFixtureSession({ workingDirectory: project, configDirectory: home,
     availableTools: ['builtin:powershell'], requestExtensions: true, requestCanvasRenderer: true,
     extensionSdkPath: sdkDirectory, pluginDirectories: [root], enableConfigDiscovery: false, skipCustomInstructions: true,
     onPermissionRequest: request => {

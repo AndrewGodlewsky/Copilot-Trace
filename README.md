@@ -1,6 +1,6 @@
 # Trace
 
-Current version: **0.1.54**
+Current version: **0.1.55**
 
 A GitHub Copilot desktop plugin for understanding the activity inside your current chat. `/trace` opens a live timeline with turn markers and expandable recorded evidence. General explanations describe what events mean. Inside a failed event, **Investigate** can request a short possible explanation based on the evidence you inspect.
 
@@ -229,7 +229,7 @@ $env:COPILOT_CLI_PATH = 'C:\path\to\installed\copilot.exe'
 npm run e2e
 ```
 
-For the installation inspected during setup, use `copilot.exe` beside the `copilot-sdk` directory. The lower-level `copilot-runtime.exe` failed extension startup with "No extension launch provider is registered". See [runtime selection](docs/copilot-integration.md#runtime-and-plugin-layout).
+Use `copilot.exe` beside the matching `copilot-sdk` directory. Desktop app 1.5.0 installs that pair under `%LOCALAPPDATA%\copilot-sdk\cli\<version>\` (for example `1.0.115-7`); earlier builds used `%LOCALAPPDATA%\github-copilot-sdk\cli\`. The lower-level `copilot-runtime.exe` failed extension startup with "No extension launch provider is registered". See [runtime selection](docs/copilot-integration.md#runtime-and-plugin-layout).
 
 The fixture checks native SDK registration, plugin ownership, actual session history and live event delivery, opening/reopening/closing and local assets. That phase requires zero model requests. It then sends three synthetic inputs to a loopback provider with fixed local responses, checking actual delivery and interaction fields against Trace's projections. A second disposable session allows only the task tool and two configured agents with no tools; four additional fixed responses verify distinct agent identities, parent invocation links and recorded overlap. Two further disposable sessions allow only PowerShell and use three fixed responses to verify denied/approved writes to owned temporary files, action-stage links, pending-permission uncertainty and permission request differences between live delivery and history. A fifth session uses two owned loopback MCP fixtures and two fixed responses to verify distinct provider identities despite identical tool titles; metadata reads and opening Trace add no server calls or inference. All phases use a disposable Copilot home, no paid inference and no existing chat. The fixture does not operate a browser or install into your profile. Unit fixtures cover additional event and attribution cases; fixed responses do not establish real model quality or autonomous tool/skill choices.
 

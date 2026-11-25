@@ -10,9 +10,19 @@ export function hostRuntime(executable = process.execPath, argv = process.argv, 
     !env.COPILOT_SDK_PATH || !Number.isSafeInteger(parentPid) || parentPid <= 0 || String(parentPid) !== env.COPILOT_EXTENSION_PARENT_PID) throw problem('Investigation requires the host-paired Copilot runtime. Reopen Trace in an updated Copilot app.');
   return executable;
 }
+// SDK 1.0.115 replaced RuntimeConnection.forStdio with forSpawnedStdio and moved the child's env and working
+// directory from CopilotClientOptions (now rejected there) onto the connection. Earlier SDKs take them on the
+// client. Returns the client options for either generation, or null when neither factory exists.
+export function isolatedRuntimeOptions(sdk, { path, args, env, workingDirectory }) {
+  const factories = sdk?.RuntimeConnection;
+  if (typeof factories?.forSpawnedStdio === 'function') return { connection: factories.forSpawnedStdio({ path, args, env, workingDirectory }) };
+  if (typeof factories?.forStdio === 'function') return { connection: factories.forStdio({ path, args }), env, workingDirectory };
+  return null;
+}
 async function desktopRuntime() {
+  // Both package names resolve on current runtimes; earlier runtimes resolve only @github/copilot-sdk.
   const path = await realpath(hostRuntime()), sdk = await import('@github/copilot-sdk');
-  if (typeof sdk.CopilotClient !== 'function' || typeof sdk.RuntimeConnection?.forStdio !== 'function') throw problem('This Copilot SDK cannot create an isolated investigation.');
+  if (typeof sdk.CopilotClient !== 'function' || !['forSpawnedStdio', 'forStdio'].some(name => typeof sdk.RuntimeConnection?.[name] === 'function')) throw problem('This Copilot SDK cannot create an isolated investigation.');
   return { sdk, path };
 }
 export function runtimeEnvironment(source = process.env) {
@@ -111,9 +121,9 @@ export function createOwnedHelper(parent, { store, runtime = desktopRuntime, tim
         await store.receipt({ ...pendingReceipt, recovery: basename(directory) });
       });
       const workspace = join(directory, 'workspace'), home = join(directory, 'home');
-      client = new paired.sdk.CopilotClient({ mode: 'empty', workingDirectory: workspace, baseDirectory: home,
-        connection: paired.sdk.RuntimeConnection.forStdio({ path: paired.path, args: ['--no-auto-update'] }),
-        env: runtimeEnvironment(), useLoggedInUser: true, builtinPluginDirectories: [], logLevel: 'error' });
+      client = new paired.sdk.CopilotClient({ mode: 'empty', baseDirectory: home,
+        ...isolatedRuntimeOptions(paired.sdk, { path: paired.path, args: ['--no-auto-update'], env: runtimeEnvironment(), workingDirectory: workspace }),
+        useLoggedInUser: true, builtinPluginDirectories: [], logLevel: 'error' });
       await step('Starting isolated runtime', () => client.start());
       const sessionId = randomUUID();
       session = await step('Creating tool-free investigation', () => client.createSession({

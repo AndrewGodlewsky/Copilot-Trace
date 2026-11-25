@@ -1,5 +1,9 @@
 [
   {
+    "version": "0.1.55",
+    "summary": "Works with the updated Copilot app (SDK 1.0.115). Investigate a failure starts its separate helper again; the live timeline is unchanged."
+  },
+  {
     "version": "0.1.54",
     "summary": "Trace opens long chats much faster and keeps the panel responsive under heavy activity. Nothing you see changes; only the work behind it is lighter."
   },
